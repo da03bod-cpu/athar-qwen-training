@@ -1,0 +1,6 @@
+{
+  "input": {
+    "type": "advisory_match",
+    "preflight": true
+  }
+}

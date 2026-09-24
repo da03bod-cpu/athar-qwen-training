@@ -1,0 +1,37 @@
+{
+  "input": {
+    "type": "advisory_consultation",
+    "run_id": "RUN-001",
+    "consultation_id": 42,
+    "topic": "interventions",
+    "input": {
+      "selected_advisor_ids": [
+        "AOS-SP-08",
+        "AOS-SP-13"
+      ],
+      "organization": {
+        "name": "TEST ORG"
+      },
+      "programs": [],
+      "advisors": [
+        {
+          "id": 101,
+          "model_advisor_id": "AOS-SP-08",
+          "name": "مستشار التخطيط الاستراتيجي",
+          "title": "Strategic Planning",
+          "capabilities": []
+        },
+        {
+          "id": 106,
+          "model_advisor_id": "AOS-SP-13",
+          "name": "مستشار المحافظ والبرامج والمشاريع",
+          "title": "Portfolio, Program & Project",
+          "capabilities": []
+        }
+      ],
+      "track": {},
+      "goal": {},
+      "impact_map": {}
+    }
+  }
+}
