@@ -16415,16 +16415,18 @@ def _clone_specialist_learning_source(
     if not _real_adapter_checkpoint(
         source_path
     ):
-        raise RuntimeError(
-            "No real Specialist adapter was downloaded. "
-            "Expected specialist-v2 or specialist."
+        # Disaster-recovery mode: the deleted GitHub organization took the
+        # historical LFS objects with it. We still have the complete balanced
+        # all-35 training data, so build a fresh Specialist V2 LoRA directly
+        # from Qwen3-14B instead of blocking on the missing V1/V2 adapter.
+        source_path = None
+        source_version = "base-qwen3-recovery"
+    else:
+        source_version = (
+            "specialist-v2"
+            if source_path == v2_path
+            else "specialist"
         )
-
-    source_version = (
-        "specialist-v2"
-        if source_path == v2_path
-        else "specialist"
-    )
 
     return (
         repo_dir,
@@ -16558,8 +16560,18 @@ def _write_specialist_v2_config(
         "strict: false",
         "chat_template: qwen3",
         "",
-        f"lora_model_dir: {source_adapter}",
-        "",
+    ]
+
+    # When the original Git LFS adapters are gone, source_adapter is None and
+    # Axolotl creates a brand-new QLoRA adapter on Qwen3-14B. Otherwise we keep
+    # the normal continual-learning behavior and refine the recovered adapter.
+    if source_adapter:
+        lines.extend([
+            f"lora_model_dir: {source_adapter}",
+            "",
+        ])
+
+    lines.extend([
         "datasets:",
         f"  - path: {dataset_info['train_path']}",
         "    ds_type: json",
@@ -16569,7 +16581,7 @@ def _write_specialist_v2_config(
         "    roles_to_train:",
         "      - assistant",
         "    train_on_eos: turn",
-    ]
+    ])
 
     if mode == "full":
         lines.extend([
@@ -17236,6 +17248,7 @@ def train_specialist_v2(job_input):
             "mode": mode,
             "source_adapter": source_version,
             "source_adapter_path": source_adapter,
+            "recovery_from_base": source_adapter is None,
             "target_adapter": (
                 SPECIALIST_V2_TARGET_REL
             ),
@@ -17424,6 +17437,307 @@ def train_specialist_v2(job_input):
 
         return result
 
+    finally:
+        _SPECIALIST_V2_TRAINING_LOCK.release()
+
+
+
+
+def _write_meta_recovery_config(repo_dir, work_dir, mode, gpu_profile):
+    """Create a fresh Meta QLoRA config from the recovered gold dataset."""
+    output_dir = os.path.join(work_dir, f"output_{mode}")
+    prepared_dir = os.path.join(work_dir, f"prepared_{mode}")
+    config_path = os.path.join(work_dir, f"meta_recovery_{mode}.yaml")
+    bf16 = bool(gpu_profile["bf16_supported"])
+    constrained = bool(gpu_profile["constrained_memory_mode"])
+
+    train_path = os.path.join(repo_dir, "data", "train_meta_balanced.jsonl")
+    validation_path = os.path.join(repo_dir, "data", "validation_meta.jsonl")
+    if not os.path.isfile(train_path):
+        raise RuntimeError(f"Recovered Meta train data not found: {train_path}")
+    if mode == "full" and not os.path.isfile(validation_path):
+        raise RuntimeError(f"Recovered Meta validation data not found: {validation_path}")
+
+    lines = [
+        "base_model: Qwen/Qwen3-14B",
+        "strict: false",
+        "chat_template: qwen3",
+        "",
+        "datasets:",
+        f"  - path: {train_path}",
+        "    ds_type: json",
+        "    split: train",
+        "    type: chat_template",
+        "    field_messages: messages",
+        "    roles_to_train:",
+        "      - assistant",
+        "    train_on_eos: turn",
+    ]
+    if mode == "full":
+        lines.extend([
+            "",
+            "test_datasets:",
+            f"  - path: {validation_path}",
+            "    ds_type: json",
+            "    split: train",
+            "    type: chat_template",
+            "    field_messages: messages",
+            "    roles_to_train:",
+            "      - assistant",
+            "    train_on_eos: turn",
+        ])
+
+    lines.extend([
+        "",
+        "dataset_exact_deduplication: true",
+        f"dataset_prepared_path: {prepared_dir}",
+        f"output_dir: {output_dir}",
+        "sequence_len: 2048",
+        "sample_packing: false",
+        "eval_sample_packing: false",
+        "load_in_4bit: true",
+        "adapter: qlora",
+        "lora_r: 16",
+        "lora_alpha: 32",
+        "lora_dropout: 0.0",
+        "lora_target_modules:",
+        "  - q_proj",
+        "  - k_proj",
+        "  - v_proj",
+        "  - o_proj",
+        "  - down_proj",
+        "  - up_proj",
+        "lora_qkv_kernel: true",
+        "lora_o_kernel: true",
+        "lora_mlp_kernel: true",
+        "embeddings_skip_upcast: true",
+        f"bf16: {'true' if bf16 else 'false'}",
+        f"fp16: {'false' if bf16 else 'true'}",
+        "tf32: true",
+        "attn_implementation: flash_attention_2",
+        "gradient_checkpointing: true",
+        "gradient_checkpointing_kwargs:",
+        "  use_reentrant: false",
+    ])
+    if constrained:
+        lines.extend([
+            "activation_offloading: hidden_states",
+            "selective_checkpointing:",
+            "  save:",
+            "    - attention",
+            "  offload: true",
+        ])
+    else:
+        lines.append("activation_offloading: false")
+
+    lines.extend([
+        "plugins:",
+        "  - axolotl.integrations.liger.LigerPlugin",
+        "liger_fused_linear_cross_entropy: true",
+        "liger_rope: false",
+        "liger_rms_norm: false",
+        "liger_glu_activation: false",
+        "liger_layer_norm: false",
+        "micro_batch_size: 1",
+        "eval_batch_size: 1",
+    ])
+    if mode == "smoke":
+        lines.extend([
+            "gradient_accumulation_steps: 1",
+            "max_steps: 1",
+            'eval_strategy: "no"',
+            'save_strategy: "no"',
+        ])
+    else:
+        lines.extend([
+            "gradient_accumulation_steps: 8",
+            "num_epochs: 4",
+        ])
+    lines.extend([
+        "optimizer: paged_adamw_8bit",
+        "learning_rate: 0.0001",
+        "lr_scheduler: cosine",
+        "warmup_ratio: 0.1",
+        "weight_decay: 0.0",
+        "max_grad_norm: 0.1",
+        "logging_steps: 1",
+    ])
+    if mode == "full":
+        lines.extend([
+            "evals_per_epoch: 2",
+            "saves_per_epoch: 1",
+            "save_total_limit: 2",
+        ])
+    lines.extend([
+        "seed: 42",
+        "dataloader_num_workers: 2",
+        "dataloader_prefetch_factor: 4",
+        "dataloader_pin_memory: true",
+        "",
+    ])
+
+    with open(config_path, "w", encoding="utf-8") as file:
+        file.write("\n".join(lines))
+    return {
+        "config_path": config_path,
+        "output_dir": output_dir,
+        "prepared_dir": prepared_dir,
+        "train_path": train_path,
+        "validation_path": validation_path,
+    }
+
+
+def _push_recovered_adapter(repo_dir, adapter_dir, target_rel, label, env):
+    """Publish a recovered LoRA through Git LFS to the new repository."""
+    _check_github_publish_access(repo_dir, env)
+    destination = os.path.join(repo_dir, target_rel)
+    shutil.rmtree(destination, ignore_errors=True)
+    os.makedirs(destination, exist_ok=True)
+
+    for name in ("adapter_model.safetensors", "adapter_config.json"):
+        source = os.path.join(adapter_dir, name)
+        if not os.path.isfile(source):
+            raise RuntimeError(f"Recovery output missing {name}: {source}")
+        shutil.copy2(source, os.path.join(destination, name))
+
+    for name in (
+        "README.md", "tokenizer_config.json", "special_tokens_map.json",
+        "chat_template.jinja",
+    ):
+        source = os.path.join(adapter_dir, name)
+        if os.path.isfile(source):
+            shutil.copy2(source, os.path.join(destination, name))
+
+    run_command(["git", "lfs", "track", "*.safetensors"], cwd=repo_dir, env=env)
+    run_command(["git", "config", "user.name", GIT_USER_NAME], cwd=repo_dir, env=env)
+    run_command(["git", "config", "user.email", GIT_USER_EMAIL], cwd=repo_dir, env=env)
+    run_command(["git", "add", ".gitattributes", target_rel], cwd=repo_dir, env=env)
+
+    status = subprocess.run(
+        ["git", "diff", "--cached", "--quiet"], cwd=repo_dir, env=env
+    )
+    if status.returncode == 0:
+        return "No recovered adapter changes detected"
+
+    run_command(
+        ["git", "commit", "-m", f"Recover {label} adapter on RunPod Serverless"],
+        cwd=repo_dir, env=env,
+    )
+    run_command(
+        ["git", "pull", "--rebase", "origin", GITHUB_BRANCH],
+        cwd=repo_dir, env=env, stream=True,
+    )
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            run_command(
+                ["git", "push", "origin", GITHUB_BRANCH],
+                cwd=repo_dir, env=env, stream=True,
+            )
+            last_error = None
+            break
+        except Exception as exc:
+            last_error = exc
+            if attempt < 3:
+                time.sleep(5 * attempt)
+                run_command(
+                    ["git", "pull", "--rebase", "origin", GITHUB_BRANCH],
+                    cwd=repo_dir, env=env, stream=True,
+                )
+    if last_error is not None:
+        raise RuntimeError(f"{label} recovery trained but GitHub publish failed: {last_error}")
+    return run_command(["git", "rev-parse", "HEAD"], cwd=repo_dir, env=env).strip()
+
+
+def recover_meta_adapter(job_input):
+    """Rebuild the deleted Meta LoRA from the recovered Meta training dataset."""
+    if not _SPECIALIST_V2_TRAINING_LOCK.acquire(blocking=False):
+        return {
+            "status": "busy",
+            "type": "recover_meta_adapter",
+            "message": "Another GPU training job is already running in this worker.",
+        }
+    try:
+        token = os.environ.get("GITHUB_TOKEN")
+        if not token:
+            raise RuntimeError("GITHUB_TOKEN is required for recover_meta_adapter.")
+        mode = str(job_input.get("mode") or "smoke").strip().lower()
+        if mode not in {"smoke", "full"}:
+            raise ValueError("mode must be 'smoke' or 'full'.")
+
+        gpu_profile = _training_gpu_profile()
+        runtime_check = _check_training_runtime()
+        repo_dir, git_env = clone_repo_without_lfs(
+            token, repo_dir="/tmp/athar_meta_recovery_repo"
+        )
+        run_command(["git", "lfs", "install", "--local"], cwd=repo_dir, env=git_env)
+        github_publish = None
+        if mode == "full" or bool(job_input.get("check_github_write", False)):
+            github_publish = _check_github_publish_access(repo_dir, git_env)
+
+        work_dir = "/tmp/athar_meta_recovery_work"
+        shutil.rmtree(work_dir, ignore_errors=True)
+        os.makedirs(work_dir, exist_ok=True)
+        config_info = _write_meta_recovery_config(
+            repo_dir, work_dir, mode, gpu_profile
+        )
+
+        preflight = {
+            "status": "meta_recovery_preflight_ok",
+            "type": "recover_meta_adapter",
+            "mode": mode,
+            "source": "Qwen/Qwen3-14B",
+            "target_adapter": "checkpoints/meta",
+            "gpu": gpu_profile,
+            "training_runtime": runtime_check,
+            "config_path": config_info["config_path"],
+            "github_publish": github_publish,
+        }
+        if job_input.get("preflight", False):
+            return preflight
+
+        _release_inference_models_for_training()
+        shutil.rmtree(config_info["output_dir"], ignore_errors=True)
+        shutil.rmtree(config_info["prepared_dir"], ignore_errors=True)
+        accelerate = _axolotl_binary("accelerate")
+        cmd = [accelerate, "launch", "-m", "axolotl.cli.train", config_info["config_path"]]
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+        started = time.time()
+        log_tail = run_command(cmd, cwd=repo_dir, env=env, stream=True)
+        elapsed = round(time.time() - started, 2)
+        adapter_dir = _find_adapter_output(config_info["output_dir"])
+        adapter_file = os.path.join(adapter_dir, "adapter_model.safetensors")
+        result = {
+            "status": "completed",
+            "type": "recover_meta_adapter",
+            "mode": mode,
+            "source": "Qwen/Qwen3-14B",
+            "training_seconds": elapsed,
+            "adapter_dir": adapter_dir,
+            "adapter_size_mb": round(os.path.getsize(adapter_file) / 1024 / 1024, 2),
+            "log_tail": log_tail[-8000:],
+        }
+        if mode == "smoke":
+            result["activated"] = False
+            result["next_step"] = "Smoke succeeded. Run mode='full' to publish checkpoints/meta."
+            return result
+
+        commit_sha = _push_recovered_adapter(
+            repo_dir, adapter_dir, "checkpoints/meta", "Meta", git_env
+        )
+        global _COUNCIL_ADAPTER_PATHS
+        global _COUNCIL_ENGINE
+        _COUNCIL_ADAPTER_PATHS = None
+        _COUNCIL_ENGINE = None
+        result.update({
+            "activated": True,
+            "saved_to": "checkpoints/meta",
+            "github_commit": commit_sha,
+            "next_step": "Meta recovered. Recover/publish Specialist V2, then rerun advisory_consultation.",
+        })
+        return result
     finally:
         _SPECIALIST_V2_TRAINING_LOCK.release()
 
@@ -17671,6 +17985,11 @@ def handler(job):
     # ---------------------------------------------------------------
     if request_type == "advisory_feedback":
         return advisory_feedback(
+            job_input
+        )
+
+    if request_type == "recover_meta_adapter":
+        return recover_meta_adapter(
             job_input
         )
 
