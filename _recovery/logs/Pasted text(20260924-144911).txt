@@ -1,0 +1,198 @@
+Thu Sep 24 2026 17:38:04 GMT+0300 (Eastern European Summer Time) --- Starting Serverless Worker |  Version 1.12.0 ---
+Thu Sep 24 2026 17:38:05 GMT+0300 (Eastern European Summer Time) {"requestId": null, "message": "Running 7 fitness check(s)...", "level": "INFO"}
+Thu Sep 24 2026 17:38:06 GMT+0300 (Eastern European Summer Time) {"requestId": null, "message": "GPU binary test passed: 1 GPU(s) healthy (CUDA 13.0)", "level": "INFO"}
+Thu Sep 24 2026 17:38:06 GMT+0300 (Eastern European Summer Time) {"requestId": null, "message": "Memory check passed: 445.70GB available (of 503.51GB total)", "level": "INFO"}
+Thu Sep 24 2026 17:38:06 GMT+0300 (Eastern European Summer Time) {"requestId": null, "message": "Disk space check passed: 69.98GB free (100.0% available)", "level": "INFO"}
+Thu Sep 24 2026 17:38:06 GMT+0300 (Eastern European Summer Time) {"requestId": null, "message": "Network connectivity passed: Connected to 8.8.8.8 (6ms)", "level": "INFO"}
+Thu Sep 24 2026 17:38:06 GMT+0300 (Eastern European Summer Time) {"requestId": null, "message": "CUDA version check passed: 13.0 (minimum: 11.8)", "level": "INFO"}
+Thu Sep 24 2026 17:38:08 GMT+0300 (Eastern European Summer Time) {"requestId": null, "message": "CUDA initialization passed: 1 device(s) initialized successfully", "level": "INFO"}
+Thu Sep 24 2026 17:38:08 GMT+0300 (Eastern European Summer Time) {"requestId": null, "message": "GPU compute benchmark passed: Matrix multiply completed in 71ms", "level": "INFO"}
+Thu Sep 24 2026 17:38:08 GMT+0300 (Eastern European Summer Time) {"requestId": null, "message": "All fitness checks passed. (2914.26ms)", "level": "INFO"}
+Thu Sep 24 2026 17:38:08 GMT+0300 (Eastern European Summer Time) {"requestId": null, "message": "Jobs in queue: 1", "level": "INFO"}
+Thu Sep 24 2026 17:38:08 GMT+0300 (Eastern European Summer Time) {"requestId": null, "message": "Jobs in progress: 1", "level": "INFO"}
+Thu Sep 24 2026 17:38:08 GMT+0300 (Eastern European Summer Time) {"requestId": "4141ca42-8601-4172-bc78-cd8369217d1c-e1", "message": "Started.", "level": "INFO"}
+Thu Sep 24 2026 17:38:10 GMT+0300 (Eastern European Summer Time) Loading Qwen3-14B for rich AI advisor routing...
+Thu Sep 24 2026 17:38:14 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:14,770 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-14B/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+Thu Sep 24 2026 17:38:14 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:14,775 HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-14B/40c069824f4251a91eefaf281ebe4c544efd3e18/config.json "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:14 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:14,783 HTTP Request: GET https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-14B/40c069824f4251a91eefaf281ebe4c544efd3e18/config.json "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:14 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:14,919 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-14B/resolve/main/tokenizer_config.json "HTTP/1.1 307 Temporary Redirect"
+Thu Sep 24 2026 17:38:14 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:14,925 HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-14B/40c069824f4251a91eefaf281ebe4c544efd3e18/tokenizer_config.json "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:14 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:14,932 HTTP Request: GET https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-14B/40c069824f4251a91eefaf281ebe4c544efd3e18/tokenizer_config.json "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:15 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:15,065 HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-14B/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+Thu Sep 24 2026 17:38:15 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:15,195 HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-14B/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:15 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:15,321 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-14B/resolve/main/vocab.json "HTTP/1.1 307 Temporary Redirect"
+Thu Sep 24 2026 17:38:15 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:15,327 HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-14B/40c069824f4251a91eefaf281ebe4c544efd3e18/vocab.json "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:15 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:15,334 HTTP Request: GET https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-14B/40c069824f4251a91eefaf281ebe4c544efd3e18/vocab.json "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:15 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:15,497 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-14B/resolve/main/merges.txt "HTTP/1.1 307 Temporary Redirect"
+Thu Sep 24 2026 17:38:15 GMT+0300 (Eastern European Summer Time) Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Thu Sep 24 2026 17:38:15 GMT+0300 (Eastern European Summer Time) _http.py            :904  2026-09-24 14:38:15,498 Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Thu Sep 24 2026 17:38:15 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:15,503 HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-14B/40c069824f4251a91eefaf281ebe4c544efd3e18/merges.txt "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:15 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:15,509 HTTP Request: GET https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-14B/40c069824f4251a91eefaf281ebe4c544efd3e18/merges.txt "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:15 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:15,656 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-14B/resolve/main/tokenizer.json "HTTP/1.1 302 Found"
+Thu Sep 24 2026 17:38:15 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:15,787 HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-14B/xet-read-token/40c069824f4251a91eefaf281ebe4c544efd3e18 "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:16 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:16,931 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-14B/resolve/main/added_tokens.json "HTTP/1.1 404 Not Found"
+Thu Sep 24 2026 17:38:17 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:17,069 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-14B/resolve/main/special_tokens_map.json "HTTP/1.1 404 Not Found"
+Thu Sep 24 2026 17:38:17 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:17,192 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-14B/resolve/main/chat_template.jinja "HTTP/1.1 404 Not Found"
+Thu Sep 24 2026 17:38:18 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:18,061 HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-14B "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:18 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:18,189 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-14B/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+Thu Sep 24 2026 17:38:18 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:18,195 HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-14B/40c069824f4251a91eefaf281ebe4c544efd3e18/config.json "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:18 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:18,322 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-14B/resolve/main/adapter_config.json "HTTP/1.1 404 Not Found"
+Thu Sep 24 2026 17:38:18 GMT+0300 (Eastern European Summer Time) [transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+Thu Sep 24 2026 17:38:18 GMT+0300 (Eastern European Summer Time) W0924 14:38:18.707000 51 torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+Thu Sep 24 2026 17:38:18 GMT+0300 (Eastern European Summer Time) W0924 14:38:18.756000 51 torch/utils/_pytree.py:630] <enum 'ScaleCalculationMode'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+Thu Sep 24 2026 17:38:19 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:19,143 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-14B/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+Thu Sep 24 2026 17:38:19 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:19,150 HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-14B/40c069824f4251a91eefaf281ebe4c544efd3e18/config.json "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:20 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:20,099 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-14B/resolve/main/model.safetensors "HTTP/1.1 404 Not Found"
+Thu Sep 24 2026 17:38:20 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:20,233 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-14B/resolve/main/model.safetensors.index.json "HTTP/1.1 307 Temporary Redirect"
+Thu Sep 24 2026 17:38:20 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:20,239 HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-14B/40c069824f4251a91eefaf281ebe4c544efd3e18/model.safetensors.index.json "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:20 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:20,245 HTTP Request: GET https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-14B/40c069824f4251a91eefaf281ebe4c544efd3e18/model.safetensors.index.json "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:20 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:20,377 HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-14B/revision/main "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:20 GMT+0300 (Eastern European Summer Time) 
+Fetching 8 files:   0%|          | 0/8 [00:00<?, ?it/s]_client.py          :1025 2026-09-24 14:38:20,511 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-14B/resolve/40c069824f4251a91eefaf281ebe4c544efd3e18/model-00001-of-00008.safetensors "HTTP/1.1 302 Found"
+Thu Sep 24 2026 17:38:24 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:24,527 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-14B/resolve/40c069824f4251a91eefaf281ebe4c544efd3e18/model-00005-of-00008.safetensors "HTTP/1.1 302 Found"
+Thu Sep 24 2026 17:38:24 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:24,531 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-14B/resolve/40c069824f4251a91eefaf281ebe4c544efd3e18/model-00004-of-00008.safetensors "HTTP/1.1 302 Found"
+Thu Sep 24 2026 17:38:24 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:24,539 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-14B/resolve/40c069824f4251a91eefaf281ebe4c544efd3e18/model-00002-of-00008.safetensors "HTTP/1.1 302 Found"
+Thu Sep 24 2026 17:38:24 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:24,548 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-14B/resolve/40c069824f4251a91eefaf281ebe4c544efd3e18/model-00007-of-00008.safetensors "HTTP/1.1 302 Found"
+Thu Sep 24 2026 17:38:24 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:24,572 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-14B/resolve/40c069824f4251a91eefaf281ebe4c544efd3e18/model-00003-of-00008.safetensors "HTTP/1.1 302 Found"
+Thu Sep 24 2026 17:38:24 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:24,574 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-14B/resolve/40c069824f4251a91eefaf281ebe4c544efd3e18/model-00006-of-00008.safetensors "HTTP/1.1 302 Found"
+Thu Sep 24 2026 17:38:24 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:24,577 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-14B/resolve/40c069824f4251a91eefaf281ebe4c544efd3e18/model-00008-of-00008.safetensors "HTTP/1.1 302 Found"
+Thu Sep 24 2026 17:38:49 GMT+0300 (Eastern European Summer Time) 
+Fetching 8 files:  12%|█▎        | 1/8 [00:21<02:30, 21.55s/it]
+Fetching 8 files:  25%|██▌       | 2/8 [00:29<01:19, 13.27s/it]
+Fetching 8 files:  62%|██████▎   | 5/8 [00:29<00:11,  3.84s/it]
+Fetching 8 files: 100%|██████████| 8/8 [00:29<00:00,  3.67s/it]
+Thu Sep 24 2026 17:38:49 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:49,953 HTTP Request: GET https://huggingface.co/api/organizations/kernels-community/overview "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:50 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:50,081 HTTP Request: GET https://huggingface.co/api/kernels/kernels-community/flash-attn2/refs "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:50 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:50,206 HTTP Request: HEAD https://huggingface.co/kernels/kernels-community/flash-attn2/resolve/81fb77c12b2ad5d69380669b46739d5868614502/kernel-status.toml "HTTP/1.1 404 Not Found"
+Thu Sep 24 2026 17:38:50 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:50,332 HTTP Request: GET https://huggingface.co/api/kernels/kernels-community/flash-attn2/tree/81fb77c12b2ad5d69380669b46739d5868614502/build?recursive=false&expand=false "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:50 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:50,460 HTTP Request: HEAD https://huggingface.co/kernels/kernels-community/flash-attn2/resolve/81fb77c12b2ad5d69380669b46739d5868614502/build/torch-stable-abi210-cu130-x86_64-linux/metadata.json "HTTP/1.1 307 Temporary Redirect"
+Thu Sep 24 2026 17:38:50 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:50,467 HTTP Request: HEAD https://huggingface.co/api/resolve-cache/kernels/kernels-community/flash-attn2/81fb77c12b2ad5d69380669b46739d5868614502/build%2Ftorch-stable-abi210-cu130-x86_64-linux%2Fmetadata.json "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:50 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:50,475 HTTP Request: GET https://huggingface.co/api/resolve-cache/kernels/kernels-community/flash-attn2/81fb77c12b2ad5d69380669b46739d5868614502/build%2Ftorch-stable-abi210-cu130-x86_64-linux%2Fmetadata.json "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:50 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:50,633 HTTP Request: GET https://huggingface.co/api/kernels/kernels-community/flash-attn2/revision/81fb77c12b2ad5d69380669b46739d5868614502 "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:50 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:50,768 HTTP Request: GET https://huggingface.co/api/kernels/kernels-community/flash-attn2/tree/81fb77c12b2ad5d69380669b46739d5868614502?recursive=true&expand=false "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:50 GMT+0300 (Eastern European Summer Time) 
+Fetching ... files: 0it [00:00, ?it/s]_client.py          :1025 2026-09-24 14:38:50,904 HTTP Request: HEAD https://huggingface.co/kernels/kernels-community/flash-attn2/resolve/81fb77c12b2ad5d69380669b46739d5868614502/build/torch-stable-abi210-cu130-x86_64-linux/__init__.py "HTTP/1.1 307 Temporary Redirect"
+Thu Sep 24 2026 17:38:50 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:50,911 HTTP Request: HEAD https://huggingface.co/api/resolve-cache/kernels/kernels-community/flash-attn2/81fb77c12b2ad5d69380669b46739d5868614502/build%2Ftorch-stable-abi210-cu130-x86_64-linux%2F__init__.py "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:50 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:50,913 HTTP Request: HEAD https://huggingface.co/kernels/kernels-community/flash-attn2/resolve/81fb77c12b2ad5d69380669b46739d5868614502/build/torch-stable-abi210-cu130-x86_64-linux/_ops.py "HTTP/1.1 307 Temporary Redirect"
+Thu Sep 24 2026 17:38:50 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:50,916 HTTP Request: HEAD https://huggingface.co/kernels/kernels-community/flash-attn2/resolve/81fb77c12b2ad5d69380669b46739d5868614502/build/torch-stable-abi210-cu130-x86_64-linux/_flash_attn2_cuda_89d4054.abi3.so "HTTP/1.1 302 Found"
+Thu Sep 24 2026 17:38:50 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:50,919 HTTP Request: HEAD https://huggingface.co/kernels/kernels-community/flash-attn2/resolve/81fb77c12b2ad5d69380669b46739d5868614502/build/torch-stable-abi210-cu130-x86_64-linux/metadata.json.sigstore "HTTP/1.1 307 Temporary Redirect"
+Thu Sep 24 2026 17:38:50 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:50,922 HTTP Request: GET https://huggingface.co/api/resolve-cache/kernels/kernels-community/flash-attn2/81fb77c12b2ad5d69380669b46739d5868614502/build%2Ftorch-stable-abi210-cu130-x86_64-linux%2F__init__.py "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:50 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:50,923 HTTP Request: HEAD https://huggingface.co/api/resolve-cache/kernels/kernels-community/flash-attn2/81fb77c12b2ad5d69380669b46739d5868614502/build%2Ftorch-stable-abi210-cu130-x86_64-linux%2F_ops.py "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:50 GMT+0300 (Eastern European Summer Time) 
+Fetching ... files: 1it [00:00,  6.77it/s]_client.py          :1025 2026-09-24 14:38:50,926 HTTP Request: HEAD https://huggingface.co/kernels/kernels-community/flash-attn2/resolve/81fb77c12b2ad5d69380669b46739d5868614502/build/torch-stable-abi210-cu130-x86_64-linux/flash_attn_interface.py "HTTP/1.1 307 Temporary Redirect"
+Thu Sep 24 2026 17:38:50 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:50,927 HTTP Request: HEAD https://huggingface.co/api/resolve-cache/kernels/kernels-community/flash-attn2/81fb77c12b2ad5d69380669b46739d5868614502/build%2Ftorch-stable-abi210-cu130-x86_64-linux%2Fmetadata.json.sigstore "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:50 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:50,935 HTTP Request: HEAD https://huggingface.co/api/resolve-cache/kernels/kernels-community/flash-attn2/81fb77c12b2ad5d69380669b46739d5868614502/build%2Ftorch-stable-abi210-cu130-x86_64-linux%2Fflash_attn_interface.py "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:50 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:50,939 HTTP Request: GET https://huggingface.co/api/resolve-cache/kernels/kernels-community/flash-attn2/81fb77c12b2ad5d69380669b46739d5868614502/build%2Ftorch-stable-abi210-cu130-x86_64-linux%2F_ops.py "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:50 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:50,939 HTTP Request: GET https://huggingface.co/api/resolve-cache/kernels/kernels-community/flash-attn2/81fb77c12b2ad5d69380669b46739d5868614502/build%2Ftorch-stable-abi210-cu130-x86_64-linux%2Fmetadata.json.sigstore "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:50 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:50,943 HTTP Request: GET https://huggingface.co/api/resolve-cache/kernels/kernels-community/flash-attn2/81fb77c12b2ad5d69380669b46739d5868614502/build%2Ftorch-stable-abi210-cu130-x86_64-linux%2Fflash_attn_interface.py "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:51 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:38:51,046 HTTP Request: GET https://huggingface.co/api/kernels/kernels-community/flash-attn2/xet-read-token/81fb77c12b2ad5d69380669b46739d5868614502 "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:38:55 GMT+0300 (Eastern European Summer Time) 
+Fetching ... files: 2it [00:04,  2.61s/it]
+Fetching ... files: 6it [00:04,  1.34it/s]
+Thu Sep 24 2026 17:38:55 GMT+0300 (Eastern European Summer Time) [transformers] You do not have `flash_attn` installed, using `kernels-community/flash-attn2` from the `kernels` library instead!
+Thu Sep 24 2026 17:39:01 GMT+0300 (Eastern European Summer Time) 
+Loading weights:   0%|          | 0/443 [00:00<?, ?it/s]
+Loading weights:   0%|          | 1/443 [00:00<02:43,  2.71it/s]
+Loading weights:   0%|          | 2/443 [00:00<03:22,  2.18it/s]
+Loading weights:   1%|          | 4/443 [00:01<01:35,  4.60it/s]
+Loading weights:   1%|▏         | 6/443 [00:01<01:03,  6.89it/s]
+Loading weights:   4%|▎         | 16/443 [00:01<00:17, 23.93it/s]
+Loading weights:   6%|▌         | 27/443 [00:01<00:10, 39.94it/s]
+Loading weights:   8%|▊         | 37/443 [00:01<00:07, 52.52it/s]
+Loading weights:  11%|█         | 48/443 [00:01<00:06, 64.31it/s]
+Loading weights:  13%|█▎        | 59/443 [00:01<00:05, 72.45it/s]
+Loading weights:  15%|█▌        | 68/443 [00:01<00:04, 75.81it/s]
+Loading weights:  17%|█▋        | 77/443 [00:01<00:04, 78.71it/s]
+Loading weights:  19%|█▉        | 86/443 [00:02<00:04, 78.75it/s]
+Loading weights:  21%|██▏       | 95/443 [00:02<00:04, 77.86it/s]
+Loading weights:  24%|██▎       | 105/443 [00:02<00:04, 80.09it/s]
+Loading weights:  26%|██▌       | 116/443 [00:02<00:03, 84.78it/s]
+Loading weights:  29%|██▊       | 127/443 [00:02<00:03, 87.35it/s]
+Loading weights:  31%|███       | 138/443 [00:02<00:03, 90.53it/s]
+Loading weights:  34%|███▎      | 149/443 [00:02<00:03, 89.74it/s]
+Loading weights:  36%|███▌      | 160/443 [00:02<00:03, 91.81it/s]
+Loading weights:  38%|███▊      | 170/443 [00:02<00:03, 90.47it/s]
+Loading weights:  41%|████      | 181/443 [00:03<00:02, 87.63it/s]
+Loading weights:  43%|████▎     | 192/443 [00:03<00:02, 90.51it/s]
+Loading weights:  46%|████▌     | 202/443 [00:03<00:02, 88.08it/s]
+Loading weights:  48%|████▊     | 213/443 [00:03<00:02, 90.73it/s]
+Loading weights:  51%|█████     | 224/443 [00:03<00:02, 92.90it/s]
+Loading weights:  53%|█████▎    | 234/443 [00:03<00:02, 89.77it/s]
+Loading weights:  55%|█████▌    | 244/443 [00:03<00:02, 87.78it/s]
+Loading weights:  57%|█████▋    | 253/443 [00:03<00:02, 81.37it/s]
+Loading weights:  59%|█████▉    | 262/443 [00:04<00:02, 79.78it/s]
+Loading weights:  61%|██████    | 271/443 [00:04<00:02, 76.90it/s]
+Loading weights:  63%|██████▎   | 280/443 [00:04<00:02, 75.35it/s]
+Loading weights:  65%|██████▌   | 290/443 [00:04<00:01, 77.23it/s]
+Loading weights:  68%|██████▊   | 301/443 [00:04<00:01, 81.40it/s]
+Loading weights:  70%|███████   | 312/443 [00:04<00:01, 86.21it/s]
+Loading weights:  73%|███████▎  | 323/443 [00:04<00:01, 88.07it/s]
+Loading weights:  75%|███████▌  | 334/443 [00:04<00:01, 91.08it/s]
+Loading weights:  78%|███████▊  | 345/443 [00:05<00:01, 92.25it/s]
+Loading weights:  80%|████████  | 356/443 [00:05<00:00, 93.71it/s]
+Loading weights:  83%|████████▎ | 367/443 [00:05<00:00, 85.73it/s]
+Loading weights:  85%|████████▍ | 376/443 [00:05<00:00, 86.36it/s]
+Loading weights:  87%|████████▋ | 385/443 [00:05<00:00, 83.11it/s]
+Loading weights:  89%|████████▉ | 394/443 [00:05<00:00, 84.90it/s]
+Loading weights:  91%|█████████ | 403/443 [00:05<00:00, 82.40it/s]
+Loading weights:  93%|█████████▎| 413/443 [00:05<00:00, 81.16it/s]
+Loading weights:  96%|█████████▌| 424/443 [00:05<00:00, 86.28it/s]
+Loading weights:  98%|█████████▊| 435/443 [00:06<00:00, 87.82it/s]
+Loading weights: 100%|██████████| 443/443 [00:06<00:00, 72.36it/s]
+Thu Sep 24 2026 17:39:02 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:39:02,890 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-14B/resolve/main/generation_config.json "HTTP/1.1 307 Temporary Redirect"
+Thu Sep 24 2026 17:39:02 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:39:02,897 HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-14B/40c069824f4251a91eefaf281ebe4c544efd3e18/generation_config.json "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:39:02 GMT+0300 (Eastern European Summer Time) _client.py          :1025 2026-09-24 14:39:02,907 HTTP Request: GET https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-14B/40c069824f4251a91eefaf281ebe4c544efd3e18/generation_config.json "HTTP/1.1 200 OK"
+Thu Sep 24 2026 17:39:02 GMT+0300 (Eastern European Summer Time) Rich AI router ready in 52.62s
+Thu Sep 24 2026 17:39:02 GMT+0300 (Eastern European Summer Time) [all35] ===== advisor 11 started =====
+Thu Sep 24 2026 17:39:02 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train existing=0 target=1 needed=1
+Thu Sep 24 2026 17:39:02 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train batch attempt=1/4 size=1
+Thu Sep 24 2026 17:39:02 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate count=1 offset=0 start
+Thu Sep 24 2026 17:39:48 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate done seconds=45.8 complete_examples=0 raw_chars=1671
+Thu Sep 24 2026 17:39:48 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train candidate incomplete/invalid JSON; retrying
+Thu Sep 24 2026 17:39:48 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate count=1 offset=1 start
+Thu Sep 24 2026 17:40:31 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate done seconds=42.4 complete_examples=0 raw_chars=1662
+Thu Sep 24 2026 17:40:31 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train candidate incomplete/invalid JSON; retrying
+Thu Sep 24 2026 17:40:31 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate count=1 offset=2 start
+Thu Sep 24 2026 17:41:08 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate done seconds=37.8 complete_examples=0 raw_chars=1494
+Thu Sep 24 2026 17:41:08 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train candidate incomplete/invalid JSON; retrying
+Thu Sep 24 2026 17:41:08 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate count=1 offset=3 start
+Thu Sep 24 2026 17:41:51 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate done seconds=42.2 complete_examples=0 raw_chars=1544
+Thu Sep 24 2026 17:41:51 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train candidate incomplete/invalid JSON; retrying
+Thu Sep 24 2026 17:41:51 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train batch result accepted=0 rejected=0
+Thu Sep 24 2026 17:41:51 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train batch attempt=2/4 size=1
+Thu Sep 24 2026 17:41:51 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate count=1 offset=1 start
+Thu Sep 24 2026 17:42:27 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate done seconds=35.9 complete_examples=0 raw_chars=1359
+Thu Sep 24 2026 17:42:27 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train candidate incomplete/invalid JSON; retrying
+Thu Sep 24 2026 17:42:27 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate count=1 offset=2 start
+Thu Sep 24 2026 17:42:58 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate done seconds=31.7 complete_examples=0 raw_chars=1159
+Thu Sep 24 2026 17:42:58 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train candidate incomplete/invalid JSON; retrying
+Thu Sep 24 2026 17:42:58 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate count=1 offset=3 start
+Thu Sep 24 2026 17:43:31 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate done seconds=33.1 complete_examples=0 raw_chars=1133
+Thu Sep 24 2026 17:43:31 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train candidate incomplete/invalid JSON; retrying
+Thu Sep 24 2026 17:43:31 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate count=1 offset=4 start
+Thu Sep 24 2026 17:44:11 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate done seconds=39.9 complete_examples=0 raw_chars=1376
+Thu Sep 24 2026 17:44:11 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train candidate incomplete/invalid JSON; retrying
+Thu Sep 24 2026 17:44:11 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train batch result accepted=0 rejected=0
+Thu Sep 24 2026 17:44:11 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train batch attempt=3/4 size=1
+Thu Sep 24 2026 17:44:11 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate count=1 offset=2 start
+Thu Sep 24 2026 17:44:56 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate done seconds=44.8 complete_examples=0 raw_chars=1710
+Thu Sep 24 2026 17:44:56 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train candidate incomplete/invalid JSON; retrying
+Thu Sep 24 2026 17:44:56 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate count=1 offset=3 start
+Thu Sep 24 2026 17:45:36 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate done seconds=39.8 complete_examples=0 raw_chars=1524
+Thu Sep 24 2026 17:45:36 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train candidate incomplete/invalid JSON; retrying
+Thu Sep 24 2026 17:45:36 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate count=1 offset=4 start
+Thu Sep 24 2026 17:46:13 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate done seconds=36.7 complete_examples=0 raw_chars=1366
+Thu Sep 24 2026 17:46:13 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train candidate incomplete/invalid JSON; retrying
+Thu Sep 24 2026 17:46:13 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate count=1 offset=5 start
+Thu Sep 24 2026 17:46:50 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate done seconds=37.8 complete_examples=0 raw_chars=1518
+Thu Sep 24 2026 17:46:50 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train candidate incomplete/invalid JSON; retrying
+Thu Sep 24 2026 17:46:50 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train batch result accepted=0 rejected=0
+Thu Sep 24 2026 17:46:50 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train batch attempt=4/4 size=1
+Thu Sep 24 2026 17:46:50 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate count=1 offset=3 start
+Thu Sep 24 2026 17:47:24 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate done seconds=33.8 complete_examples=0 raw_chars=1437
+Thu Sep 24 2026 17:47:24 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train candidate incomplete/invalid JSON; retrying
+Thu Sep 24 2026 17:47:24 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate count=1 offset=4 start
+Thu Sep 24 2026 17:47:57 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate done seconds=32.5 complete_examples=0 raw_chars=1416
+Thu Sep 24 2026 17:47:57 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train candidate incomplete/invalid JSON; retrying
+Thu Sep 24 2026 17:47:57 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate count=1 offset=5 start
+Thu Sep 24 2026 17:48:36 GMT+0300 (Eastern European Summer Time) [all35] advisor=11 split=train generate done seconds=38.9 complete_examples=0 raw_chars=1567
