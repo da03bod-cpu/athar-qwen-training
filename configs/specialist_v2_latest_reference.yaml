@@ -1,0 +1,80 @@
+base_model: Qwen/Qwen3-14B
+strict: false
+chat_template: qwen3
+
+# Recovery note: set this to a real Specialist adapter when recovered.
+lora_model_dir: /tmp/athar_specialist_v2_repo/checkpoints/specialist
+
+datasets:
+  - path: /workspace/data/athar/data/compiled/train_specialist_v2_all35_350.jsonl
+    ds_type: json
+    split: train
+    type: chat_template
+    field_messages: messages
+    roles_to_train:
+      - assistant
+    train_on_eos: turn
+
+test_datasets:
+  - path: /workspace/data/athar/data/compiled/validation_specialist_v2_all35_70.jsonl
+    ds_type: json
+    split: train
+    type: chat_template
+    field_messages: messages
+    roles_to_train:
+      - assistant
+    train_on_eos: turn
+
+dataset_exact_deduplication: true
+dataset_prepared_path: /tmp/athar_specialist_v2_work/prepared_full
+output_dir: /tmp/athar_specialist_v2_work/output_full
+sequence_len: 10240
+excess_length_strategy: raise
+sample_packing: false
+eval_sample_packing: false
+load_in_4bit: true
+adapter: qlora
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.0
+lora_target_modules: [q_proj, k_proj, v_proj, o_proj, down_proj, up_proj]
+lora_qkv_kernel: true
+lora_o_kernel: true
+lora_mlp_kernel: true
+embeddings_skip_upcast: true
+bf16: true
+fp16: false
+tf32: true
+attn_implementation: flash_attention_2
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+activation_offloading: hidden_states
+selective_checkpointing:
+  save: [attention]
+  offload: true
+plugins:
+  - axolotl.integrations.liger.LigerPlugin
+liger_fused_linear_cross_entropy: true
+liger_rope: false
+liger_rms_norm: false
+liger_glu_activation: false
+liger_layer_norm: false
+micro_batch_size: 1
+eval_batch_size: 1
+gradient_accumulation_steps: 8
+num_epochs: 1
+optimizer: paged_adamw_8bit
+learning_rate: 0.00002
+lr_scheduler: cosine
+warmup_ratio: 0.05
+weight_decay: 0.0
+max_grad_norm: 0.1
+logging_steps: 1
+evals_per_epoch: 1
+saves_per_epoch: 1
+save_total_limit: 2
+seed: 42
+dataloader_num_workers: 2
+dataloader_prefetch_factor: 4
+dataloader_pin_memory: true
