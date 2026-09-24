@@ -7609,6 +7609,33 @@ def _v30_build_facts(organization, programs):
         _v30_trim(organization.get("competitive_advantage"), 650),
     )
 
+    # Rich v34 recovery hardening:
+    # Keep decision-relevant structured context from the backend payload.
+    # Earlier versions ignored these fields, which could hide explicit needs
+    # such as impact measurement or funding concentration from the router.
+    context_fields = (
+        ("O8", "السياق الاستراتيجي", "strategic_context", 900),
+        ("O9", "سياق الحوكمة", "governance_context", 900),
+        ("O10", "السياق المالي", "financial_context", 900),
+        ("O11", "سياق الأداء والأثر", "performance_context", 1000),
+    )
+
+    for fid, source, key, limit in context_fields:
+        add(
+            fid,
+            source,
+            _v30_trim(organization.get(key), limit),
+        )
+
+    current_challenges = organization.get("current_challenges") or []
+    if isinstance(current_challenges, list):
+        for idx, challenge in enumerate(current_challenges, start=1):
+            add(
+                f"H{idx}",
+                f"تحدٍ حالي {idx}",
+                _v30_trim(challenge, 500),
+            )
+
     important_notes = organization.get("important_notes") or []
     if isinstance(important_notes, list):
         for idx, note in enumerate(important_notes, start=1):
@@ -7628,6 +7655,8 @@ def _v30_build_facts(organization, programs):
         audience = _v30_trim(program.get("target_audience"), 220)
         value = _v30_trim(program.get("beneficiary_value"), 260)
         delivery = _v30_trim(program.get("delivery_method"), 260)
+        status = _v30_trim(program.get("status"), 120)
+        notes = _v30_trim(program.get("notes"), 520)
 
         pieces = []
         if name:
@@ -7640,6 +7669,10 @@ def _v30_build_facts(organization, programs):
             pieces.append(f"القيمة للمستفيد: {value}")
         if delivery:
             pieces.append(f"طريقة التنفيذ: {delivery}")
+        if status:
+            pieces.append(f"الحالة: {status}")
+        if notes:
+            pieces.append(f"ملاحظات: {notes}")
 
         if pieces:
             add(
@@ -10281,6 +10314,7 @@ def advisory_match_rich_v32(job_input):
         f"Input tokens={input_tokens}. "
         f"Candidates={len(candidates)}. "
         f"Returned={len(matches)}. "
+        f"Minimum={RICH_V34_MIN_ADVISORS}. "
         "Model generations=1.",
         flush=True,
     )
@@ -10314,6 +10348,34 @@ RICH_V33_MAX_NEW_TOKENS = int(
 # Ambiguous single words such as "فرص" and generic "بيئة" are intentionally removed.
 _V33_FUNCTIONAL_TERMS = dict(_V32_FUNCTIONAL_TERMS)
 _V33_FUNCTIONAL_TERMS.update({
+    11: (
+        "مبادرة جديدة", "برنامج جديد", "مشروع جديد",
+        "تصميم مبادرة", "تصميم المبادرات", "تصميم برنامج",
+        "إعادة تصميم", "إعادة تصميم المبادرات",
+        "تحسين تصميم", "تطوير تصميم المبادرات",
+        "مبادرات مستقبلية", "مشروعات مستقبلية",
+    ),
+    15: (
+        "قياس الأثر", "إدارة الأثر", "تقييم الأثر",
+        "متابعة وتقييم", "تقييم النتائج", "نظرية التغيير",
+        "التعلم المؤسسي", "أثر البرامج", "قياس النتائج",
+        "نتائج طويلة الأجل", "استدامة النتائج",
+        "استدامة دخل المستفيدين", "قرار التوسع", "جدوى التوسع",
+        "ربط التدريب بالتوظيف",
+    ),
+    18: (
+        "استدامة مالية", "تنمية الموارد", "تنويع الإيرادات",
+        "تنويع مصادر الدخل", "فجوة تمويل", "جمع التبرعات",
+        "تبرعات", "مانحين", "مانح", "منح", "مصادر دخل",
+        "مصدر تمويل", "مصدر تمويل رئيسي", "اعتماد على مانح",
+        "تركيز التمويل",
+    ),
+    20: (
+        "هيكل تنظيمي", "إعادة هيكلة", "موظفين", "موظف",
+        "قوى عاملة", "عبء العمل", "جدارات",
+        "أدوار وظيفية", "أداء الموظفين", "موارد بشرية",
+        "فريق العمل", "كادر", "كوادر",
+    ),
     3: (
         "تحليل داخلي", "تحليل خارجي", "الفرص والتهديدات",
         "فرص استراتيجية", "تهديدات استراتيجية",
@@ -10591,8 +10653,10 @@ def _v33_candidate_allowed(advisor_num, evidence_ids, fact_map, program_count):
             norm,
             (
                 "مبادرة جديدة", "برنامج جديد", "مشروع جديد",
-                "تصميم مبادرة", "تصميم برنامج",
-                "إعادة تصميم", "مبادرات مستقبلية",
+                "تصميم مبادرة", "تصميم المبادرات", "تصميم برنامج",
+                "إعادة تصميم", "إعادة تصميم المبادرات",
+                "تحسين تصميم", "تطوير تصميم المبادرات",
+                "مبادرات مستقبلية",
             ),
         )
 
@@ -10613,18 +10677,46 @@ def _v33_candidate_allowed(advisor_num, evidence_ids, fact_map, program_count):
                 "قياس الأثر", "إدارة الأثر",
                 "تقييم الأثر", "متابعة وتقييم",
                 "تقييم النتائج", "نظرية التغيير",
+                "أثر البرامج", "قياس النتائج",
+                "نتائج طويلة الأجل", "استدامة النتائج",
+                "استدامة دخل المستفيدين",
+                "قرار التوسع", "جدوى التوسع",
+                "ربط التدريب بالتوظيف",
             ),
         )
 
     if advisor_num == 16:
-        return _v30_contains_any(
-            norm,
-            (
-                "فجوة حوكمة", "تحسين الحوكمة",
-                "امتثال", "مخالفة",
-                "صلاحيات", "تعارض مصالح",
-            ),
+        # Explicit statements that governance/authority/compliance problems do
+        # NOT exist must not activate the governance advisor.
+        strong_positive = (
+            "فجوة حوكمة", "تحسين الحوكمة", "مخالفة",
+            "تعارض مصالح", "ضعف الحوكمة", "مشكلة حوكمة",
+            "قصور الحوكمة",
         )
+        if _v30_contains_any(norm, strong_positive):
+            return True
+
+        for fid in evidence_ids:
+            fact_text = _v31_norm_ar(
+                (fact_map.get(fid) or {}).get("text", "")
+            )
+            if not _v30_contains_any(
+                fact_text,
+                ("امتثال", "صلاحيات", "حوكمة"),
+            ):
+                continue
+            if _v30_contains_any(
+                fact_text,
+                (
+                    "لا توجد", "لا يوجد", "لا تظهر", "لا يظهر",
+                    "دون مشكلة", "بدون مشكلة", "لا توجد مشكلة",
+                    "لا توجد فجوة", "لا يوجد قصور",
+                ),
+            ):
+                continue
+            return True
+
+        return False
 
     if advisor_num == 17:
         return _v30_contains_any(
@@ -10641,8 +10733,11 @@ def _v33_candidate_allowed(advisor_num, evidence_ids, fact_map, program_count):
             norm,
             (
                 "استدامة مالية", "تنمية الموارد",
-                "تنويع الإيرادات", "فجوة تمويل",
-                "جمع التبرعات", "مانحين", "منح",
+                "تنويع الإيرادات", "تنويع مصادر الدخل",
+                "فجوة تمويل", "جمع التبرعات",
+                "مانحين", "مانح", "منح",
+                "مصادر دخل", "مصدر تمويل",
+                "اعتماد على مانح", "تركيز التمويل",
             ),
         )
 
@@ -10656,12 +10751,17 @@ def _v33_candidate_allowed(advisor_num, evidence_ids, fact_map, program_count):
         )
 
     if advisor_num == 20:
+        # Do NOT treat beneficiary training/employment as an internal HR need.
+        # AOS-FG-20 requires evidence about the organization's own workforce,
+        # structure, roles, capacity, or employee performance.
         return _v30_contains_any(
             norm,
             (
-                "هيكل تنظيمي", "موظف", "موظفين",
-                "قوى عاملة", "عبء العمل",
-                "جدارات", "توظيف",
+                "هيكل تنظيمي", "إعادة هيكلة",
+                "موظف", "موظفين", "قوى عاملة",
+                "عبء العمل", "جدارات", "أدوار وظيفية",
+                "أداء الموظفين", "موارد بشرية",
+                "فريق العمل", "كادر", "كوادر",
             ),
         )
 
@@ -11207,6 +11307,13 @@ RICH_V34_MAX_NEW_TOKENS = int(
     os.environ.get("RICH_V34_MAX_NEW_TOKENS", "240")
 )
 
+# Product requirement: never return fewer than this number when the payload
+# contains enough evidence-backed advisors. The final fallback below also
+# fills from the closest fact-backed advisors so the API contract stays stable.
+RICH_V34_MIN_ADVISORS = int(
+    os.environ.get("RICH_V34_MIN_ADVISORS", "6")
+)
+
 
 def _v34_terms_for_advisor(advisor_num):
     if advisor_num <= 25:
@@ -11228,6 +11335,63 @@ def _v34_direct_fact_match(advisor_num, fact):
 
     if structural.get(advisor_num) == fid:
         return True
+
+    # Functional hard boundaries added after recovery testing.
+    if advisor_num == 15:
+        return _v30_contains_any(
+            text,
+            (
+                "قياس الأثر", "إدارة الأثر", "تقييم الأثر",
+                "متابعة وتقييم", "تقييم النتائج", "نظرية التغيير",
+                "أثر البرامج", "قياس النتائج", "نتائج طويلة الأجل",
+                "استدامة النتائج", "استدامة دخل المستفيدين",
+                "قرار التوسع", "جدوى التوسع", "ربط التدريب بالتوظيف",
+            ),
+        )
+
+    if advisor_num == 18:
+        return _v30_contains_any(
+            text,
+            (
+                "استدامة مالية", "تنمية الموارد", "تنويع الإيرادات",
+                "تنويع مصادر الدخل", "فجوة تمويل", "جمع التبرعات",
+                "مانحين", "مانح", "منح", "مصادر دخل",
+                "مصدر تمويل", "اعتماد على مانح", "تركيز التمويل",
+            ),
+        )
+
+    if advisor_num == 16:
+        if _v30_contains_any(
+            text,
+            (
+                "لا توجد", "لا يوجد", "لا تظهر", "لا يظهر",
+                "دون مشكلة", "بدون مشكلة", "لا توجد مشكلة",
+                "لا توجد فجوة", "لا يوجد قصور",
+            ),
+        ) and _v30_contains_any(
+            text,
+            ("امتثال", "صلاحيات", "حوكمة"),
+        ):
+            return False
+        return _v30_contains_any(
+            text,
+            (
+                "فجوة حوكمة", "تحسين الحوكمة", "امتثال",
+                "مخالفة", "صلاحيات", "تعارض مصالح",
+                "ضعف الحوكمة", "مشكلة حوكمة", "قصور الحوكمة",
+            ),
+        )
+
+    if advisor_num == 20:
+        return _v30_contains_any(
+            text,
+            (
+                "هيكل تنظيمي", "إعادة هيكلة", "موظف", "موظفين",
+                "قوى عاملة", "عبء العمل", "جدارات", "أدوار وظيفية",
+                "أداء الموظفين", "موارد بشرية", "فريق العمل",
+                "كادر", "كوادر",
+            ),
+        )
 
     # Hard boundaries for the most false-positive-prone sectors.
     if advisor_num == 30:
@@ -11463,6 +11627,86 @@ def _v34_reason(advisor, evidence_ids, fact_map):
     )
 
 
+def _v34_explicit_need_floor(advisor_num, evidence_ids, fact_map, strength):
+    """Deterministic floor for explicit high-signal needs.
+
+    This prevents the one-pass adjudicator from accidentally suppressing a
+    clearly stated impact-measurement or funding-diversification need.
+    """
+    floor = 0.60 if strength == "STRONG" else 0.0
+
+    evidence_text = " ".join(
+        str((fact_map.get(fid) or {}).get("text", ""))
+        for fid in evidence_ids
+    )
+    norm = _v31_norm_ar(evidence_text)
+
+    if advisor_num == 15 and _v30_contains_any(
+        norm,
+        (
+            "قياس الأثر", "تقييم الأثر", "متابعة وتقييم",
+            "أثر البرامج", "قياس النتائج", "نتائج طويلة الأجل",
+            "استدامة دخل المستفيدين", "قرار التوسع", "جدوى التوسع",
+        ),
+    ):
+        floor = max(floor, 0.70)
+
+    if advisor_num == 18 and _v30_contains_any(
+        norm,
+        (
+            "تنويع مصادر الدخل", "تنويع الإيرادات", "استدامة مالية",
+            "مصدر تمويل رئيسي", "اعتماد على مانح", "مانح رئيسي",
+            "تركيز التمويل",
+        ),
+    ):
+        floor = max(floor, 0.70)
+
+    return floor
+
+
+def _v34_minimum_fill_candidates(advisors, facts, fact_map, excluded_codes):
+    """Build conservative fact-backed fillers when strict candidates are < minimum.
+
+    No advisor is added merely because a minimum count exists: every filler must
+    still have at least one advisor-specific direct fact match.
+    """
+    rows = []
+
+    for advisor in advisors:
+        code = advisor.get("system_code")
+        if not code or code in excluded_codes:
+            continue
+
+        num = int(advisor["advisor_id"])
+        terms = _v34_terms_for_advisor(num)
+        matched = []
+
+        for fact in facts:
+            if not _v34_direct_fact_match(num, fact):
+                continue
+            priority = _v33_fact_priority(num, fact, terms)
+            matched.append((priority, fact.get("fact_id")))
+
+        matched.sort(key=lambda x: x[0], reverse=True)
+        evidence_ids = [fid for _, fid in matched[:3] if fid]
+
+        if not evidence_ids:
+            continue
+
+        rows.append({
+            "advisor_id": code,
+            "advisor": advisor,
+            "verified_ids": evidence_ids,
+            "priority": matched[0][0] if matched else 0.0,
+        })
+
+    rows.sort(
+        key=lambda x: (x["priority"], len(x["verified_ids"])),
+        reverse=True,
+    )
+    return rows
+
+
 def advisory_match_rich_v34(job_input):
     started = time.time()
 
@@ -11517,6 +11761,7 @@ def advisory_match_rich_v34(job_input):
     )
 
     matches = []
+    scored_candidates = []
 
     for candidate in candidates:
         code = candidate["advisor_id"]
@@ -11528,31 +11773,11 @@ def advisory_match_rich_v34(job_input):
             else 0.0
         )
 
-        strength = candidate.get(
-            "evidence_strength",
-            "MEDIUM",
-        )
-
-        evidence_floor = (
-            0.60
-            if strength == "STRONG"
-            else 0.0
-        )
-
-        final_score = max(
-            ai_score,
-            evidence_floor,
-        )
-
-        if final_score < RICH_V34_MIN_PUBLIC_SCORE:
-            continue
-
         advisor = advisor_by_code.get(code)
         if not advisor:
             continue
 
-        # Critical v34 change:
-        # public evidence is re-validated deterministically against the
+        # Public evidence is re-validated deterministically against the
         # exact advisor domain. We do not trust an unrelated evidence ID
         # merely because the LLM returned it.
         verified_ids = _v34_verified_evidence(
@@ -11568,18 +11793,105 @@ def advisory_match_rich_v34(job_input):
             )
             continue
 
+        advisor_num = int(advisor["advisor_id"])
+        strength = candidate.get(
+            "evidence_strength",
+            "MEDIUM",
+        )
+
+        evidence_floor = _v34_explicit_need_floor(
+            advisor_num,
+            verified_ids,
+            fact_map,
+            strength,
+        )
+
+        final_score = max(
+            ai_score,
+            evidence_floor,
+        )
+
+        scored_candidates.append({
+            "advisor_id": code,
+            "advisor": advisor,
+            "verified_ids": verified_ids,
+            "score": final_score,
+            "strength": strength,
+        })
+
+        if final_score < RICH_V34_MIN_PUBLIC_SCORE:
+            continue
+
         matches.append({
             "advisor_id": code,
-            "score": round(
-                final_score,
-                4,
-            ),
+            "score": round(final_score, 4),
             "reason": _v34_reason(
                 advisor,
                 verified_ids,
                 fact_map,
             ),
         })
+
+    # Enforce the product-level minimum of 6 advisors without changing the
+    # one-generation architecture. First fill from strict evidence-backed
+    # candidates that the adjudicator under-scored.
+    if len(matches) < RICH_V34_MIN_ADVISORS:
+        existing = {row["advisor_id"] for row in matches}
+        strength_rank = {"STRONG": 2, "MEDIUM": 1}
+
+        fallback = sorted(
+            (x for x in scored_candidates if x["advisor_id"] not in existing),
+            key=lambda x: (
+                strength_rank.get(x["strength"], 0),
+                x["score"],
+                len(x["verified_ids"]),
+            ),
+            reverse=True,
+        )
+
+        for item in fallback:
+            if len(matches) >= RICH_V34_MIN_ADVISORS:
+                break
+
+            matches.append({
+                "advisor_id": item["advisor_id"],
+                "score": round(
+                    max(item["score"], RICH_V34_MIN_PUBLIC_SCORE),
+                    4,
+                ),
+                "reason": _v34_reason(
+                    item["advisor"],
+                    item["verified_ids"],
+                    fact_map,
+                ),
+            })
+            existing.add(item["advisor_id"])
+
+        # If the strict candidate gate itself produced fewer than six, relax
+        # only that gate. Every added advisor must STILL have a direct
+        # advisor-specific fact match; completely unrelated padding is never used.
+        if len(matches) < RICH_V34_MIN_ADVISORS:
+            relaxed = _v34_minimum_fill_candidates(
+                advisors,
+                facts,
+                fact_map,
+                existing,
+            )
+
+            for item in relaxed:
+                if len(matches) >= RICH_V34_MIN_ADVISORS:
+                    break
+
+                matches.append({
+                    "advisor_id": item["advisor_id"],
+                    "score": round(RICH_V34_MIN_PUBLIC_SCORE, 4),
+                    "reason": _v34_reason(
+                        item["advisor"],
+                        item["verified_ids"],
+                        fact_map,
+                    ),
+                })
+                existing.add(item["advisor_id"])
 
     matches.sort(
         key=lambda x: x["score"],
