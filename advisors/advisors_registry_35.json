@@ -1,0 +1,216 @@
+{
+  "registry_version": "Athar OS Expert DNA 35 Advisors",
+  "advisor_count": 35,
+  "advisors": [
+    {
+      "advisor_id": "AOS-LD-01",
+      "advisor_number": 1,
+      "advisor_name_ar": "المستشار التنفيذي للقطاع غير الربحي",
+      "prompt_file": "advisor_01.md"
+    },
+    {
+      "advisor_id": "AOS-LD-02",
+      "advisor_number": 2,
+      "advisor_name_ar": "مستشار التشخيص والنضج المؤسسي",
+      "prompt_file": "advisor_02.md"
+    },
+    {
+      "advisor_id": "AOS-LD-03",
+      "advisor_number": 3,
+      "advisor_name_ar": "مستشار التحليل الداخلي والخارجي",
+      "prompt_file": "advisor_03.md"
+    },
+    {
+      "advisor_id": "AOS-LD-04",
+      "advisor_number": 4,
+      "advisor_name_ar": "مستشار أصحاب المصلحة والشراكات",
+      "prompt_file": "advisor_04.md"
+    },
+    {
+      "advisor_id": "AOS-LD-05",
+      "advisor_number": 5,
+      "advisor_name_ar": "مستشار التحول والتغيير المؤسسي",
+      "prompt_file": "advisor_05.md"
+    },
+    {
+      "advisor_id": "AOS-LD-06",
+      "advisor_number": 6,
+      "advisor_name_ar": "مستشار التميز والجودة المؤسسية",
+      "prompt_file": "advisor_06.md"
+    },
+    {
+      "advisor_id": "AOS-LD-07",
+      "advisor_number": 7,
+      "advisor_name_ar": "مستشار إدارة المخاطر واستمرارية الأعمال",
+      "prompt_file": "advisor_07.md"
+    },
+    {
+      "advisor_id": "AOS-SP-08",
+      "advisor_number": 8,
+      "advisor_name_ar": "مستشار التخطيط الاستراتيجي",
+      "prompt_file": "advisor_08.md"
+    },
+    {
+      "advisor_id": "AOS-SP-09",
+      "advisor_number": 9,
+      "advisor_name_ar": "مستشار الهوية والرؤية والرسالة والقيم",
+      "prompt_file": "advisor_09.md"
+    },
+    {
+      "advisor_id": "AOS-SP-10",
+      "advisor_number": 10,
+      "advisor_name_ar": "مستشار الأهداف والقضايا الاستراتيجية",
+      "prompt_file": "advisor_10.md"
+    },
+    {
+      "advisor_id": "AOS-SP-11",
+      "advisor_number": 11,
+      "advisor_name_ar": "مستشار تصميم المبادرات الاستراتيجية",
+      "prompt_file": "advisor_11.md"
+    },
+    {
+      "advisor_id": "AOS-SP-12",
+      "advisor_number": 12,
+      "advisor_name_ar": "مستشار التخطيط التشغيلي",
+      "prompt_file": "advisor_12.md"
+    },
+    {
+      "advisor_id": "AOS-SP-13",
+      "advisor_number": 13,
+      "advisor_name_ar": "مستشار المحافظ والبرامج والمشاريع",
+      "prompt_file": "advisor_13.md"
+    },
+    {
+      "advisor_id": "AOS-SP-14",
+      "advisor_number": 14,
+      "advisor_name_ar": "مستشار مؤشرات الأداء ولوحات القيادة",
+      "prompt_file": "advisor_14.md"
+    },
+    {
+      "advisor_id": "AOS-SP-15",
+      "advisor_number": 15,
+      "advisor_name_ar": "مستشار المتابعة والتقييم والتعلم وقياس الأثر",
+      "prompt_file": "advisor_15.md"
+    },
+    {
+      "advisor_id": "AOS-FG-16",
+      "advisor_number": 16,
+      "advisor_name_ar": "مستشار الحوكمة والامتثال",
+      "prompt_file": "advisor_16.md"
+    },
+    {
+      "advisor_id": "AOS-FG-17",
+      "advisor_number": 17,
+      "advisor_name_ar": "المستشار المالي والموازنات",
+      "prompt_file": "advisor_17.md"
+    },
+    {
+      "advisor_id": "AOS-FG-18",
+      "advisor_number": 18,
+      "advisor_name_ar": "مستشار الاستدامة المالية وتنمية الموارد",
+      "prompt_file": "advisor_18.md"
+    },
+    {
+      "advisor_id": "AOS-FG-19",
+      "advisor_number": 19,
+      "advisor_name_ar": "مستشار الأوقاف والاستثمار الاجتماعي",
+      "prompt_file": "advisor_19.md"
+    },
+    {
+      "advisor_id": "AOS-FG-20",
+      "advisor_number": 20,
+      "advisor_name_ar": "مستشار الموارد البشرية والتصميم التنظيمي",
+      "prompt_file": "advisor_20.md"
+    },
+    {
+      "advisor_id": "AOS-FG-21",
+      "advisor_number": 21,
+      "advisor_name_ar": "مستشار العمليات والإجراءات والتحسين",
+      "prompt_file": "advisor_21.md"
+    },
+    {
+      "advisor_id": "AOS-FG-22",
+      "advisor_number": 22,
+      "advisor_name_ar": "مستشار الاتصال المؤسسي والعلامة التنموية",
+      "prompt_file": "advisor_22.md"
+    },
+    {
+      "advisor_id": "AOS-FG-23",
+      "advisor_number": 23,
+      "advisor_name_ar": "مستشار التسويق الرقمي وإدارة الحملات",
+      "prompt_file": "advisor_23.md"
+    },
+    {
+      "advisor_id": "AOS-FG-24",
+      "advisor_number": 24,
+      "advisor_name_ar": "مستشار التحول الرقمي والذكاء الاصطناعي",
+      "prompt_file": "advisor_24.md"
+    },
+    {
+      "advisor_id": "AOS-FG-25",
+      "advisor_number": 25,
+      "advisor_name_ar": "مستشار البيانات والمعرفة والتقارير",
+      "prompt_file": "advisor_25.md"
+    },
+    {
+      "advisor_id": "AOS-SE-26",
+      "advisor_number": 26,
+      "advisor_name_ar": "مستشار الثقافة والترفيه",
+      "prompt_file": "advisor_26.md"
+    },
+    {
+      "advisor_id": "AOS-SE-27",
+      "advisor_number": 27,
+      "advisor_name_ar": "مستشار التعليم والأبحاث",
+      "prompt_file": "advisor_27.md"
+    },
+    {
+      "advisor_id": "AOS-SE-28",
+      "advisor_number": 28,
+      "advisor_name_ar": "مستشار الصحة",
+      "prompt_file": "advisor_28.md"
+    },
+    {
+      "advisor_id": "AOS-SE-29",
+      "advisor_number": 29,
+      "advisor_name_ar": "مستشار الخدمات الاجتماعية",
+      "prompt_file": "advisor_29.md"
+    },
+    {
+      "advisor_id": "AOS-SE-30",
+      "advisor_number": 30,
+      "advisor_name_ar": "مستشار البيئة",
+      "prompt_file": "advisor_30.md"
+    },
+    {
+      "advisor_id": "AOS-SE-31",
+      "advisor_number": 31,
+      "advisor_name_ar": "مستشار التنمية والإسكان",
+      "prompt_file": "advisor_31.md"
+    },
+    {
+      "advisor_id": "AOS-SE-32",
+      "advisor_number": 32,
+      "advisor_name_ar": "مستشار الحقوق والمناصرة والدعم القانوني",
+      "prompt_file": "advisor_32.md"
+    },
+    {
+      "advisor_id": "AOS-SE-33",
+      "advisor_number": 33,
+      "advisor_name_ar": "مستشار منظمات دعم العمل الخيري والتطوعي",
+      "prompt_file": "advisor_33.md"
+    },
+    {
+      "advisor_id": "AOS-SE-34",
+      "advisor_number": 34,
+      "advisor_name_ar": "مستشار الدعوة والتعليم الديني وخدمة ضيوف الرحمن",
+      "prompt_file": "advisor_34.md"
+    },
+    {
+      "advisor_id": "AOS-SE-35",
+      "advisor_number": 35,
+      "advisor_name_ar": "مستشار الروابط والجمعيات المهنية",
+      "prompt_file": "advisor_35.md"
+    }
+  ]
+}

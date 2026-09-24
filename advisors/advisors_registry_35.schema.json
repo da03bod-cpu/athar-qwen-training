@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Athar OS Advisor Registry 35",
+  "type": "array",
+  "minItems": 35,
+  "maxItems": 35,
+  "items": {
+    "type": "object",
+    "required": [
+      "backend_id",
+      "advisor_code",
+      "name",
+      "prompt_file"
+    ],
+    "properties": {
+      "backend_id": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "advisor_code": {
+        "type": "string",
+        "minLength": 1
+      },
+      "name": {
+        "type": "string",
+        "minLength": 1
+      },
+      "prompt_file": {
+        "type": "string",
+        "pattern": "\\.md$"
+      }
+    },
+    "additionalProperties": true
+  }
+}
