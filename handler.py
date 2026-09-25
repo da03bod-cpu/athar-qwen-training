@@ -17991,8 +17991,8 @@ def handler(job):
                 "continual_learning_enabled": (
                     CONTINUAL_LEARNING_ENABLED
                 ),
-                "response_contract_version": "impact_challenge_screen_3_v4_aos_ids_impact_first",
-                "build_version": "athar-screen3-aos-impact-v4.1-2026-09-25",
+                "response_contract_version": "impact_challenge_screen_3_v4_2_compact_meta_aos_ids",
+                "build_version": "athar-screen3-aos-impact-v4.2-2026-09-25",
                 "topic": "interventions",
                 "backend_advisor_id_type": "canonical_aos_string",
                 "canonical_advisor_id_format": "AOS-(LD|SP|FG|SE)-NN",
@@ -18009,7 +18009,9 @@ def handler(job):
                 },
                 "single_output_regeneration_supported": True,
                 "grounded_numbers_only": True,
-                "meta_json_parser": "strict+balanced+syntax-repair+json5-optional+literal-fallback",
+                "meta_json_parser": "compact-json+strict+balanced+syntax-repair+json5-optional+literal-fallback",
+                "meta_generation_contract": "compact_interventions_only",
+                "meta_max_new_tokens": int(os.environ.get("META_MAX_NEW_TOKENS", "2200")),
                 "internal_meta_enrichment": {
                     "attribution": True,
                     "evidence_classification": ["E1", "E2", "E3", "I1", "I2", "A1", "U"],
@@ -18032,7 +18034,8 @@ def handler(job):
                     "standalone_enabler_max_for_3_4": 1,
                     "existing_program_anchor_guard": True,
                     "impact_driver_anchor_guard": True,
-                    "note": "Kept in private run metadata until later backend contracts arrive.",
+                    "sprint_generation": "deterministic_private_allocation_from_interventions",
+                    "note": "Attribution/evidence/interaction and the 12-week structural allocation stay private until later backend contracts arrive.",
                 },
             }
 

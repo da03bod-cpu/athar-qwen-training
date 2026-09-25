@@ -30,7 +30,7 @@ ADVISOR_REGISTRY_PATH = Path(
 
 MAX_MODEL_INPUT_TOKENS = int(os.getenv("MAX_MODEL_INPUT_TOKENS", "30000"))
 ADVISOR_MAX_NEW_TOKENS = int(os.getenv("ADVISOR_MAX_NEW_TOKENS", "1400"))
-META_MAX_NEW_TOKENS = max(int(os.getenv("META_MAX_NEW_TOKENS", "5200")), 5200)
+META_MAX_NEW_TOKENS = max(int(os.getenv("META_MAX_NEW_TOKENS", "2200")), 1600)
 GEN_TEMPERATURE = float(os.getenv("GEN_TEMPERATURE", "0.20"))
 GEN_TOP_P = float(os.getenv("GEN_TOP_P", "0.90"))
 COUNCIL_META_MODE = os.getenv("COUNCIL_META_MODE", "adapter").strip().lower()
@@ -237,7 +237,7 @@ class AtharCouncilEngine:
         repaired = str(candidate).strip()
         # Curly quotes are frequently emitted around property names. Normalize
         # them before quoting bare keys.
-        repaired = repaired.replace("“", '"').replace("”", '"')
+        repaired = repaired.replace("“", '"').replace("”", '"').replace("’", "'").replace("‘", "'")
         # Quote single-quoted property names (not arbitrary values).
         repaired = re.sub(
             r"([\{,]\s*)'([^'\n]+)'\s*:",
@@ -841,6 +841,99 @@ class AtharCouncilEngine:
             return "High"
         return "Medium"
 
+    def _advisor_refs_to_ids(self, value: Any, selected_ids: List[str]) -> List[str]:
+        """Map compact 1-based advisor references to canonical selected AOS IDs.
+
+        The Meta model never needs to reproduce long advisor IDs. It only emits
+        refs like [1, 3], which are mapped deterministically to the council that
+        the backend already selected. This removes a common hallucination source.
+        """
+        if not isinstance(value, list):
+            value = [value] if value is not None else []
+        out: List[str] = []
+        for raw in value:
+            try:
+                idx = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= idx <= len(selected_ids):
+                aid = selected_ids[idx - 1]
+                if aid not in out:
+                    out.append(aid)
+        return out
+
+    @staticmethod
+    def _has_foreign_script(text: Any) -> bool:
+        raw = str(text or "")
+        # Arabic + ordinary Latin acronyms are fine. Cyrillic/CJK leakage is not.
+        return bool(re.search(r"[\u0400-\u052F\u4E00-\u9FFF\u3040-\u30FF]", raw))
+
+    def _build_private_sprints(
+        self,
+        interventions: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Build a private 12-week structural allocation without another LLM call.
+
+        Screen 3 does not expose sprints yet. We therefore keep a deterministic,
+        grounded weekly allocation in private run metadata and avoid forcing the
+        Meta model to generate a second long JSON structure that can truncate.
+        """
+        if not interventions:
+            return []
+
+        phase_labels = (
+            "تهيئة التنفيذ",
+            "تجهيز التنفيذ",
+            "بدء التنفيذ",
+            "استكمال التنفيذ",
+            "متابعة التنفيذ",
+            "متابعة النتائج",
+            "تحقق مرحلي",
+            "تحسين التنفيذ",
+            "استكمال التحسين",
+            "مراجعة النتائج",
+            "تثبيت التعلم",
+            "إقفال الدورة وتوثيق الخطوة التالية",
+        )
+        sprints: List[Dict[str, Any]] = []
+        n = len(interventions)
+        for week in range(1, SPRINT_COUNT + 1):
+            source = interventions[(week - 1) % n]
+            iid = str(source.get("intervention_id") or f"INT-{((week - 1) % n) + 1:02d}")
+            title = str(source.get("title") or "التدخل").strip()
+            result_texts: List[str] = []
+            output_texts: List[str] = []
+            for item in source.get("results") or []:
+                if not isinstance(item, dict):
+                    continue
+                txt = str(item.get("text") or "").strip()
+                if txt:
+                    result_texts.append(txt)
+                for output in item.get("outputs") or []:
+                    if isinstance(output, dict):
+                        ot = str(output.get("text") or "").strip()
+                        if ot:
+                            output_texts.append(ot)
+
+            base_action = result_texts[0] if result_texts else f"متابعة تنفيذ {title}"
+            base_output = output_texts[0] if output_texts else title
+            sprints.append({
+                "sprint_number": week,
+                "week_number": week,
+                "title": f"{phase_labels[week - 1]} — {title}",
+                "objective": f"تقدم مرحلي في «{title}» ضمن حدود التوصية المعتمدة.",
+                "actions": [base_action],
+                "outputs": [base_output],
+                "source_intervention_ids": [iid],
+                "attribution": list(source.get("attribution") or []),
+                "evidence_classification": str(source.get("evidence_classification") or "I2"),
+                "evidence_basis": str(source.get("evidence_basis") or "بيانات الحالة ورأي المجلس المختار."),
+                "interaction_type": str(source.get("interaction_type") or "COMPLEMENTARY"),
+                "confidence_level": str(source.get("confidence_level") or "Medium"),
+                "status": OPEN_STATUS,
+            })
+        return sprints
+
     def _normalize_meta_result(
         self,
         result: Dict[str, Any],
@@ -849,7 +942,6 @@ class AtharCouncilEngine:
     ) -> Dict[str, Any]:
         if not isinstance(result, dict):
             raise ValueError("Meta result must be an object.")
-        # JSON round-trip gives us a detached plain object.
         result = json.loads(json.dumps(result, ensure_ascii=False))
 
         result["schema_version"] = CONSULTATION_SCHEMA_VERSION
@@ -865,159 +957,103 @@ class AtharCouncilEngine:
             suggestion = {}
             result["suggestion"] = suggestion
 
-        interventions = suggestion.get("interventions")
-        if not isinstance(interventions, list):
-            interventions = []
-            suggestion["interventions"] = interventions
+        raw_interventions = suggestion.get("interventions")
+        if not isinstance(raw_interventions, list):
+            raw_interventions = []
 
-        by_id: Dict[str, Dict[str, Any]] = {}
-        for idx, intervention in enumerate(interventions, start=1):
-            if not isinstance(intervention, dict):
+        interventions: List[Dict[str, Any]] = []
+        for raw in raw_interventions[:4]:
+            if not isinstance(raw, dict):
                 continue
-            iid = f"INT-{idx:02d}"
-            intervention["intervention_id"] = iid
-            intervention["status"] = OPEN_STATUS
-            intervention["attribution"] = self._normalize_attribution(
-                intervention.get("attribution") or intervention.get("advisor_ids"),
-                selected_ids,
-            )
-            intervention["evidence_classification"] = self._normalize_evidence_code(
-                intervention.get("evidence_classification") or intervention.get("evidence_class")
-            )
-            intervention["interaction_type"] = self._normalize_interaction(
-                intervention.get("interaction_type") or intervention.get("discussion_type")
-            )
-            confidence = self._normalize_confidence(
-                intervention.get("confidence_level") or intervention.get("confidence")
-            )
-            evidence = intervention["evidence_classification"]
-            interaction = intervention["interaction_type"]
-            if evidence in {"U", "A1"}:
-                confidence = "Low"
-            elif evidence == "I2" and confidence == "High":
-                confidence = "Medium"
-            if interaction in {"CONFLICT", "EVIDENCE GAP", "SCOPE CONFLICT"} and confidence == "High":
-                confidence = "Medium"
-            intervention["confidence_level"] = confidence
-
-            results = intervention.get("results")
-            if isinstance(results, list):
-                for item in results:
-                    if isinstance(item, dict):
-                        # Result rows inherit provenance/classification from their
-                        # parent intervention so the UI never displays synthetic
-                        # metadata disconnected from the council reasoning.
-                        item["status"] = OPEN_STATUS
-                        item["attribution"] = list(intervention["attribution"])
-                        item["evidence_classification"] = intervention["evidence_classification"]
-                        item["interaction_type"] = intervention["interaction_type"]
-                        item["confidence_level"] = intervention["confidence_level"]
-            by_id[iid] = intervention
-
-        sprints = suggestion.get("sprints")
-        if not isinstance(sprints, list):
-            for alias in ("sprint_plan", "weekly_plan", "weeks"):
-                candidate = suggestion.get(alias)
-                if isinstance(candidate, list):
-                    sprints = candidate
-                    break
-        if not isinstance(sprints, list):
-            sprints = []
-        suggestion["sprints"] = sprints
-        suggestion["sprint_count"] = SPRINT_COUNT
-
-        for idx, sprint in enumerate(sprints, start=1):
-            if not isinstance(sprint, dict):
+            title = str(raw.get("title") or "").strip()
+            impact = str(raw.get("impact_description") or "").strip()
+            reportable = str(raw.get("reportable_value") or "").strip()
+            if not title or not impact or not reportable:
                 continue
-            sprint["sprint_number"] = idx
-            sprint["week_number"] = idx
-            sprint["status"] = OPEN_STATUS
 
-            source_ids = sprint.get("source_intervention_ids") or sprint.get("intervention_ids") or []
-            if isinstance(source_ids, str):
-                source_ids = [source_ids]
-            source_ids = [str(x).strip().upper() for x in source_ids if str(x).strip()]
-            source_ids = [x for x in source_ids if x in by_id]
-            sprint["source_intervention_ids"] = list(dict.fromkeys(source_ids))
-
-            sprint["attribution"] = self._normalize_attribution(
-                sprint.get("attribution") or sprint.get("advisor_ids"),
-                selected_ids,
+            attrs = self._advisor_refs_to_ids(
+                raw.get("advisor_refs") or raw.get("advisor_ref"), selected_ids
             )
-            sources = [by_id[x] for x in sprint["source_intervention_ids"] if x in by_id]
-            if not sprint["attribution"] and sources:
-                merged: List[str] = []
-                for source in sources:
-                    for aid in source.get("attribution", []):
-                        if aid not in merged:
-                            merged.append(aid)
-                sprint["attribution"] = merged
+            # Backward compatibility if the model still emits canonical IDs.
+            if not attrs:
+                attrs = self._normalize_attribution(
+                    raw.get("attribution") or raw.get("advisor_ids"), selected_ids
+                )
+            # Fail-safe provenance: never hallucinate a non-selected advisor.
+            if not attrs:
+                attrs = list(selected_ids)
 
             evidence = self._normalize_evidence_code(
-                sprint.get("evidence_classification") or sprint.get("evidence_class")
-            )
-            if not evidence and sources:
-                evidence = self._more_conservative_evidence(
-                    [str(x.get("evidence_classification") or "") for x in sources]
-                )
-            sprint["evidence_classification"] = evidence
-
+                raw.get("evidence_classification") or raw.get("evidence_class")
+            ) or "I2"
             interaction = self._normalize_interaction(
-                sprint.get("interaction_type") or sprint.get("discussion_type")
-            )
-            if not interaction and sources:
-                interactions = [str(x.get("interaction_type") or "") for x in sources]
-                interaction = (
-                    interactions[0]
-                    if len(set(interactions)) == 1 and interactions[0] in INTERACTION_TYPES
-                    else "COMPLEMENTARY"
-                )
-            sprint["interaction_type"] = interaction
-
+                raw.get("interaction_type") or raw.get("discussion_type")
+            ) or ("CONSENSUS" if len(attrs) == 1 else "COMPLEMENTARY")
             confidence = self._normalize_confidence(
-                sprint.get("confidence_level") or sprint.get("confidence")
-            )
-            if not confidence and sources:
-                confidence = self._minimum_confidence(
-                    [str(x.get("confidence_level") or "") for x in sources]
-                )
+                raw.get("confidence_level") or raw.get("confidence")
+            ) or "Medium"
             if evidence in {"U", "A1"}:
                 confidence = "Low"
             elif evidence == "I2" and confidence == "High":
                 confidence = "Medium"
             if interaction in {"CONFLICT", "EVIDENCE GAP", "SCOPE CONFLICT"} and confidence == "High":
                 confidence = "Medium"
-            sprint["confidence_level"] = confidence
 
-            if not str(sprint.get("evidence_basis") or "").strip() and sources:
-                basis = [str(x.get("evidence_basis") or "").strip() for x in sources]
-                basis = [x for x in basis if x]
-                if basis:
-                    sprint["evidence_basis"] = "؛ ".join(basis)[:900]
+            results: List[Dict[str, Any]] = []
+            for item in raw.get("results") or []:
+                if not isinstance(item, dict):
+                    continue
+                text = str(item.get("text") or "").strip()
+                outputs: List[Dict[str, str]] = []
+                for output in item.get("outputs") or []:
+                    if isinstance(output, dict):
+                        ot = str(output.get("text") or "").strip()
+                    else:
+                        ot = str(output or "").strip()
+                    if ot:
+                        outputs.append({"text": ot})
+                if text and outputs:
+                    results.append({
+                        "text": text,
+                        "outputs": outputs[:3],
+                        "status": OPEN_STATUS,
+                        "attribution": list(attrs),
+                        "evidence_classification": evidence,
+                        "interaction_type": interaction,
+                        "confidence_level": confidence,
+                    })
+            if not results:
+                continue
+
+            interventions.append({
+                "intervention_id": f"INT-{len(interventions) + 1:02d}",
+                "title": title,
+                "impact_description": impact,
+                "reportable_value": reportable,
+                "attribution": attrs,
+                "evidence_classification": evidence,
+                "evidence_basis": str(raw.get("evidence_basis") or "بيانات الحالة ورأي المجلس المختار ضمن نطاق المستشارين.").strip(),
+                "interaction_type": interaction,
+                "confidence_level": confidence,
+                "status": OPEN_STATUS,
+                "results": results,
+            })
+
+        suggestion["interventions"] = interventions
+        suggestion["sprints"] = self._build_private_sprints(interventions)
+        suggestion["sprint_count"] = SPRINT_COUNT
+
+        if not str(result.get("recommendation_text") or "").strip():
+            titles = [x["title"] for x in interventions]
+            result["recommendation_text"] = (
+                "يوصي المجلس بالتركيز على: " + "؛ ".join(titles)
+                if titles else "لا توجد توصية مكتملة بسبب نقص مخرجات قابلة للاعتماد."
+            )
 
         item_interactions = [str(x.get("interaction_type") or "") for x in interventions]
-        derived_interaction = self._derive_council_interaction(item_interactions)
-        requested_interaction = self._normalize_interaction(result.get("council_interaction_type"))
-        result["council_interaction_type"] = (
-            requested_interaction
-            if requested_interaction and requested_interaction in item_interactions
-            else derived_interaction
-        )
+        result["council_interaction_type"] = self._derive_council_interaction(item_interactions)
+        result["overall_confidence"] = self._derive_overall_confidence(interventions)
 
-        derived_confidence = self._derive_overall_confidence(interventions)
-        requested_confidence = self._normalize_confidence(result.get("overall_confidence"))
-        confidence_score = {"Low": 1, "Medium": 2, "High": 3}
-        if requested_confidence:
-            # The Meta Advisor applies the Confidence Engine; code only prevents
-            # the public API from being more optimistic than item-level evidence.
-            result["overall_confidence"] = min(
-                (requested_confidence, derived_confidence),
-                key=lambda x: confidence_score[x],
-            )
-        else:
-            result["overall_confidence"] = derived_confidence
-
-        # Derive a stable top-level attribution map from item-level provenance.
         attribution_summary = []
         for aid in selected_ids:
             titles = [
@@ -1025,20 +1061,18 @@ class AtharCouncilEngine:
                 for x in interventions
                 if aid in x.get("attribution", []) and str(x.get("title") or "").strip()
             ]
-            if not titles:
-                titles = [
-                    str(x.get("title") or "").strip()
-                    for x in sprints
-                    if aid in x.get("attribution", []) and str(x.get("title") or "").strip()
-                ]
-            titles = list(dict.fromkeys(titles))[:4]
             if titles:
                 attribution_summary.append({
                     "advisor_id": aid,
-                    "contribution": "؛ ".join(titles),
+                    "contribution": "؛ ".join(list(dict.fromkeys(titles))[:4]),
                 })
-        result["attribution"] = attribution_summary
-
+        # If the compact model was conservative and attributed everything to a
+        # subset, still preserve the complete selected council in involved IDs;
+        # attribution itself remains item-based.
+        result["attribution"] = attribution_summary or [
+            {"advisor_id": aid, "contribution": "مساهمة ضمن المجلس المختار."}
+            for aid in selected_ids
+        ]
         return result
 
     def _validate_backend_result(self, result: Dict[str, Any], selected_ids: List[str]) -> None:
@@ -1456,263 +1490,201 @@ class AtharCouncilEngine:
         return cards
 
     def _run_meta(self, request: Dict[str, Any], advisor_outputs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Compact two-attempt Meta synthesis for Screen 3.
+
+        The public Screen-3 contract only needs interventions/results/outputs.
+        Asking the model to also emit 12 full sprints and long canonical IDs made
+        outputs unnecessarily large and was the main source of truncation and
+        malformed JSON.  v4.2 asks for a compact semantic draft; code then adds
+        canonical IDs, private metadata and the 12-week structural allocation.
+        """
         self._last_meta_debug = {
-            "schema_repair_used": False,
-            "repair_used": False,
-            "impact_quality_repair_used": False,
-            "impact_quality_second_repair_used": False,
-            "initial_schema_error": None,
+            "compact_meta_contract": True,
+            "schema_retry_used": False,
+            "quality_retry_used": False,
+            "initial_error": None,
             "initial_grounding_violations": [],
-            "final_grounding_violations": [],
             "initial_impact_quality_violations": [],
+            "initial_language_violations": [],
+            "final_grounding_violations": [],
             "final_impact_quality_violations": [],
+            "final_language_violations": [],
         }
         selected_ids = [str(x["advisor_id"]) for x in advisor_outputs]
         scope_cards = self._build_scope_cards(advisor_outputs)
+        advisor_ref_map = {
+            str(i + 1): {
+                "advisor_id": aid,
+                "advisor_name_ar": str(advisor_outputs[i].get("advisor_name_ar") or ""),
+            }
+            for i, aid in enumerate(selected_ids)
+        }
+
+        input_obj = request.get("input") or {}
+        imap = input_obj.get("impact_map") or {}
+        goal = input_obj.get("goal") or {}
+        programs = input_obj.get("programs") or []
 
         meta_task = {
             "instruction": (
-                "هذه مرحلة التركيب النهائي للمجلس. طبّق AOS-META-00 الأصلي بالكامل، لا تلخص الآراء فقط. "
-                "قارن المساهمات، اكشف الاتفاق والتكامل والمفاضلة والتعارض ونقص الدليل وتجاوز النطاق، "
-                "ثم أصدر توصية موحدة قابلة للتنفيذ. أي رأي يتجاوز Scope Contract لمستشاره لا يتحول إلى "
-                "توصية نهائية إلا إذا كان مستشار مختار آخر يملك هذا المجال ويدعمه. "
-                "استخدم IDs الرسمية AOS-* فقط في Attribution وفي involved_advisor_ids؛ لا تستخدم أرقامًا مثل 13 أو 15 كهوية مستشار. "
-                "عندما يكون topic=interventions أو توجد impact_map فأنت في IMPACT INTERVENTION MODE: مركز القرار هو المشكلة الاجتماعية ومحركات الأثر والفئة المستهدفة والبرامج القائمة، وليس وظائف الدعم الداخلية. "
-                "يجب أن تكون أغلبية التدخلات النهائية DIRECT IMPACT وليست ENABLERS. إذا أعدت 3 أو 4 تدخلات، فيجب أن يكون اثنان منها على الأقل تدخلين مباشرين للمستفيد/البرنامج يعالجان المشكلة أو أحد محركات الأثر أو يقويان برنامجًا قائمًا مرتبطًا بها. إذا أعدت تدخلين، فيجب أن يكون أحدهما على الأقل مباشرًا. "
-                "التمويل وMEAL والقياس والمحفظة والحوكمة أدوات تمكين: عندما يكون المسار أثريًا/برنامجيًا لا تسمح بأكثر من تدخل تمكيني مستقل واحد في قائمة من 3 أو 4 تدخلات. ادمج بقية أدوات التمكين كشرط أو نتيجة أو مخرج داخل التدخلات المباشرة. "
-                "لا تجعل عنوان التدخل يبدأ أو يتمحور حول تحليل/تقييم/مراجعة/قياس/إطار/منهجية/استراتيجية تمويل/إدارة موارد إذا كان المطلوب Intervention Proposal؛ هذه خطوات تمكينية وليست تدخل أثر مباشر. استخدم أسماء البرامج القائمة ومحركات الأثر كمرساة للتدخلات المباشرة متى دعمها رأي مستشار مختار. "
-                "يمكن لمستشار المحافظ/البرامج دعم ترجيح أو تقوية أو توسيع برنامج قائم إذا كان رأيه يثبت ذلك؛ لا تضف تفاصيل خدمة جديدة غير مدعومة. "
-                "ابنِ خطة تنفيذ من 12 Sprint بالضبط، كل Sprint = أسبوع واحد، تغطي التدخلات النهائية فقط ولا "
-                "تخلق نطاقًا جديدًا. هيكل الأسابيع الاثني عشر قيد منتج ثابت ومسموح؛ ممنوع اختراع أي مدة أخرى. "
-                "لا تخترع أرقامًا أو نسبًا أو خطوط أساس أو مستهدفات أو تواريخ أو ميزانيات. يجوز فقط إعادة استخدام رقم/نسبة واردة صراحة في case_context وفي نفس الدلالة. "
-                "أعد JSON صالحًا فقط وفق العقد المطلوب."
+                "طبّق AOS-META-00 كمرحلة تركيب نهائي للمجلس. أعد JSON صغيرًا وصالحًا فقط. "
+                "لا تكتب 12 Sprint في إجابتك؛ النظام سيقسم التدخلات إلى 12 أسبوعًا بعد التركيب. "
+                "لا تكتب أكواد AOS داخل JSON. استخدم advisor_refs فقط كأرقام 1..N وفق advisor_ref_map. "
+                "لا تستخدم أي مستشار غير موجود في advisor_ref_map. "
+                "هذه شاشة Impact Map وtopic=interventions: المطلوب تدخلات أثر/برامج فعلية، لا قائمة أعمال دعم داخلية. "
+                "إذا أعدت 3 أو 4 تدخلات فيجب أن يكون اثنان منها على الأقل مباشرين للمستفيد/البرنامج ويرتبطان صراحة "
+                "بالمشكلة الاجتماعية أو impact_drivers أو برنامج قائم. اسمح بحد أقصى بتدخل تمكيني مستقل واحد (MEAL/تمويل/موارد/حوكمة). "
+                "يمكن دمج القياس والتمويل كـresults/outputs أو شروط دعم تحت تدخل مباشر. "
+                "لا تبدأ عناوين التدخلات المباشرة بتحليل/تقييم/قياس/إطار/منهجية/تمويل/موارد. "
+                "استخدم البرامج القائمة ومحركات الأثر كمرساة عندما تدعمها آراء المستشارين ضمن نطاقهم. "
+                "لا تخترع خدمة أو شراكة أو موردًا غير مدعوم. لا تخترع أي رقم أو نسبة أو مبلغ أو مدة أو تاريخ. "
+                "يجوز إعادة استخدام رقم موجود صراحة في case_context وبنفس الدلالة فقط. "
+                "اكتب النصوص بالعربية السليمة؛ يسمح فقط بالمصطلحات/الاختصارات الإنجليزية المعتادة مثل MEAL عند الحاجة. "
+                "لا تستخدم أي أحرف صينية أو يابانية أو كيريلية."
             ),
-            "evidence_protocol": {
-                "E1": "VERIFIED ORGANIZATION DATA — بيانات مثبتة من الجهة.",
-                "E2": "AUTHORITATIVE REFERENCE — مرجع رسمي أو نظام أو معيار موثوق موجود فعلاً في الأدلة.",
-                "E3": "CORROBORATED EVIDENCE — معلومة مدعومة من أكثر من مصدر موثوق.",
-                "I1": "STRONG INFERENCE — استنتاج قوي من الأدلة.",
-                "I2": "WORKING INFERENCE — استنتاج يحتاج تحققًا إضافيًا.",
-                "A1": "EXPLICIT ASSUMPTION — افتراض معلن يحتاج اختبارًا.",
-                "U": "UNKNOWN — غير معروف.",
-            },
-            "evidence_rules": [
-                "صنّف أساس كل تدخل وكل Sprint بكود واحد فقط.",
-                "لا تستخدم E2 أو E3 ما لم يوجد المرجع/التأييد فعلاً في المدخلات.",
-                "التوصية المشتقة من بيانات الجهة تكون عادة I1 أو I2؛ لا تسمِّ الاستنتاج E1 لمجرد أن البيانات الأصلية E1.",
-                "A1 وU لا يتحولان إلى حقيقة، ويجب أن يخفضا الثقة.",
-            ],
-            "interaction_protocol": {
-                "CONSENSUS": "اتفاق قوي.",
-                "COMPLEMENTARY": "آراء مختلفة لكنها متكاملة.",
-                "TRADE-OFF": "خيارات صحيحة بينها مفاضلة.",
-                "CONFLICT": "تعارض مباشر.",
-                "EVIDENCE GAP": "الخلاف أو القرار متأثر بنقص الأدلة.",
-                "SCOPE CONFLICT": "أحد الآراء تجاوز نطاق المستشار أو اصطدم بملكية تخصص آخر.",
-            },
-            "confidence_mapping": {
-                "High": "مؤكد أو مرجح جدًا: أدلة كافية/قوية وعدم يقين محدود.",
-                "Medium": "محتمل: توجد أدلة لكن بدائل أو فجوات معقولة.",
-                "Low": "إشارة ضعيفة أو غير معلوم: البيانات غير كافية أو يعتمد على افتراضات.",
-            },
             "case_context": self._shared_context(request),
-            "selected_advisor_ids": selected_ids,
+            "advisor_ref_map": advisor_ref_map,
             "advisor_scope_cards": scope_cards,
             "selected_advisor_outputs": advisor_outputs,
-            "screen3_direct_anchors": {
-                "social_problem": str(((request.get("input") or {}).get("impact_map") or {}).get("social_problem") or ((request.get("input") or {}).get("goal") or {}).get("social_problem") or ""),
-                "impact_drivers": str(((request.get("input") or {}).get("impact_map") or {}).get("impact_drivers") or ""),
-                "target_group": str(((request.get("input") or {}).get("goal") or {}).get("target_group") or ""),
+            "direct_anchors": {
+                "social_problem": str(imap.get("social_problem") or (goal.get("social_problem") if isinstance(goal, dict) else "") or ""),
+                "impact_drivers": str(imap.get("impact_drivers") or ""),
+                "target_group": str(goal.get("target_group") if isinstance(goal, dict) else ""),
                 "existing_program_names": [
-                    str(x.get("name") or "") for x in ((request.get("input") or {}).get("programs") or [])
+                    str(x.get("name") or "") for x in programs
                     if isinstance(x, dict) and str(x.get("name") or "").strip()
                 ],
-                "directness_rule": "For 3-4 proposals create at least 2 direct beneficiary/program interventions and at most 1 standalone enabler unless the requested track is itself an enabling domain.",
             },
+            "evidence_codes": ["E1", "E2", "E3", "I1", "I2", "A1", "U"],
+            "interaction_types": [
+                "CONSENSUS", "COMPLEMENTARY", "TRADE-OFF", "CONFLICT",
+                "EVIDENCE GAP", "SCOPE CONFLICT",
+            ],
+            "confidence_levels": ["High", "Medium", "Low"],
             "required_schema": {
-                "recommendation_text": "string — النص النهائي الموحد",
-                "overall_confidence": "High|Medium|Low according to Confidence Engine",
-                "council_interaction_type": "CONSENSUS|COMPLEMENTARY|TRADE-OFF|CONFLICT|EVIDENCE GAP|SCOPE CONFLICT",
+                "recommendation_text": "string",
                 "suggestion": {
                     "interventions": [
                         {
                             "title": "string",
                             "impact_description": "string",
-                            "reportable_value": "string; قيمة/مؤشر قابل للتقرير. يجوز استخدام هدف رقمي فقط إذا ورد صراحة في case_context لنفس المعنى",
-                            "attribution": ["AOS-*-NN from selected_advisor_ids only"],
-                            "evidence_classification": "E1|E2|E3|I1|I2|A1|U",
-                            "evidence_basis": "string explaining the actual basis",
-                            "interaction_type": "CONSENSUS|COMPLEMENTARY|TRADE-OFF|CONFLICT|EVIDENCE GAP|SCOPE CONFLICT",
+                            "reportable_value": "string",
+                            "advisor_refs": ["1-based integers from advisor_ref_map only"],
+                            "evidence_classification": "one evidence code",
+                            "evidence_basis": "short string",
+                            "interaction_type": "one interaction type",
                             "confidence_level": "High|Medium|Low",
                             "results": [
                                 {"text": "string", "outputs": [{"text": "string"}]}
                             ],
                         }
-                    ],
-                    "sprints": [
-                        {
-                            "title": "string",
-                            "objective": "string",
-                            "actions": ["1-4 concise actions"],
-                            "outputs": ["1-3 deliverables"],
-                            "source_intervention_ids": ["INT-01 etc., based on intervention order"],
-                            "attribution": ["selected AOS-* IDs only"],
-                            "evidence_classification": "E1|E2|E3|I1|I2|A1|U",
-                            "evidence_basis": "string",
-                            "interaction_type": "allowed interaction enum",
-                            "confidence_level": "High|Medium|Low",
-                        }
-                    ],
+                    ]
                 },
             },
             "hard_rules": [
-                "Return valid JSON only. No Markdown fences.",
-                "Return 1 to 4 interventions; omit weak or unsupported interventions.",
-                "Return exactly 12 sprints in chronological order; one sprint equals one week.",
-                "INT-01 means the first intervention in the returned interventions array, INT-02 the second, and so on.",
-                "Every intervention must be scheduled in at least one sprint.",
-                "Every intervention and sprint must have non-empty attribution using selected canonical AOS-* IDs only.",
-                "Do not create an intervention from case_context alone; it must be supported by at least one selected advisor opinion within that advisor's scope.",
-                "For Screen 3/impact-map requests, use social_problem + impact_drivers + target_group + existing programs as the relevance filter and prioritization frame for supported advisor recommendations.",
-                "For Screen 3/impact-map requests: with 3-4 proposals require at least 2 direct beneficiary/program-facing interventions; with 2 proposals require at least 1. Unless the selected track/goal is explicitly an enabling domain, allow at most 1 standalone enabler among 3-4 proposals.",
-                "When existing programs are provided and a selected program/portfolio or sector advisor supports them, at least one direct intervention should clearly anchor to an existing program or named impact driver rather than returning only analytical/support tasks.",
-                "Avoid duplicate enabler interventions from the same domain (for example two separate funding/resource interventions); consolidate them unless they represent materially different decisions.",
-                "When an advisor opinion crosses its scope, classify the issue as SCOPE CONFLICT and exclude that out-of-scope part unless the owning selected advisor supports it.",
-                "Do not generate beneficiaries_count, evidence, or is_selected.",
-                "Do not invent numeric targets, percentages, baselines, dates, deadlines, budgets, or durations other than the fixed 12 weekly sprint structure.",
-                "reportable_value يلتزم بعقد Screen 3: إن وُجد هدف رقمي معتمد وصريح في case_context لنفس المعنى يجوز تكراره كما هو؛ وإلا استخدم مؤشرًا قابلًا للقياس دون اختراع قيمة رقمية.",
-                "Do not write advisor codes inside recommendation prose; IDs belong only in attribution fields.",
-                "Keep sprint actions case-specific and non-repetitive; later sprints may continue earlier work but must add a distinct next step or deliverable.",
+                "Valid JSON only; double quotes only; no Markdown.",
+                "Return 2 to 4 interventions for this Screen-3 case when evidence supports them.",
+                "With 3-4 interventions, at least 2 are direct beneficiary/program interventions and at most 1 is a standalone enabler.",
+                "Each intervention has 1-2 results; each result has 1-2 outputs.",
+                "advisor_refs may contain only integers shown in advisor_ref_map.",
+                "No AOS/ATHAR advisor codes in prose or outputs.",
+                "No invented quantitative claims, budgets, durations, deadlines, or targets.",
             ],
         }
 
         meta_adapter = "meta" if COUNCIL_META_MODE == "adapter" else "base"
 
-        def generate_parse_normalize(task: Dict[str, Any]) -> Dict[str, Any]:
-            raw_text = self._generate(
+        def generate_once(task: Dict[str, Any]) -> Dict[str, Any]:
+            raw = self._generate(
                 meta_adapter,
                 self.meta_prompt,
                 json.dumps(task, ensure_ascii=False, indent=2),
                 META_MAX_NEW_TOKENS,
                 deterministic=True,
-                repetition_penalty=1.08,
+                repetition_penalty=1.10,
                 no_repeat_ngram_size=8,
             )
-            parsed = self.extract_json_object(raw_text)
+            parsed = self.extract_json_object(raw)
             normalized = self._normalize_meta_result(parsed, selected_ids, request)
             self._validate_backend_result(normalized, selected_ids)
             return normalized
 
-        try:
-            result = generate_parse_normalize(meta_task)
-        except Exception as exc:
-            self._last_meta_debug["schema_repair_used"] = True
-            self._last_meta_debug["initial_schema_error"] = str(exc)[:1200]
-            schema_repair = dict(meta_task)
-            schema_repair["instruction"] = (
-                meta_task["instruction"]
-                + " المحاولة السابقة لم تلتزم بعقد الـAPI. أعد بناء الإجابة كاملة من الصفر. "
-                  "يجب وجود recommendation_text، من 1 إلى 4 interventions، و12 sprints بالضبط. "
-                  "لا تحذف attribution/evidence_classification/evidence_basis/interaction_type/confidence_level."
-            )
-            schema_repair["previous_validation_error"] = str(exc)[:1200]
-            result = generate_parse_normalize(schema_repair)
-
-        violations = self._grounding_violations(result, request)
-        self._last_meta_debug["initial_grounding_violations"] = list(violations)
-
-        if violations:
-            self._last_meta_debug["repair_used"] = True
-            repair_task = dict(meta_task)
-            repair_task["instruction"] = (
-                meta_task["instruction"]
-                + " المحاولة السابقة خالفت Grounding. أعد JSON كاملًا مع الحفاظ على 12 Sprint، "
-                  "واحذف أي رقم/نسبة/مدة/مستهدف غير موجود في case_context. لا تدافع عن النص السابق."
-            )
-            repair_task["validation_errors"] = violations[:20]
-            repair_task["previous_invalid_output"] = result
-            result = generate_parse_normalize(repair_task)
-            violations = self._grounding_violations(result, request)
-
-        self._last_meta_debug["final_grounding_violations"] = list(violations)
-        if violations:
-            raise ValueError(
-                "Council grounding validation failed after repair: "
-                + " | ".join(violations[:8])
-            )
-
-        impact_quality = self._screen3_impact_quality_violations(result, request)
-        self._last_meta_debug["initial_impact_quality_violations"] = list(impact_quality)
-        if impact_quality:
-            self._last_meta_debug["impact_quality_repair_used"] = True
-            impact_repair = dict(meta_task)
-            impact_repair["instruction"] = (
-                meta_task["instruction"]
-                + " المحاولة السابقة صحيحة شكليًا لكنها انحرفت عن هدف Screen 3. "
-                  "أعد بناء التدخلات بحيث تكون المشكلة الاجتماعية ومحركات الأثر والبرامج القائمة هي مركز النتيجة. "
-                  "قلّل تدخلات التمويل/MEAL/التحليل المستقلة وادمجها كعوامل تمكين تحت التدخلات المباشرة متى أمكن. "
-                  "لا تخترع تدخلًا أو تفاصيل خدمة لا يدعمها رأي مستشار مختار داخل نطاقه. "
-                  "إذا كان هناك برنامج قائم مرتبط مباشرة بمحرك أثر وقد دعمه مستشار البرامج/المحفظة، فيجوز تقويته أو ترتيبه أو توسيعه دون اختراع تفاصيل تشغيلية جديدة."
-            )
-            impact_repair["impact_quality_errors"] = impact_quality
-            impact_repair["previous_valid_but_low_quality_output"] = result
-            result = generate_parse_normalize(impact_repair)
-
-            # A quality rewrite must still satisfy the hard quantitative grounding gate.
-            violations = self._grounding_violations(result, request)
-            if violations:
-                final_repair = dict(meta_task)
-                final_repair["instruction"] = (
-                    meta_task["instruction"]
-                    + " أصلح في محاولة واحدة أخيرة مشاكل جودة التدخلات وGrounding معًا. "
-                      "اجعل التدخلات مباشرة للأثر/البرنامج، وادمج أدوات الدعم، ولا تضف أي رقم غير موجود في case_context."
-                )
-                final_repair["impact_quality_errors"] = impact_quality
-                final_repair["grounding_errors"] = violations[:20]
-                final_repair["previous_invalid_output"] = result
-                result = generate_parse_normalize(final_repair)
-                violations = self._grounding_violations(result, request)
-
-            impact_quality = self._screen3_impact_quality_violations(result, request)
-
-            if impact_quality:
-                self._last_meta_debug["impact_quality_second_repair_used"] = True
-                input_obj = request.get("input") or {}
-                imap = input_obj.get("impact_map") or {}
-                goal = input_obj.get("goal") or {}
-                programs = input_obj.get("programs") or []
-                final_impact_repair = dict(meta_task)
-                final_impact_repair["instruction"] = (
-                    meta_task["instruction"]
-                    + " هذه محاولة قبول نهائية لـScreen 3. لا تعِد صياغة قائمة دعم داخلي. "
-                      "إذا أعدت 3 أو 4 تدخلات: التدخلان الأولان على الأقل يجب أن يكونا DIRECT IMPACT ومربوطين صراحة بمحرك أثر أو برنامج قائم؛ لا يبدأ عنوانهما بتحليل/تقييم/قياس/تمويل/موارد/إطار/منهجية. "
-                      "اسمح بحد أقصى بتدخل ENABLER مستقل واحد. اجعل MEAL والتمويل والموارد مخرجات/شروط دعم داخل التدخلات المباشرة متى أمكن. "
-                      "استخدم أسماء البرامج ومحركات الأثر التالية كمرساة فقط إذا كانت آراء المستشارين المختارين تدعمها؛ لا تخترع خدمة جديدة."
-                )
-                final_impact_repair["acceptance_errors"] = impact_quality
-                final_impact_repair["direct_anchors"] = {
-                    "social_problem": str(imap.get("social_problem") or (goal.get("social_problem") if isinstance(goal, dict) else "") or ""),
-                    "impact_drivers": str(imap.get("impact_drivers") or ""),
-                    "target_group": str(goal.get("target_group") if isinstance(goal, dict) else ""),
-                    "existing_program_names": [str(x.get("name") or "") for x in programs if isinstance(x, dict) and str(x.get("name") or "").strip()],
+        def language_violations(result: Dict[str, Any]) -> List[str]:
+            violations: List[str] = []
+            suggestion = result.get("suggestion") or {}
+            for i, intervention in enumerate(suggestion.get("interventions") or []):
+                if not isinstance(intervention, dict):
+                    continue
+                scan_values = {
+                    "title": intervention.get("title"),
+                    "impact_description": intervention.get("impact_description"),
+                    "reportable_value": intervention.get("reportable_value"),
+                    "evidence_basis": intervention.get("evidence_basis"),
+                    "results": intervention.get("results"),
                 }
-                result = generate_parse_normalize(final_impact_repair)
-                violations = self._grounding_violations(result, request)
-                impact_quality = self._screen3_impact_quality_violations(result, request)
+                for text in self._collect_strings(scan_values):
+                    if self._has_foreign_script(text):
+                        violations.append(f"interventions[{i}] contains foreign-script leakage")
+                        break
+                    if re.search(r"\b(?:ATHAR|AOS)-(?:LD|SP|FG|SE)?-?\d+\b", text, flags=re.I):
+                        violations.append(f"interventions[{i}] exposes advisor code in user-facing text")
+                        break
+            return list(dict.fromkeys(violations))
 
-        self._last_meta_debug["final_grounding_violations"] = list(violations)
-        self._last_meta_debug["final_impact_quality_violations"] = list(impact_quality)
-        if violations:
-            raise ValueError(
-                "Council grounding validation failed after impact-quality repair: "
-                + " | ".join(violations[:8])
-            )
-        if impact_quality:
-            raise ValueError(
-                "Council Screen-3 impact quality validation failed after repair: "
-                + " | ".join(impact_quality[:6])
-            )
+        initial_error: Optional[Exception] = None
+        result: Optional[Dict[str, Any]] = None
+        try:
+            result = generate_once(meta_task)
+        except Exception as exc:
+            initial_error = exc
+            self._last_meta_debug["schema_retry_used"] = True
+            self._last_meta_debug["initial_error"] = str(exc)[:1200]
 
+        if result is not None:
+            grounding = self._grounding_violations(result, request)
+            impact = self._screen3_impact_quality_violations(result, request)
+            language = language_violations(result)
+            self._last_meta_debug["initial_grounding_violations"] = list(grounding)
+            self._last_meta_debug["initial_impact_quality_violations"] = list(impact)
+            self._last_meta_debug["initial_language_violations"] = list(language)
+        else:
+            grounding, impact, language = [], [], []
+
+        needs_retry = result is None or bool(grounding or impact or language)
+        if needs_retry:
+            self._last_meta_debug["quality_retry_used"] = True
+            retry = dict(meta_task)
+            retry["instruction"] = (
+                meta_task["instruction"]
+                + " هذه محاولة القبول النهائية. اكتب JSON أقصر وبنية أبسط. "
+                  "اجعل التدخلين الأولين على الأقل مباشرين للمستفيد/البرنامج ومربوطين باسم برنامج قائم أو impact driver عندما تدعم الآراء ذلك. "
+                  "ادمج القياس والتمويل كدعم ولا تسمح لهما بالسيطرة على القائمة. "
+                  "راجع كل رقم واحذف أي رقم غير موجود حرفيًا في case_context. "
+                  "استخدم advisor_refs فقط ولا تكتب أي ID نصي للمستشار."
+            )
+            retry["previous_errors"] = {
+                "schema": str(initial_error)[:900] if initial_error else None,
+                "grounding": grounding[:8],
+                "impact_quality": impact[:8],
+                "language": language[:8],
+            }
+            # Do not include the malformed/raw previous JSON; that tends to
+            # anchor the model on the exact syntax/ID mistakes we are repairing.
+            result = generate_once(retry)
+
+        grounding = self._grounding_violations(result, request)
+        impact = self._screen3_impact_quality_violations(result, request)
+        language = language_violations(result)
+        self._last_meta_debug["final_grounding_violations"] = list(grounding)
+        self._last_meta_debug["final_impact_quality_violations"] = list(impact)
+        self._last_meta_debug["final_language_violations"] = list(language)
+
+        if grounding:
+            raise ValueError("Council grounding validation failed: " + " | ".join(grounding[:8]))
+        if impact:
+            raise ValueError("Council Screen-3 impact quality validation failed: " + " | ".join(impact[:6]))
+        if language:
+            raise ValueError("Council language validation failed: " + " | ".join(language[:6]))
         return result
 
     @staticmethod
