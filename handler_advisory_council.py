@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -191,23 +192,113 @@ class AtharCouncilEngine:
         text = re.sub(r"<think>.*?</think>", "", str(text), flags=re.S | re.I)
         return text.strip()
 
+    @staticmethod
+    def _balanced_object_candidate(text: str) -> str:
+        """Return the first balanced JSON-like object, ignoring braces inside strings."""
+        start = text.find("{")
+        if start < 0:
+            return text
+        depth = 0
+        in_string = False
+        quote = ""
+        escaped = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_string:
+                if escaped:
+                    escaped = False
+                    continue
+                if ch == "\\":
+                    escaped = True
+                    continue
+                if ch == quote:
+                    in_string = False
+                    quote = ""
+                continue
+            if ch in ('"', "'"):
+                in_string = True
+                quote = ch
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1]
+        return text[start:]
+
+    @staticmethod
+    def _repair_common_json_syntax(candidate: str) -> str:
+        """Conservatively repair common LLM JSON syntax mistakes.
+
+        This does not alter semantic content. It only normalizes property quoting
+        and trailing commas that strict JSON rejects.
+        """
+        repaired = str(candidate).strip()
+        # Curly quotes are frequently emitted around property names. Normalize
+        # them before quoting bare keys.
+        repaired = repaired.replace("“", '"').replace("”", '"')
+        # Quote single-quoted property names (not arbitrary values).
+        repaired = re.sub(
+            r"([\{,]\s*)'([^'\n]+)'\s*:",
+            lambda m: m.group(1) + json.dumps(m.group(2), ensure_ascii=False) + ":",
+            repaired,
+        )
+        # Quote bare ASCII property names such as title: or results:.
+        repaired = re.sub(
+            r'([\{,]\s*)([A-Za-z_][A-Za-z0-9_\-]*)\s*:',
+            r'\1"\2":',
+            repaired,
+        )
+        # Remove trailing commas before a closing object/array.
+        repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+        return repaired
+
     @classmethod
     def extract_json_object(cls, text: str) -> Dict[str, Any]:
         cleaned = cls.clean_model_text(text)
-        cleaned = re.sub(r"^\s*```(?:json)?\s*", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"^\s*```(?:json|javascript|js)?\s*", "", cleaned, flags=re.I)
         cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+        candidate = cls._balanced_object_candidate(cleaned)
+
+        errors: List[str] = []
+        for label, payload in (
+            ("strict", cleaned),
+            ("balanced", candidate),
+            ("common-repair", cls._repair_common_json_syntax(candidate)),
+        ):
+            try:
+                value = json.loads(payload)
+                if isinstance(value, dict):
+                    return value
+            except json.JSONDecodeError as exc:
+                errors.append(f"{label}: {exc}")
+
+        # Optional JSON5 fallback when the runtime already provides it. This is
+        # deliberately optional so deployment does not gain a new dependency.
         try:
-            value = json.loads(cleaned)
+            import json5  # type: ignore
+            value = json5.loads(candidate)
             if isinstance(value, dict):
                 return value
-        except json.JSONDecodeError:
-            pass
-        start, end = cleaned.find("{"), cleaned.rfind("}")
-        if start >= 0 and end > start:
-            value = json.loads(cleaned[start : end + 1])
+        except Exception as exc:
+            errors.append(f"json5: {exc}")
+
+        # Python-literal fallback covers single-quoted dict/list output. Only
+        # literal structures are accepted; no code execution is possible.
+        try:
+            value = ast.literal_eval(candidate)
             if isinstance(value, dict):
                 return value
-        raise ValueError("Meta Advisor did not return a valid JSON object.")
+        except Exception as exc:
+            errors.append(f"literal: {exc}")
+
+        excerpt = candidate[:1600].replace("\n", " ")
+        raise ValueError(
+            "Meta Advisor returned malformed JSON after parser repair attempts. "
+            + " | ".join(errors[-4:])
+            + f" | excerpt={excerpt!r}"
+        )
 
     def _render_chat(self, system_prompt: str, user_prompt: str) -> str:
         messages = [
@@ -1954,3 +2045,4 @@ class AtharCouncilEngine:
             "final_result": public_result,
             "rich_meta_result": rich_result,
         }
+
