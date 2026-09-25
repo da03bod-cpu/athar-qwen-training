@@ -17992,7 +17992,7 @@ def handler(job):
                     CONTINUAL_LEARNING_ENABLED
                 ),
                 "response_contract_version": "impact_challenge_screen_3_v4_aos_ids_impact_first",
-                "build_version": "athar-screen3-aos-impact-v4-2026-09-25",
+                "build_version": "athar-screen3-aos-impact-v4.1-2026-09-25",
                 "topic": "interventions",
                 "backend_advisor_id_type": "canonical_aos_string",
                 "canonical_advisor_id_format": "AOS-(LD|SP|FG|SE)-NN",
@@ -18009,6 +18009,7 @@ def handler(job):
                 },
                 "single_output_regeneration_supported": True,
                 "grounded_numbers_only": True,
+                "meta_json_parser": "strict+balanced+syntax-repair+json5-optional+literal-fallback",
                 "internal_meta_enrichment": {
                     "attribution": True,
                     "evidence_classification": ["E1", "E2", "E3", "I1", "I2", "A1", "U"],
