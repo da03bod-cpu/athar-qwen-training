@@ -17992,7 +17992,7 @@ def handler(job):
                     CONTINUAL_LEARNING_ENABLED
                 ),
                 "response_contract_version": "impact_challenge_screen_3_specialist_opinions_v2_aos_ids",
-                "build_version": "athar-screen3-specialist-opinions-v2-2026-09-26",
+                "build_version": "athar-screen3-specialist-opinions-v3-2026-09-26",
                 "topic": "interventions",
                 "backend_advisor_id_type": "canonical_aos_string",
                 "canonical_advisor_id_format": "AOS-(LD|SP|FG|SE)-NN",
@@ -18012,8 +18012,12 @@ def handler(job):
                 "consultation_stage": "specialist_opinions_only",
                 "meta_synthesis_enabled": False,
                 "one_intervention_per_selected_advisor": True,
-                "specialist_output_mode": "independent_prose_then_deterministic_screen3_projection",
+                "specialist_output_mode": "independent_prose_then_grounded_deterministic_screen3_projection",
                 "specialist_json_generation_required": False,
+                "public_context_projection": "authoritative_case_context",
+                "percentage_preservation": "grounded_source_values_only",
+                "mixed_script_guard": True,
+                "specialist_scope_projection_guard": True,
                 "max_selected_advisors_for_current_screen3_contract": 4,
                 "intervention_order_matches_involved_advisor_ids": True,
                 "deferred_meta_stage": {

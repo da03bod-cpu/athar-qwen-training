@@ -587,6 +587,16 @@ class AtharCouncilEngine:
         if headings > 8:
             return True
 
+        # Reject obvious multilingual corruption before it reaches the backend.
+        # Normal English acronyms/terms are allowed, but Cyrillic/CJK leakage or
+        # a single token mixing Arabic and Latin characters is not.
+        raw = str(text or "")
+        if re.search(r"[\u0400-\u052F\u4E00-\u9FFF\u3040-\u30FF]", raw):
+            return True
+        for token in re.findall(r"\S+", raw):
+            if re.search(r"[\u0600-\u06FF]", token) and re.search(r"[A-Za-z]", token):
+                return True
+
         return False
 
     def _run_advisor(
@@ -621,7 +631,9 @@ class AtharCouncilEngine:
                 "اربط رأيك بالمشكلة الاجتماعية ومحركات الأثر والبرامج القائمة. إذا كان اختصاصك تمكينيًا مثل التمويل أو MEAL أو القياس، "
                 "فلا تجعل أداة التمكين بديلًا عن التدخل المستفيد-محور؛ وضّح كيف تدعم أو تتحقق من تدخل قائم/مقترح ضمن نطاقك. "
                 "إذا كنت تملك المحافظ/البرامج، يجوز لك ترجيح أو تقوية أو ترتيب أولوية برنامج قائم، لكن لا تخترع تصميم خدمة تفصيليًا خارج الأدلة. "
-                "اجعل الرد مركزًا وغير مكرر."
+                "اجعل الرد مركزًا وغير مكرر. "
+                "اكتب العربية سليمة وواضحة، ولا تخلط أحرفًا لاتينية داخل كلمة عربية. "
+                "يجوز استخدام المصطلحات/الاختصارات المهنية المعروفة مثل MEAL وKPI وSROI وContribution Analysis ككلمات مستقلة فقط."
             ),
             "required_structure": [
                 "تشخيص داخل النطاق",
@@ -767,7 +779,25 @@ class AtharCouncilEngine:
                 if len(recommendation_lines) >= 2:
                     break
 
-        recommendation_lines = list(dict.fromkeys(recommendation_lines))[:2]
+        recommendation_lines = list(dict.fromkeys(recommendation_lines))
+
+        # Lightweight scope guard for the currently used Screen-3 specialists.
+        # The full Expert DNA remains authoritative; this filter only prevents a
+        # neighboring domain recommendation from being projected publicly.
+        scope_keywords = {
+            "AOS-SP-13": ("برنامج", "مشروع", "محفظ", "أولو", "جدوى", "اعتماد", "موارد", "توسع", "منافع"),
+            "AOS-SP-15": ("أثر", "تقييم", "متابعة", "تعلم", "meal", "مؤشر", "نظرية", "مساهمة", "نتائج"),
+            "AOS-FG-18": ("تمويل", "دخل", "مانح", "موارد", "استدام", "إيراد", "تبرع", "شراك"),
+        }
+        keys = scope_keywords.get(advisor["advisor_id"])
+        if keys:
+            scoped = [
+                x for x in recommendation_lines
+                if any(k in x.lower() for k in keys)
+            ]
+            if scoped:
+                recommendation_lines = scoped
+        recommendation_lines = recommendation_lines[:2]
         if not recommendation_lines:
             recommendation_lines = [
                 "تطبيق التوصية الأساسية للمستشار ضمن نطاق اختصاصه وبالاستناد إلى بيانات الحالة المتاحة"
@@ -780,17 +810,33 @@ class AtharCouncilEngine:
         if len(title) < 10 or len(title) > 150:
             title = f"توصية {advisor['advisor_name_ar']} للحالة الحالية"
 
-        # Impact description comes from the advisor's diagnosis when available;
-        # otherwise the first recommendation itself is the safest grounded text.
-        impact_description = (
-            diagnosis_lines[0]
-            if diagnosis_lines
-            else first_rec
-        )
-        impact_description = impact_description[:700].strip()
-
+        # Build the public impact description from authoritative case context,
+        # not from free-form diagnosis prose. This prevents an otherwise useful
+        # specialist answer from leaking a typo or an unsupported contextual claim
+        # into the backend contract. The actual recommendations below still come
+        # from the independent Specialist opinion.
         input_obj = request.get("input") or {}
         track = input_obj.get("track") or {}
+        goal_obj = input_obj.get("goal") or {}
+        org_obj = input_obj.get("organization") or {}
+        goal_statement = str(goal_obj.get("statement") or "").strip() if isinstance(goal_obj, dict) else str(goal_obj or "").strip()
+        important_notes = str(org_obj.get("important_notes") or "").strip() if isinstance(org_obj, dict) else ""
+
+        impact_templates = {
+            "AOS-SP-13": "يركز رأي المستشار على ترتيب أولوية البرامج والمشاريع القائمة وربط قرارات التوسع بالقيمة الاستراتيجية والجدوى والموارد المتاحة.",
+            "AOS-SP-15": "يركز رأي المستشار على بناء منظومة متابعة وتقييم وتعلم وقياس أثر تربط البرامج القائمة بنتائج المستفيدين والهدف الاستراتيجي المعتمد.",
+            "AOS-FG-18": "يركز رأي المستشار على تنويع مصادر الدخل وتقليل الاعتماد على التمويل الموسمي بما يدعم استدامة البرامج والخدمات.",
+        }
+        impact_description = impact_templates.get(
+            advisor["advisor_id"],
+            f"يركز رأي {advisor['advisor_name_ar']} على تطبيق توصية داخل نطاق اختصاصه بما يخدم الهدف المعتمد وبيانات الحالة المتاحة.",
+        )
+        if advisor["advisor_id"] in {"AOS-SP-13", "AOS-SP-15"} and goal_statement:
+            impact_description += f" الهدف المعتمد: {goal_statement}"
+        elif advisor["advisor_id"] == "AOS-FG-18" and important_notes:
+            impact_description += f" ويستند إلى الملاحظة المؤسسية: {important_notes}"
+        impact_description = impact_description[:900].strip()
+
         primary_indicator = ""
         if isinstance(track, dict):
             primary_indicator = str(track.get("primary_indicator") or "").strip()
@@ -857,15 +903,44 @@ class AtharCouncilEngine:
         )
         source_numbers = self._extract_number_tokens(source_text)
 
+        COMMON_TEXT_FIXES = {
+            "التناوي": "التنموي",
+            "التفاعلي": "التنموي",
+            "التقيم": "التقييم",
+            "مستدمة": "مستدامة",
+            "كبرية": "كبرى",
+            "التمويل الموسمية": "التمويل الموسمي",
+            "الخطوط النقلية": "خطوط النقل",
+            "المدرسية": "المدرسية",
+            "الت_dropout": "التسرب",
+            "تموilen": "تمويل",
+        }
+
         def scrub_string(value: str) -> str:
-            value = re.sub(r"[\u0400-\u052F\u4E00-\u9FFF\u3040-\u30FF]", "", str(value or ""))
+            value = str(value or "")
+            for bad, good in COMMON_TEXT_FIXES.items():
+                value = value.replace(bad, good)
+            value = re.sub(r"[\u0400-\u052F\u4E00-\u9FFF\u3040-\u30FF]", "", value)
+
+            # Remove mixed Arabic/Latin corruption token-by-token while allowing
+            # professional Latin acronyms/terms as separate tokens.
+            kept_tokens = []
+            for token in value.split():
+                if re.search(r"[\u0600-\u06FF]", token) and re.search(r"[A-Za-z]", token):
+                    arabic = re.sub(r"[A-Za-z]+", "", token)
+                    token = arabic if len(re.sub(r"[^\u0600-\u06FF]", "", arabic)) >= 3 else ""
+                if token:
+                    kept_tokens.append(token)
+            value = " ".join(kept_tokens)
 
             def repl(match: re.Match) -> str:
                 token = self._normalize_digits(match.group(0))
                 return match.group(0) if token in source_numbers else ""
 
             value = re.sub(r"(?<![\w])\d+(?:[.,]\d+)?(?![\w])", repl, value)
-            value = re.sub(r"\s*(?:%|٪)\s*", " ", value)
+            # Preserve a percentage sign only when it still follows a grounded number.
+            value = re.sub(r"(?<!\d)\s*(?:%|٪)\s*", " ", value)
+            value = re.sub(r"\s*([%٪])\s*", r"\1 ", value)
             value = re.sub(r"\s+", " ", value).strip(" -–—,:؛")
             return value
 
