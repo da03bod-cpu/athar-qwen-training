@@ -11314,6 +11314,12 @@ RICH_V34_MIN_ADVISORS = int(
     os.environ.get("RICH_V34_MIN_ADVISORS", "6")
 )
 
+# Backend/UI contract caps the candidate list while preserving the user's
+# explicit minimum of six evidence-backed advisors.
+RICH_V34_MAX_ADVISORS = int(
+    os.environ.get("RICH_V34_MAX_ADVISORS", "16")
+)
+
 
 def _v34_terms_for_advisor(advisor_num):
     if advisor_num <= 25:
@@ -11897,6 +11903,11 @@ def advisory_match_rich_v34(job_input):
         key=lambda x: x["score"],
         reverse=True,
     )
+
+    # Stable product contract: no more than 16 candidates are returned.
+    # The minimum-fill logic above still guarantees >= 6 when enough
+    # evidence-backed advisors exist.
+    matches = matches[:max(RICH_V34_MIN_ADVISORS, RICH_V34_MAX_ADVISORS)]
 
     elapsed = round(
         time.time() - started,
@@ -14888,6 +14899,7 @@ def _consultation_run_path(run_id):
 def _log_consultation_for_learning(
     job_input,
     response,
+    internal_context=None,
 ):
     if (
         not CONTINUAL_LEARNING_ENABLED
@@ -14900,14 +14912,26 @@ def _log_consultation_for_learning(
         or str(uuid.uuid4())
     )
 
+    # Public responses intentionally omit raw specialist opinions. Preserve them
+    # only in the private continual-learning log so advisory_feedback can still
+    # find the exact advisor answer without leaking internal council detail to UI.
+    log_response = dict(response) if isinstance(response, dict) else response
+    if isinstance(log_response, dict) and isinstance(internal_context, dict):
+        if isinstance(internal_context.get("advisor_outputs"), list):
+            log_response["advisor_outputs"] = internal_context["advisor_outputs"]
+        if isinstance(internal_context.get("meta_debug"), dict):
+            log_response["meta_debug"] = internal_context["meta_debug"]
+        if isinstance(internal_context.get("timings_seconds"), dict):
+            log_response["timings_seconds"] = internal_context["timings_seconds"]
+
     record = {
-        "schema_version": "athar_continual_run_v1",
+        "schema_version": "athar_continual_run_v2",
         "run_id": run_id,
         "created_at": _utc_now_iso(),
         "request": job_input,
-        "response": response,
+        "response": log_response,
         "quality": _consultation_quality_report(
-            response
+            log_response
         ),
     }
 
@@ -17915,6 +17939,9 @@ def handler(job):
                         [],
                     )
                 ),
+                "advisor_id_format": "AOS-(LD|SP|FG|SE)-NN",
+                "minimum_advisors": RICH_V34_MIN_ADVISORS,
+                "maximum_advisors": RICH_V34_MAX_ADVISORS,
             }
 
         return advisory_match_rich_v34(
@@ -17964,16 +17991,80 @@ def handler(job):
                 "continual_learning_enabled": (
                     CONTINUAL_LEARNING_ENABLED
                 ),
+                "response_contract_version": "impact_challenge_screen_3_v4_aos_ids_impact_first",
+                "build_version": "athar-screen3-aos-impact-v4-2026-09-25",
+                "topic": "interventions",
+                "backend_advisor_id_type": "canonical_aos_string",
+                "canonical_advisor_id_format": "AOS-(LD|SP|FG|SE)-NN",
+                "screen3_public_response": {
+                    "involved_advisor_ids": "list<string canonical AOS-*>",
+                    "suggestion.interventions": [
+                        "title",
+                        "confidence_level",
+                        "impact_description",
+                        "reportable_value",
+                        "results[].text",
+                        "results[].outputs[].text",
+                    ],
+                },
+                "single_output_regeneration_supported": True,
+                "grounded_numbers_only": True,
+                "internal_meta_enrichment": {
+                    "attribution": True,
+                    "evidence_classification": ["E1", "E2", "E3", "I1", "I2", "A1", "U"],
+                    "interaction_types": [
+                        "CONSENSUS",
+                        "COMPLEMENTARY",
+                        "TRADE-OFF",
+                        "CONFLICT",
+                        "EVIDENCE GAP",
+                        "SCOPE CONFLICT",
+                    ],
+                    "confidence_levels": ["High", "Medium", "Low"],
+                    "item_status": "OPEN",
+                    "sprint_count": 12,
+                    "sprint_duration": "1 week",
+                    "publicly_exposed": False,
+                    "impact_intervention_guard": True,
+                    "support_enabler_dominance_guard": True,
+                    "direct_intervention_minimum_for_3_4": 2,
+                    "standalone_enabler_max_for_3_4": 1,
+                    "existing_program_anchor_guard": True,
+                    "impact_driver_anchor_guard": True,
+                    "note": "Kept in private run metadata until later backend contracts arrive.",
+                },
             }
 
-        response = advisory_consultation_inference(
-            job_input
-        )
+        try:
+            response = advisory_consultation_inference(
+                job_input
+            )
+        except Exception as exc:
+            # Screen-3 integration contract expects a structured failure payload
+            # rather than a non-JSON traceback as the application response.
+            failed = {
+                "status": "failed",
+                "error": str(exc),
+            }
+            if bool(job_input.get("debug") or (job_input.get("input") or {}).get("debug")):
+                failed["error_type"] = type(exc).__name__
+            return failed
 
-        _log_consultation_for_learning(
-            job_input,
-            response,
+        internal_context = None
+        if isinstance(response, dict):
+            internal_context = response.pop("_athar_internal", None)
+
+        # Single-output regeneration is a UI rewrite action, not a new council
+        # training example. Do not feed it into Specialist continual learning.
+        is_regeneration = bool(
+            (job_input.get("input") or {}).get("is_output_regeneration")
         )
+        if not is_regeneration:
+            _log_consultation_for_learning(
+                job_input,
+                response,
+                internal_context=internal_context,
+            )
 
         return response
 
