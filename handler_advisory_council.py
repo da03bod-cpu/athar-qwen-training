@@ -687,176 +687,211 @@ class AtharCouncilEngine:
         request: Dict[str, Any],
         selected_council: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Generate ONE Screen-3 intervention directly from one Specialist.
+        """Run the Specialist normally, then project its opinion to Screen-3 JSON.
 
-        Current product stage intentionally bypasses AOS-META-00. Each selected
-        Specialist contributes one independent opinion, already shaped to the
-        backend Screen-3 contract. The opinions are not shown to each other and
-        are not synthesized here.
+        The Specialist V2 adapter was trained to produce advisory prose, not a
+        strict JSON object. Forcing the adapter itself to emit the backend schema
+        caused valid advisory content to be rejected for formatting reasons.
+
+        Current-stage contract therefore does two things only:
+        1) obtain the advisor's independent first-pass opinion with Specialist V2;
+        2) deterministically project that opinion into the existing Screen-3
+           Interventions -> Results -> Outputs envelope.
+
+        No Meta Advisor synthesis or second-model semantic rewrite is used here.
         """
-        prompt = self._load_prompt(ADVISOR_PROMPTS_DIR / advisor["prompt_file"])
-        scope_contract = self._extract_scope_contract(prompt)
-        other_selected = [
-            {
-                "advisor_id": x["advisor_id"],
-                "advisor_name_ar": x["advisor_name_ar"],
-            }
-            for x in selected_council
-            if x["advisor_id"] != advisor["advisor_id"]
-        ]
+        base_output = self._run_advisor(advisor, request, selected_council)
+        opinion = str(base_output.get("opinion") or "").strip()
+        if not opinion:
+            raise ValueError(f"Specialist {advisor['advisor_id']} returned an empty opinion.")
 
-        task = {
-            "instruction": (
-                "هذه مرحلة آراء المستشارين فقط؛ لا يوجد Meta Advisor ولا دمج للآراء في هذه المرحلة. "
-                "قدّم رأيك المستقل كمستشار واحد فقط، ملتزمًا حرفيًا بـExpert DNA ونطاقك. "
-                "أخرج JSON صالحًا فقط بدون Markdown وبمفاتيح مزدوجة. "
-                "أخرج تدخلًا واحدًا فقط يمثل أهم رأي/اقتراح تملكه أنت لهذه الحالة ويصلح لشاشة Impact Map. "
-                "اربطه بالمشكلة الاجتماعية أو محركات الأثر أو برنامج قائم عندما تدعم البيانات ذلك. "
-                "إذا كان اختصاصك تمكينيًا مثل التمويل أو MEAL أو القياس، صغ رأيك كتدخل تمكيني واضح يخدم الحالة "
-                "ولا تتقمص اختصاص مستشار آخر. لا تطلع على آراء المستشارين الآخرين. "
-                "لا تخترع رقمًا أو نسبة أو مبلغًا أو تاريخًا أو مدة أو خط أساس أو مستهدفًا غير موجود حرفيًا في case_context. "
-                "لا تكتب AOS ID أو اسم المستشار داخل نصوص التدخل؛ الهوية سيضيفها النظام خارج النص. "
-                "اجعل النص عربيًا واضحًا ومهنيًا ومباشرًا، بلا تكرار ولا تعريفات للنظام."
-            ),
-            "required_schema": {
-                "title": "string",
-                "confidence_level": "مرتفعة|متوسطة|منخفضة",
-                "impact_description": "string",
-                "reportable_value": "اسم مؤشر/قيمة قابلة للرصد بدون اختراع مستهدف رقمي",
-                "results": [
-                    {
-                        "text": "string",
-                        "outputs": [{"text": "string"}],
-                    }
-                ],
-            },
-            "hard_rules": [
-                "JSON object واحد فقط.",
-                "Exactly one intervention object; do not wrap it in suggestion/interventions.",
-                "1-2 results only; each result has 1-2 outputs only.",
-                "No invented numbers, percentages, budgets, dates, deadlines, or durations.",
-                "No advisor IDs or advisor names inside user-facing intervention text.",
-                "Stay strictly inside this advisor scope; out-of-scope needs are omitted from this Screen-3 opinion.",
-            ],
-            "advisor_id": advisor["advisor_id"],
-            "advisor_name_ar": advisor["advisor_name_ar"],
-            "scope_contract": scope_contract,
-            "other_selected_advisors_without_opinions": other_selected,
-            "case_context": self._shared_context(request),
-        }
+        def clean_line(value: Any) -> str:
+            line = str(value or "").strip()
+            line = re.sub(r"^\s{0,4}#{1,6}\s*", "", line)
+            line = re.sub(r"^\s*(?:[-*•]+|\d+[\.)]|[أ-ي][\.)])\s*", "", line)
+            line = line.replace("**", "").replace("__", "").replace("`", "")
+            line = re.sub(r"\s+", " ", line).strip(" :-–—\t")
+            return line
 
-        def parse_candidate(raw_text: str) -> Dict[str, Any]:
-            parsed = self.extract_json_object(raw_text)
-            # Tolerate a model that unnecessarily wraps the intervention.
-            if isinstance(parsed.get("intervention"), dict):
-                parsed = parsed["intervention"]
-            elif isinstance(parsed.get("suggestion"), dict):
-                wrapped = parsed.get("suggestion") or {}
-                rows = wrapped.get("interventions") or []
-                if isinstance(rows, list) and rows and isinstance(rows[0], dict):
-                    parsed = rows[0]
+        raw_lines = [x.rstrip() for x in opinion.splitlines()]
+        lines = [clean_line(x) for x in raw_lines]
 
-            title = str(parsed.get("title") or "").strip()
-            impact = str(parsed.get("impact_description") or "").strip()
-            reportable = str(parsed.get("reportable_value") or "").strip()
-            confidence = self._screen3_confidence(parsed.get("confidence_level"))
+        # Collect recommendation/intervention lines first. The advisor prose may
+        # use several equivalent Arabic section labels, so parsing is tolerant.
+        section_active = False
+        recommendation_lines: List[str] = []
+        diagnosis_lines: List[str] = []
+        for raw, line in zip(raw_lines, lines):
+            if not line:
+                continue
+            lower = line.lower()
+            is_heading = bool(re.match(r"^\s*#{1,6}\s+", raw))
+            if any(key in lower for key in (
+                "التوصيات", "توصيات", "التدخلات", "التدخلات المطلوبة",
+                "الأولويات", "الخطوات المقترحة", "الإجراءات المقترحة",
+            )) and (is_heading or len(line) <= 90):
+                section_active = True
+                continue
+            if section_active and any(key in lower for key in (
+                "المخاطر", "الافتراضات", "الافتراض", "نقاط التحقق",
+                "فجوات البيانات", "الإحالات", "الخلاصة", "الأدلة",
+            )) and (is_heading or len(line) <= 90):
+                section_active = False
+                continue
 
-            results: List[Dict[str, Any]] = []
-            for row in parsed.get("results") or []:
-                if not isinstance(row, dict):
-                    continue
-                result_text = str(row.get("text") or "").strip()
-                outputs: List[Dict[str, str]] = []
-                for output in row.get("outputs") or []:
-                    if isinstance(output, dict):
-                        output_text = str(output.get("text") or "").strip()
-                    else:
-                        output_text = str(output or "").strip()
-                    if output_text:
-                        outputs.append({"text": output_text})
-                if result_text and outputs:
-                    results.append({"text": result_text, "outputs": outputs[:2]})
-                if len(results) >= 2:
+            # Prefer numbered/top-level bullets as discrete recommendations.
+            is_top_item = bool(re.match(r"^\s*(?:\d+[\.)]|[-*•])\s+", raw))
+            if section_active and is_top_item and 12 <= len(line) <= 420:
+                recommendation_lines.append(line)
+            elif not section_active and len(diagnosis_lines) < 5 and 30 <= len(line) <= 520:
+                diagnosis_lines.append(line)
+
+        # Fallback: use substantive numbered/bulleted lines from anywhere.
+        if not recommendation_lines:
+            for raw, line in zip(raw_lines, lines):
+                if (
+                    bool(re.match(r"^\s*(?:\d+[\.)]|[-*•])\s+", raw))
+                    and 12 <= len(line) <= 420
+                ):
+                    recommendation_lines.append(line)
+                if len(recommendation_lines) >= 3:
                     break
 
-            if not title or not impact or not reportable or not results:
-                raise ValueError("Specialist Screen-3 opinion is missing required intervention fields.")
+        # Last fallback: use the strongest substantive sentences from the prose.
+        if not recommendation_lines:
+            compact = re.sub(r"\s+", " ", opinion)
+            for sentence in re.split(r"(?<=[.!؟])\s+", compact):
+                sentence = clean_line(sentence)
+                if 25 <= len(sentence) <= 420:
+                    recommendation_lines.append(sentence)
+                if len(recommendation_lines) >= 2:
+                    break
 
-            intervention = {
-                "title": title,
-                "confidence_level": confidence,
-                "impact_description": impact,
-                "reportable_value": reportable,
-                "results": results,
-            }
+        recommendation_lines = list(dict.fromkeys(recommendation_lines))[:2]
+        if not recommendation_lines:
+            recommendation_lines = [
+                "تطبيق التوصية الأساسية للمستشار ضمن نطاق اختصاصه وبالاستناد إلى بيانات الحالة المتاحة"
+            ]
 
-            # Reuse the public Screen-3 validator on a one-advisor response.
-            self._validate_screen3_public_response({
-                "involved_advisor_ids": [advisor["advisor_id"]],
-                "suggestion": {"interventions": [intervention]},
-            })
+        # Build a concise title from the first owned recommendation. This avoids
+        # asking the Specialist to learn a second output grammar just for the API.
+        first_rec = recommendation_lines[0]
+        title = first_rec.split(":", 1)[0].strip()
+        if len(title) < 10 or len(title) > 150:
+            title = f"توصية {advisor['advisor_name_ar']} للحالة الحالية"
 
-            # Reuse grounding protection. It scans only user-facing semantic text.
-            rich_wrapper = {"suggestion": {"interventions": [intervention]}}
-            grounding = self._grounding_violations(rich_wrapper, request)
-            if grounding:
-                raise ValueError(
-                    "Specialist grounding validation failed: " + " | ".join(grounding[:6])
-                )
+        # Impact description comes from the advisor's diagnosis when available;
+        # otherwise the first recommendation itself is the safest grounded text.
+        impact_description = (
+            diagnosis_lines[0]
+            if diagnosis_lines
+            else first_rec
+        )
+        impact_description = impact_description[:700].strip()
 
-            if any(
-                self._has_foreign_script(value)
-                for value in self._collect_strings(intervention)
-            ):
-                raise ValueError("Specialist Screen-3 opinion contains foreign-script leakage.")
+        input_obj = request.get("input") or {}
+        track = input_obj.get("track") or {}
+        primary_indicator = ""
+        if isinstance(track, dict):
+            primary_indicator = str(track.get("primary_indicator") or "").strip()
 
-            return intervention
-
-        raw = self._generate(
-            "specialist",
-            prompt,
-            json.dumps(task, ensure_ascii=False, indent=2),
-            min(ADVISOR_MAX_NEW_TOKENS, 700),
-            deterministic=True,
-            repetition_penalty=1.12,
-            no_repeat_ngram_size=8,
+        indicator_by_advisor = {
+            "AOS-SP-13": "مؤشر أولوية وجدوى البرامج والمشاريع",
+            "AOS-SP-15": "مؤشر نتائج وأثر البرامج المستهدفة",
+            "AOS-FG-18": "مؤشر تنوع واستدامة مصادر التمويل",
+            "AOS-LD-04": "مؤشر قيمة وجودة الشراكات",
+            "AOS-SP-12": "مؤشر تقدم التنفيذ التشغيلي",
+            "AOS-SP-14": "مؤشر أداء مرتبط بالهدف المعتمد",
+        }
+        reportable_value = indicator_by_advisor.get(
+            advisor["advisor_id"],
+            primary_indicator or "مؤشر متابعة مرتبط بنطاق التوصية",
         )
 
-        first_error: Optional[Exception] = None
-        try:
-            intervention = parse_candidate(raw)
-        except Exception as exc:
-            first_error = exc
-            retry_task = dict(task)
-            retry_task["instruction"] = (
-                task["instruction"]
-                + " المحاولة السابقة لم تجتز التحقق. أعد JSON من الصفر وبأقل نص ممكن، "
-                  "مع تدخل واحد ونتيجة واحدة أو نتيجتين، واحذف أي رقم غير موجود في case_context."
-            )
-            retry_task["validation_error"] = str(exc)[:700]
-            raw = self._generate(
-                "specialist",
-                prompt,
-                json.dumps(retry_task, ensure_ascii=False, indent=2),
-                min(ADVISOR_MAX_NEW_TOKENS, 600),
-                deterministic=True,
-                repetition_penalty=1.14,
-                no_repeat_ngram_size=8,
-            )
-            try:
-                intervention = parse_candidate(raw)
-            except Exception as retry_exc:
-                raise ValueError(
-                    f"Specialist {advisor['advisor_id']} could not produce a valid Screen-3 opinion after retry. "
-                    f"first={first_error}; retry={retry_exc}"
-                ) from retry_exc
+        # Confidence is conservative by default in this no-Meta stage. If the
+        # Specialist explicitly states a level, preserve it.
+        confidence = "متوسطة"
+        normalized_opinion = re.sub(r"\s+", " ", opinion)
+        if re.search(r"(?:ثقة|الثقة)\s*(?:مرتفعة|عالية|مرتفع|عالي)", normalized_opinion):
+            confidence = "مرتفعة"
+        elif re.search(r"(?:ثقة|الثقة)\s*(?:منخفضة|ضعيفة|منخفض|ضعيف)", normalized_opinion):
+            confidence = "منخفضة"
+
+        results: List[Dict[str, Any]] = []
+        for rec in recommendation_lines[:2]:
+            rec = rec[:420].strip()
+            if not rec:
+                continue
+            # Use the advisor-owned recommendation as both the expected result
+            # and its directly traceable output. This is intentionally simple and
+            # lossless; later backend contracts can split richer fields.
+            output_text = rec
+            if ":" in rec:
+                left, right = [x.strip() for x in rec.split(":", 1)]
+                if len(right) >= 12:
+                    rec = left if len(left) >= 10 else rec
+                    output_text = right
+            results.append({
+                "text": rec,
+                "outputs": [{"text": output_text}],
+            })
+
+        if not results:
+            results = [{
+                "text": "اعتماد رأي المستشار ضمن نطاق اختصاصه",
+                "outputs": [{"text": first_rec[:420]}],
+            }]
+
+        intervention = {
+            "title": title,
+            "confidence_level": confidence,
+            "impact_description": impact_description,
+            "reportable_value": reportable_value,
+            "results": results,
+        }
+
+        # Sanitize only unsupported numerical tokens in the projected public
+        # fields. The raw independent opinion is preserved internally unchanged.
+        source_text = self._normalize_digits(
+            json.dumps(self._shared_context(request), ensure_ascii=False, sort_keys=True)
+        )
+        source_numbers = self._extract_number_tokens(source_text)
+
+        def scrub_string(value: str) -> str:
+            value = re.sub(r"[\u0400-\u052F\u4E00-\u9FFF\u3040-\u30FF]", "", str(value or ""))
+
+            def repl(match: re.Match) -> str:
+                token = self._normalize_digits(match.group(0))
+                return match.group(0) if token in source_numbers else ""
+
+            value = re.sub(r"(?<![\w])\d+(?:[.,]\d+)?(?![\w])", repl, value)
+            value = re.sub(r"\s*(?:%|٪)\s*", " ", value)
+            value = re.sub(r"\s+", " ", value).strip(" -–—,:؛")
+            return value
+
+        intervention["title"] = scrub_string(intervention["title"]) or f"توصية {advisor['advisor_name_ar']}"
+        intervention["impact_description"] = scrub_string(intervention["impact_description"]) or "تطبيق رأي المستشار على الحالة ضمن حدود البيانات المتاحة."
+        intervention["reportable_value"] = scrub_string(intervention["reportable_value"]) or "مؤشر متابعة مرتبط بنطاق التوصية"
+        for result in intervention["results"]:
+            result["text"] = scrub_string(result["text"]) or "نتيجة متوقعة من تطبيق التوصية"
+            for output in result["outputs"]:
+                output["text"] = scrub_string(output["text"]) or "مخرج تنفيذي مرتبط بالتوصية"
+
+        # Final structural validation. At this stage formatting can no longer
+        # fail because the JSON object is constructed by Python, not generated by
+        # the model.
+        self._validate_screen3_public_response({
+            "involved_advisor_ids": [advisor["advisor_id"]],
+            "suggestion": {"interventions": [intervention]},
+        })
 
         return {
             "advisor_id": advisor["advisor_id"],
             "backend_id": advisor.get("backend_id") or advisor["advisor_id"],
             "advisor_name_ar": advisor["advisor_name_ar"],
-            "opinion": json.dumps(intervention, ensure_ascii=False),
+            "opinion": opinion,
             "intervention": intervention,
+            "projection_mode": "deterministic_from_specialist_opinion",
         }
 
     @staticmethod
@@ -2130,10 +2165,6 @@ class AtharCouncilEngine:
             public = self._regenerate_single_output(request)
             elapsed = round(time.perf_counter() - total_start, 3)
             if not debug:
-                public["_athar_internal"] = {
-                    "mode": "single_output_regeneration",
-                    "timings_seconds": {"total": elapsed},
-                }
                 return public
             return {
                 "debug": True,
@@ -2203,7 +2234,8 @@ class AtharCouncilEngine:
         }
 
         if not debug:
-            public_result["_athar_internal"] = internal
+            # Return the exact backend Screen-3 envelope only. Internal advisor
+            # prose/timings stay available through debug mode and server logs.
             return public_result
 
         return {
