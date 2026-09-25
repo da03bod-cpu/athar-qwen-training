@@ -681,6 +681,184 @@ class AtharCouncilEngine:
             "opinion": opinion,
         }
 
+    def _run_advisor_screen3_intervention(
+        self,
+        advisor: Dict[str, Any],
+        request: Dict[str, Any],
+        selected_council: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Generate ONE Screen-3 intervention directly from one Specialist.
+
+        Current product stage intentionally bypasses AOS-META-00. Each selected
+        Specialist contributes one independent opinion, already shaped to the
+        backend Screen-3 contract. The opinions are not shown to each other and
+        are not synthesized here.
+        """
+        prompt = self._load_prompt(ADVISOR_PROMPTS_DIR / advisor["prompt_file"])
+        scope_contract = self._extract_scope_contract(prompt)
+        other_selected = [
+            {
+                "advisor_id": x["advisor_id"],
+                "advisor_name_ar": x["advisor_name_ar"],
+            }
+            for x in selected_council
+            if x["advisor_id"] != advisor["advisor_id"]
+        ]
+
+        task = {
+            "instruction": (
+                "هذه مرحلة آراء المستشارين فقط؛ لا يوجد Meta Advisor ولا دمج للآراء في هذه المرحلة. "
+                "قدّم رأيك المستقل كمستشار واحد فقط، ملتزمًا حرفيًا بـExpert DNA ونطاقك. "
+                "أخرج JSON صالحًا فقط بدون Markdown وبمفاتيح مزدوجة. "
+                "أخرج تدخلًا واحدًا فقط يمثل أهم رأي/اقتراح تملكه أنت لهذه الحالة ويصلح لشاشة Impact Map. "
+                "اربطه بالمشكلة الاجتماعية أو محركات الأثر أو برنامج قائم عندما تدعم البيانات ذلك. "
+                "إذا كان اختصاصك تمكينيًا مثل التمويل أو MEAL أو القياس، صغ رأيك كتدخل تمكيني واضح يخدم الحالة "
+                "ولا تتقمص اختصاص مستشار آخر. لا تطلع على آراء المستشارين الآخرين. "
+                "لا تخترع رقمًا أو نسبة أو مبلغًا أو تاريخًا أو مدة أو خط أساس أو مستهدفًا غير موجود حرفيًا في case_context. "
+                "لا تكتب AOS ID أو اسم المستشار داخل نصوص التدخل؛ الهوية سيضيفها النظام خارج النص. "
+                "اجعل النص عربيًا واضحًا ومهنيًا ومباشرًا، بلا تكرار ولا تعريفات للنظام."
+            ),
+            "required_schema": {
+                "title": "string",
+                "confidence_level": "مرتفعة|متوسطة|منخفضة",
+                "impact_description": "string",
+                "reportable_value": "اسم مؤشر/قيمة قابلة للرصد بدون اختراع مستهدف رقمي",
+                "results": [
+                    {
+                        "text": "string",
+                        "outputs": [{"text": "string"}],
+                    }
+                ],
+            },
+            "hard_rules": [
+                "JSON object واحد فقط.",
+                "Exactly one intervention object; do not wrap it in suggestion/interventions.",
+                "1-2 results only; each result has 1-2 outputs only.",
+                "No invented numbers, percentages, budgets, dates, deadlines, or durations.",
+                "No advisor IDs or advisor names inside user-facing intervention text.",
+                "Stay strictly inside this advisor scope; out-of-scope needs are omitted from this Screen-3 opinion.",
+            ],
+            "advisor_id": advisor["advisor_id"],
+            "advisor_name_ar": advisor["advisor_name_ar"],
+            "scope_contract": scope_contract,
+            "other_selected_advisors_without_opinions": other_selected,
+            "case_context": self._shared_context(request),
+        }
+
+        def parse_candidate(raw_text: str) -> Dict[str, Any]:
+            parsed = self.extract_json_object(raw_text)
+            # Tolerate a model that unnecessarily wraps the intervention.
+            if isinstance(parsed.get("intervention"), dict):
+                parsed = parsed["intervention"]
+            elif isinstance(parsed.get("suggestion"), dict):
+                wrapped = parsed.get("suggestion") or {}
+                rows = wrapped.get("interventions") or []
+                if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+                    parsed = rows[0]
+
+            title = str(parsed.get("title") or "").strip()
+            impact = str(parsed.get("impact_description") or "").strip()
+            reportable = str(parsed.get("reportable_value") or "").strip()
+            confidence = self._screen3_confidence(parsed.get("confidence_level"))
+
+            results: List[Dict[str, Any]] = []
+            for row in parsed.get("results") or []:
+                if not isinstance(row, dict):
+                    continue
+                result_text = str(row.get("text") or "").strip()
+                outputs: List[Dict[str, str]] = []
+                for output in row.get("outputs") or []:
+                    if isinstance(output, dict):
+                        output_text = str(output.get("text") or "").strip()
+                    else:
+                        output_text = str(output or "").strip()
+                    if output_text:
+                        outputs.append({"text": output_text})
+                if result_text and outputs:
+                    results.append({"text": result_text, "outputs": outputs[:2]})
+                if len(results) >= 2:
+                    break
+
+            if not title or not impact or not reportable or not results:
+                raise ValueError("Specialist Screen-3 opinion is missing required intervention fields.")
+
+            intervention = {
+                "title": title,
+                "confidence_level": confidence,
+                "impact_description": impact,
+                "reportable_value": reportable,
+                "results": results,
+            }
+
+            # Reuse the public Screen-3 validator on a one-advisor response.
+            self._validate_screen3_public_response({
+                "involved_advisor_ids": [advisor["advisor_id"]],
+                "suggestion": {"interventions": [intervention]},
+            })
+
+            # Reuse grounding protection. It scans only user-facing semantic text.
+            rich_wrapper = {"suggestion": {"interventions": [intervention]}}
+            grounding = self._grounding_violations(rich_wrapper, request)
+            if grounding:
+                raise ValueError(
+                    "Specialist grounding validation failed: " + " | ".join(grounding[:6])
+                )
+
+            if any(
+                self._has_foreign_script(value)
+                for value in self._collect_strings(intervention)
+            ):
+                raise ValueError("Specialist Screen-3 opinion contains foreign-script leakage.")
+
+            return intervention
+
+        raw = self._generate(
+            "specialist",
+            prompt,
+            json.dumps(task, ensure_ascii=False, indent=2),
+            min(ADVISOR_MAX_NEW_TOKENS, 700),
+            deterministic=True,
+            repetition_penalty=1.12,
+            no_repeat_ngram_size=8,
+        )
+
+        first_error: Optional[Exception] = None
+        try:
+            intervention = parse_candidate(raw)
+        except Exception as exc:
+            first_error = exc
+            retry_task = dict(task)
+            retry_task["instruction"] = (
+                task["instruction"]
+                + " المحاولة السابقة لم تجتز التحقق. أعد JSON من الصفر وبأقل نص ممكن، "
+                  "مع تدخل واحد ونتيجة واحدة أو نتيجتين، واحذف أي رقم غير موجود في case_context."
+            )
+            retry_task["validation_error"] = str(exc)[:700]
+            raw = self._generate(
+                "specialist",
+                prompt,
+                json.dumps(retry_task, ensure_ascii=False, indent=2),
+                min(ADVISOR_MAX_NEW_TOKENS, 600),
+                deterministic=True,
+                repetition_penalty=1.14,
+                no_repeat_ngram_size=8,
+            )
+            try:
+                intervention = parse_candidate(raw)
+            except Exception as retry_exc:
+                raise ValueError(
+                    f"Specialist {advisor['advisor_id']} could not produce a valid Screen-3 opinion after retry. "
+                    f"first={first_error}; retry={retry_exc}"
+                ) from retry_exc
+
+        return {
+            "advisor_id": advisor["advisor_id"],
+            "backend_id": advisor.get("backend_id") or advisor["advisor_id"],
+            "advisor_name_ar": advisor["advisor_name_ar"],
+            "opinion": json.dumps(intervention, ensure_ascii=False),
+            "intervention": intervention,
+        }
+
     @staticmethod
     def _normalize_digits(text: Any) -> str:
         return str(text or "").translate(
@@ -1938,6 +2116,12 @@ class AtharCouncilEngine:
         return public
 
     def consult(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Current Screen-3 stage: selected Specialist opinions only, no Meta synthesis.
+
+        Each selected advisor independently emits exactly one Screen-3 intervention
+        in the backend's existing Interventions -> Results -> Outputs schema.
+        AOS-META-00 is intentionally not called in this product stage.
+        """
         input_obj = request.get("input") or {}
         debug = bool(request.get("debug") or input_obj.get("debug"))
 
@@ -1961,60 +2145,73 @@ class AtharCouncilEngine:
         total_start = time.perf_counter()
         selected = self._resolve_selected_advisors(request)
 
-        opinions: List[Dict[str, Any]] = []
+        # The backend Screen-3 contract currently allows at most four proposals.
+        # With Meta deliberately disabled, one proposal maps to one selected
+        # Specialist, so accepting more than four would silently drop opinions.
+        if len(selected) > 4:
+            raise ValueError(
+                "Current Screen-3 specialist-opinions stage supports at most 4 selected advisors "
+                "because the backend contract accepts at most 4 interventions."
+            )
+
+        advisor_outputs: List[Dict[str, Any]] = []
+        interventions: List[Dict[str, Any]] = []
         advisor_timings: Dict[str, float] = {}
+
         for item in selected:
             advisor_id = item["advisor_id"]
-            print(f"[council] Starting advisor {advisor_id}...", flush=True)
+            print(f"[specialist-only] Starting advisor {advisor_id}...", flush=True)
             started = time.perf_counter()
-            opinion = self._run_advisor(item, request, selected)
+            output = self._run_advisor_screen3_intervention(item, request, selected)
             elapsed = time.perf_counter() - started
             advisor_timings[advisor_id] = round(elapsed, 3)
-            opinions.append(opinion)
-            print(f"[council] Finished advisor {advisor_id} in {elapsed:.2f}s", flush=True)
+            advisor_outputs.append(output)
+            interventions.append(output["intervention"])
+            print(
+                f"[specialist-only] Finished advisor {advisor_id} in {elapsed:.2f}s",
+                flush=True,
+            )
 
-        print(
-            f"[council] Starting AOS-META-00 synthesis for {len(opinions)} advisor(s)...",
-            flush=True,
-        )
-        meta_started = time.perf_counter()
-        rich_result = self._run_meta(request, opinions)
-        meta_elapsed = time.perf_counter() - meta_started
-        total_elapsed = time.perf_counter() - total_start
-        print(
-            f"[council] Finished AOS-META-00 in {meta_elapsed:.2f}s; total council time {total_elapsed:.2f}s",
-            flush=True,
-        )
+        involved_ids = self._backend_advisor_ids(selected)
+        public_result = {
+            "involved_advisor_ids": involved_ids,
+            "suggestion": {"interventions": interventions},
+        }
+        self._validate_screen3_public_response(public_result)
 
-        public_result = self._screen3_public_response(rich_result, selected)
+        total_elapsed = round(time.perf_counter() - total_start, 3)
         timings = {
             "advisors": advisor_timings,
-            "meta": round(meta_elapsed, 3),
-            "total": round(total_elapsed, 3),
+            "meta": 0.0,
+            "total": total_elapsed,
+        }
+
+        internal = {
+            "mode": "specialist_opinions_only",
+            "meta_called": False,
+            "advisor_outputs": advisor_outputs,
+            "timings_seconds": timings,
+            "canonical_advisor_ids": involved_ids,
+            # Position i in interventions corresponds to position i in these IDs.
+            "intervention_advisor_map": [
+                {
+                    "index": i,
+                    "advisor_id": row["advisor_id"],
+                }
+                for i, row in enumerate(advisor_outputs)
+            ],
         }
 
         if not debug:
-            # Screen 3 receives exactly the contract it already materializes.
-            # Rich Meta metadata (Attribution/Evidence/Interaction/12 sprints)
-            # stays private until the backend contracts for those later screens arrive.
-            public_result["_athar_internal"] = {
-                "advisor_outputs": opinions,
-                "rich_meta_result": rich_result,
-                "meta_debug": getattr(self, "_last_meta_debug", {}),
-                "timings_seconds": timings,
-                "canonical_advisor_ids": [x["advisor_id"] for x in selected],
-                "backend_advisor_ids": self._backend_advisor_ids(selected),
-            }
+            public_result["_athar_internal"] = internal
             return public_result
 
         return {
             "debug": True,
-            "selected_advisor_ids": [x["advisor_id"] for x in selected],
-            "backend_advisor_ids": self._backend_advisor_ids(selected),
-            "advisor_outputs": opinions,
-            "meta_debug": getattr(self, "_last_meta_debug", {}),
+            "mode": "specialist_opinions_only",
+            "selected_advisor_ids": involved_ids,
+            "advisor_outputs": advisor_outputs,
             "timings_seconds": timings,
             "final_result": public_result,
-            "rich_meta_result": rich_result,
         }
 
