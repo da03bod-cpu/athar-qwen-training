@@ -785,9 +785,12 @@ class AtharCouncilEngine:
         # The full Expert DNA remains authoritative; this filter only prevents a
         # neighboring domain recommendation from being projected publicly.
         scope_keywords = {
+            "AOS-SP-11": ("مبادرة", "تدخل", "تصميم", "مستفيد", "قيمة", "نموذج", "أثر", "حل"),
             "AOS-SP-13": ("برنامج", "مشروع", "محفظ", "أولو", "جدوى", "اعتماد", "موارد", "توسع", "منافع"),
             "AOS-SP-15": ("أثر", "تقييم", "متابعة", "تعلم", "meal", "مؤشر", "نظرية", "مساهمة", "نتائج"),
             "AOS-FG-18": ("تمويل", "دخل", "مانح", "موارد", "استدام", "إيراد", "تبرع", "شراك"),
+            "AOS-SE-27": ("تعليم", "طالب", "مدرس", "تعلم", "تحصيل", "تسرب", "تربوي", "بحث"),
+            "AOS-SE-29": ("اجتماع", "أسرة", "مستفيد", "دعم", "رعاية", "احتياج", "حماية", "خدمات"),
         }
         keys = scope_keywords.get(advisor["advisor_id"])
         if keys:
@@ -823,15 +826,18 @@ class AtharCouncilEngine:
         important_notes = str(org_obj.get("important_notes") or "").strip() if isinstance(org_obj, dict) else ""
 
         impact_templates = {
+            "AOS-SP-11": "يركز رأي المستشار على تصميم أو تحسين المبادرات الاستراتيجية وربطها بالمشكلة الاجتماعية ومحركات الأثر واحتياجات الفئة المستهدفة.",
             "AOS-SP-13": "يركز رأي المستشار على ترتيب أولوية البرامج والمشاريع القائمة وربط قرارات التوسع بالقيمة الاستراتيجية والجدوى والموارد المتاحة.",
             "AOS-SP-15": "يركز رأي المستشار على بناء منظومة متابعة وتقييم وتعلم وقياس أثر تربط البرامج القائمة بنتائج المستفيدين والهدف الاستراتيجي المعتمد.",
             "AOS-FG-18": "يركز رأي المستشار على تنويع مصادر الدخل وتقليل الاعتماد على التمويل الموسمي بما يدعم استدامة البرامج والخدمات.",
+            "AOS-SE-27": "يركز رأي المستشار على ملاءمة التدخلات التعليمية للعوامل المرتبطة بالاستمرار في التعليم والوصول المدرسي والتحصيل ضمن الفئة المستهدفة.",
+            "AOS-SE-29": "يركز رأي المستشار على احتياجات الأسر والمستفيدين والعوامل الاجتماعية التي تؤثر في الاستمرار في التعليم والوصول إلى خدمات الدعم المناسبة.",
         }
         impact_description = impact_templates.get(
             advisor["advisor_id"],
             f"يركز رأي {advisor['advisor_name_ar']} على تطبيق توصية داخل نطاق اختصاصه بما يخدم الهدف المعتمد وبيانات الحالة المتاحة.",
         )
-        if advisor["advisor_id"] in {"AOS-SP-13", "AOS-SP-15"} and goal_statement:
+        if advisor["advisor_id"] in {"AOS-SP-11", "AOS-SP-13", "AOS-SP-15", "AOS-SE-27", "AOS-SE-29"} and goal_statement:
             impact_description += f" الهدف المعتمد: {goal_statement}"
         elif advisor["advisor_id"] == "AOS-FG-18" and important_notes:
             impact_description += f" ويستند إلى الملاحظة المؤسسية: {important_notes}"
@@ -842,9 +848,12 @@ class AtharCouncilEngine:
             primary_indicator = str(track.get("primary_indicator") or "").strip()
 
         indicator_by_advisor = {
+            "AOS-SP-11": "مؤشر جاهزية وملاءمة المبادرات المقترحة",
             "AOS-SP-13": "مؤشر أولوية وجدوى البرامج والمشاريع",
             "AOS-SP-15": "مؤشر نتائج وأثر البرامج المستهدفة",
             "AOS-FG-18": "مؤشر تنوع واستدامة مصادر التمويل",
+            "AOS-SE-27": "مؤشر الاستمرار والتحصيل التعليمي للفئة المستهدفة",
+            "AOS-SE-29": "مؤشر وصول واستفادة الفئات المستهدفة من خدمات الدعم",
             "AOS-LD-04": "مؤشر قيمة وجودة الشراكات",
             "AOS-SP-12": "مؤشر تقدم التنفيذ التشغيلي",
             "AOS-SP-14": "مؤشر أداء مرتبط بالهدف المعتمد",
@@ -907,19 +916,40 @@ class AtharCouncilEngine:
             "التناوي": "التنموي",
             "التفاعلي": "التنموي",
             "التقيم": "التقييم",
+            "والتقيم": "والتقييم",
+            "والقياس الأثر": "وقياس الأثر",
+            "القياس الأثر": "قياس الأثر",
             "مستدمة": "مستدامة",
+            "مستدمة،": "مستدامة،",
             "كبرية": "كبرى",
             "التمويل الموسمية": "التمويل الموسمي",
+            "التبرعات الموسمية": "التبرعات الموسمية",
             "الخطوط النقلية": "خطوط النقل",
-            "المدرسية": "المدرسية",
+            "البرنامج الحقيبة": "برنامج الحقيبة",
+            "والبرنامج الحقيبة": "وبرنامج الحقيبة",
+            "الزي المدارسي": "الزي المدرسي",
+            "الزي المدرسية": "الزي المدرسي",
+            "المدارسي": "المدرسي",
+            "الحقيبة المدرسية": "الحقيبة المدرسية",
             "الت_dropout": "التسرب",
             "تموilen": "تمويل",
+            "خط أنابيب فرص تمويل": "مسار فرص تمويل",
+            "خط أنابيب التمويل": "مسار التمويل",
+            "خط أنابيب": "مسار",
+            "من المربح استثمار المزيد من الموارد": "من المجدي تخصيص مزيد من الموارد",
+            "من المربح استثمار مزيد من الموارد": "من المجدي تخصيص مزيد من الموارد",
+            "من المربح": "من المجدي",
+            "استثمار المزيد من الموارد": "تخصيص مزيد من الموارد",
         }
 
         def scrub_string(value: str) -> str:
             value = str(value or "")
             for bad, good in COMMON_TEXT_FIXES.items():
                 value = value.replace(bad, good)
+            # Deterministic Arabic normalization only; no semantic rewriting.
+            value = re.sub(r"\bبرنامج\s+الحقيبة\s+والزي\s+المدرسية\b", "برنامج الحقيبة والزي المدرسي", value)
+            value = re.sub(r"\bمشروع\s+النقل\s+المدرسي\s+الت(?:ناوي|فاعلي)\b", "مشروع النقل المدرسي التنموي", value)
+            value = re.sub(r"\bالمتابعة\s+والتقييم\s+والتعلم\s+والقياس\s+الأثر\b", "المتابعة والتقييم والتعلم وقياس الأثر", value)
             value = re.sub(r"[\u0400-\u052F\u4E00-\u9FFF\u3040-\u30FF]", "", value)
 
             # Remove mixed Arabic/Latin corruption token-by-token while allowing
@@ -1777,202 +1807,428 @@ class AtharCouncilEngine:
             })
         return cards
 
-    def _run_meta(self, request: Dict[str, Any], advisor_outputs: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Compact two-attempt Meta synthesis for Screen 3.
+    def _clean_meta_public_text(self, value: Any, request: Dict[str, Any]) -> str:
+        """Deterministic Arabic cleanup for Meta public fields.
 
-        The public Screen-3 contract only needs interventions/results/outputs.
-        Asking the model to also emit 12 full sprints and long canonical IDs made
-        outputs unnecessarily large and was the main source of truncation and
-        malformed JSON.  v4.2 asks for a compact semantic draft; code then adds
-        canonical IDs, private metadata and the 12-week structural allocation.
+        This layer never invents new semantic content. It fixes a small set of
+        recurrent orthographic/model leakage issues, strips unsupported scripts,
+        and removes any numeric token that is not grounded in the request.
         """
+        text = str(value or "").strip()
+        fixes = {
+            "التناوي": "التنموي",
+            "التفاعلي": "التنموي",
+            "التقيم": "التقييم",
+            "والتقيم": "والتقييم",
+            "والقياس الأثر": "وقياس الأثر",
+            "القياس الأثر": "قياس الأثر",
+            "مستدمة": "مستدامة",
+            "كبرية": "كبرى",
+            "التمويل الموسمية": "التمويل الموسمي",
+            "الخطوط النقلية": "خطوط النقل",
+            "البرنامج الحقيبة": "برنامج الحقيبة",
+            "والبرنامج الحقيبة": "وبرنامج الحقيبة",
+            "الزي المدارسي": "الزي المدرسي",
+            "الزي المدرسية": "الزي المدرسي",
+            "المدارسي": "المدرسي",
+            "الت_dropout": "التسرب",
+            "تموilen": "تمويل",
+            "خط أنابيب فرص تمويل": "مسار فرص تمويل",
+            "خط أنابيب التمويل": "مسار التمويل",
+            "خط أنابيب": "مسار",
+            "من المربح استثمار المزيد من الموارد": "من المجدي تخصيص مزيد من الموارد",
+            "من المربح استثمار مزيد من الموارد": "من المجدي تخصيص مزيد من الموارد",
+            "من المربح": "من المجدي",
+            "استثمار المزيد من الموارد": "تخصيص مزيد من الموارد",
+        }
+        for bad, good in fixes.items():
+            text = text.replace(bad, good)
+
+        text = re.sub(
+            r"\bالمتابعة\s+والتقييم\s+والتعلم\s+والقياس\s+الأثر\b",
+            "المتابعة والتقييم والتعلم وقياس الأثر",
+            text,
+        )
+        text = re.sub(r"[\u0400-\u052F\u4E00-\u9FFF\u3040-\u30FF]", "", text)
+
+        allowed_latin = {
+            "MEAL", "KPI", "KPIs", "SROI", "BSC", "SMART",
+            "Contribution", "Analysis", "Theory", "Change",
+        }
+        kept = []
+        for token in text.split():
+            has_ar = bool(re.search(r"[\u0600-\u06FF]", token))
+            has_lat = bool(re.search(r"[A-Za-z]", token))
+            if has_ar and has_lat:
+                ar = re.sub(r"[A-Za-z]+", "", token)
+                token = ar if len(re.sub(r"[^\u0600-\u06FF]", "", ar)) >= 3 else ""
+            elif has_lat:
+                bare = re.sub(r"[^A-Za-z]", "", token)
+                if bare and bare not in allowed_latin and bare.lower() not in {
+                    "impact", "depth", "social", "funding", "education",
+                }:
+                    token = ""
+            if token:
+                kept.append(token)
+        text = " ".join(kept)
+
+        source_text = self._normalize_digits(
+            json.dumps(self._shared_context(request), ensure_ascii=False, sort_keys=True)
+        )
+        source_numbers = self._extract_number_tokens(source_text)
+
+        def number_repl(match: re.Match) -> str:
+            normalized = self._normalize_digits(match.group(0))
+            return match.group(0) if normalized in source_numbers else ""
+
+        text = re.sub(r"(?<![\w])\d+(?:[.,]\d+)?(?![\w])", number_repl, text)
+        text = re.sub(r"(?<!\d)\s*(?:%|٪)\s*", " ", text)
+        text = re.sub(r"\s*([%٪])\s*", r"\1 ", text)
+        text = re.sub(r"\s+", " ", text).strip(" -–—,:؛")
+        return text
+
+    def _parse_meta_screen3_protocol(
+        self,
+        raw: str,
+        request: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """Parse the compact line protocol emitted by AOS-META-00.
+
+        The Meta model is intentionally NOT asked to generate JSON. Python owns
+        JSON construction, eliminating malformed-JSON failures while preserving
+        all semantic synthesis in the Meta Advisor.
+        """
+        cleaned = self.clean_model_text(raw)
+        cleaned = re.sub(r"```(?:text|txt|markdown|md)?", "", cleaned, flags=re.I)
+        cleaned = cleaned.replace("```", "").strip()
+
+        normalized_lines: List[str] = []
+        for original in cleaned.splitlines():
+            line = original.strip()
+            if not line:
+                continue
+            line = re.sub(r"^[\-*•]+\s*", "", line)
+            line = line.replace("：", ":")
+            normalized_lines.append(line)
+
+        has_begin = any(re.fullmatch(r"(?i)BEGIN_INTERVENTION", x) for x in normalized_lines)
+        if not has_begin:
+            rebuilt: List[str] = []
+            started = False
+            for line in normalized_lines:
+                if re.match(r"(?i)^(?:TITLE|العنوان)\s*[:=]", line):
+                    if started:
+                        rebuilt.append("END_INTERVENTION")
+                    rebuilt.append("BEGIN_INTERVENTION")
+                    started = True
+                if started:
+                    rebuilt.append(line)
+            if started:
+                rebuilt.append("END_INTERVENTION")
+                normalized_lines = rebuilt
+
+        interventions: List[Dict[str, Any]] = []
+        block: Optional[Dict[str, Any]] = None
+        current_result: Optional[Dict[str, Any]] = None
+
+        label_patterns = {
+            "title": r"(?i)^(?:TITLE|العنوان)\s*[:=]\s*(.+)$",
+            "confidence": r"(?i)^(?:CONFIDENCE|الثقة|درجة الثقة)\s*[:=]\s*(.+)$",
+            "impact": r"(?i)^(?:IMPACT|الأثر|وصف الأثر)\s*[:=]\s*(.+)$",
+            "reportable": r"(?i)^(?:REPORTABLE|REPORTABLE_VALUE|القيمة القابلة للقياس|القيمة)\s*[:=]\s*(.+)$",
+            "result": r"(?i)^(?:RESULT|النتيجة)\s*[:=]\s*(.+)$",
+            "output": r"(?i)^(?:OUTPUT|المخرج)\s*[:=]\s*(.+)$",
+        }
+
+        def finish_block() -> None:
+            nonlocal block, current_result
+            if not block:
+                block = None
+                current_result = None
+                return
+            title = self._clean_meta_public_text(block.get("title"), request)
+            impact = self._clean_meta_public_text(block.get("impact"), request)
+            reportable = self._clean_meta_public_text(block.get("reportable"), request)
+            confidence = self._screen3_confidence(block.get("confidence"))
+            results_out: List[Dict[str, Any]] = []
+            for row in block.get("results", []):
+                rtext = self._clean_meta_public_text(row.get("text"), request)
+                outs = [
+                    {"text": self._clean_meta_public_text(x, request)}
+                    for x in row.get("outputs", [])
+                ]
+                outs = [x for x in outs if x["text"]]
+                if rtext and outs:
+                    results_out.append({"text": rtext, "outputs": outs[:3]})
+                if len(results_out) >= 3:
+                    break
+            if title and impact and reportable and results_out:
+                interventions.append({
+                    "title": title,
+                    "confidence_level": confidence,
+                    "impact_description": impact,
+                    "reportable_value": reportable,
+                    "results": results_out,
+                })
+            block = None
+            current_result = None
+
+        for line in normalized_lines:
+            if re.fullmatch(r"(?i)BEGIN_INTERVENTION", line):
+                if block:
+                    finish_block()
+                block = {"results": []}
+                current_result = None
+                continue
+            if re.fullmatch(r"(?i)END_INTERVENTION", line):
+                finish_block()
+                continue
+            if block is None:
+                continue
+
+            matched = False
+            for key, pattern in label_patterns.items():
+                m = re.match(pattern, line)
+                if not m:
+                    continue
+                value = m.group(1).strip()
+                matched = True
+                if key == "result":
+                    current_result = {"text": value, "outputs": []}
+                    block["results"].append(current_result)
+                elif key == "output":
+                    if current_result is None:
+                        current_result = {"text": value, "outputs": []}
+                        block["results"].append(current_result)
+                    current_result["outputs"].append(value)
+                else:
+                    block[key] = value
+                break
+            if matched:
+                continue
+
+            if current_result is not None and current_result.get("outputs"):
+                current_result["outputs"][-1] += " " + line
+            elif current_result is not None:
+                current_result["text"] += " " + line
+            elif block.get("reportable"):
+                block["reportable"] += " " + line
+            elif block.get("impact"):
+                block["impact"] += " " + line
+            elif block.get("title"):
+                block["title"] += " " + line
+
+        if block:
+            finish_block()
+
+        unique: List[Dict[str, Any]] = []
+        seen = set()
+        for item in interventions:
+            key = re.sub(r"\s+", " ", item["title"]).strip().lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(item)
+        return unique[:4]
+
+    def _run_meta(self, request: Dict[str, Any], advisor_outputs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Run AOS-META-00 as the final synthesis stage for Screen 3.
+
+        Selected Specialists first produce independent opinions. Those raw opinions
+        remain internal. AOS-META-00 receives all opinions plus the authoritative
+        case context and produces the final 2-4 intervention proposals.
+
+        The Meta model emits a compact line protocol, never JSON. Python then
+        constructs and validates the exact backend JSON envelope. This preserves
+        Meta semantics while removing the malformed-JSON failure mode observed in
+        earlier versions.
+        """
+        selected_ids = [str(x["advisor_id"]) for x in advisor_outputs]
+        if not selected_ids:
+            raise ValueError("Meta synthesis requires at least one Specialist opinion.")
+
         self._last_meta_debug = {
-            "compact_meta_contract": True,
-            "schema_retry_used": False,
-            "quality_retry_used": False,
-            "initial_error": None,
-            "initial_grounding_violations": [],
-            "initial_impact_quality_violations": [],
-            "initial_language_violations": [],
+            "mode": "specialists_then_meta",
+            "meta_output_protocol": "line_protocol_v1",
+            "retry_used": False,
+            "first_error": None,
             "final_grounding_violations": [],
             "final_impact_quality_violations": [],
-            "final_language_violations": [],
-        }
-        selected_ids = [str(x["advisor_id"]) for x in advisor_outputs]
-        scope_cards = self._build_scope_cards(advisor_outputs)
-        advisor_ref_map = {
-            str(i + 1): {
-                "advisor_id": aid,
-                "advisor_name_ar": str(advisor_outputs[i].get("advisor_name_ar") or ""),
-            }
-            for i, aid in enumerate(selected_ids)
         }
 
         input_obj = request.get("input") or {}
-        imap = input_obj.get("impact_map") or {}
         goal = input_obj.get("goal") or {}
+        imap = input_obj.get("impact_map") or {}
         programs = input_obj.get("programs") or []
+        if not isinstance(goal, dict):
+            goal = {}
+        if not isinstance(imap, dict):
+            imap = {}
+        if not isinstance(programs, list):
+            programs = []
 
-        meta_task = {
+        compact_opinions = [
+            {
+                "advisor_id": row["advisor_id"],
+                "advisor_name_ar": row.get("advisor_name_ar"),
+                "opinion": str(row.get("opinion") or "").strip(),
+            }
+            for row in advisor_outputs
+        ]
+
+        task = {
+            "role": "AOS-META-00",
             "instruction": (
-                "طبّق AOS-META-00 كمرحلة تركيب نهائي للمجلس. أعد JSON صغيرًا وصالحًا فقط. "
-                "لا تكتب 12 Sprint في إجابتك؛ النظام سيقسم التدخلات إلى 12 أسبوعًا بعد التركيب. "
-                "لا تكتب أكواد AOS داخل JSON. استخدم advisor_refs فقط كأرقام 1..N وفق advisor_ref_map. "
-                "لا تستخدم أي مستشار غير موجود في advisor_ref_map. "
-                "هذه شاشة Impact Map وtopic=interventions: المطلوب تدخلات أثر/برامج فعلية، لا قائمة أعمال دعم داخلية. "
-                "إذا أعدت 3 أو 4 تدخلات فيجب أن يكون اثنان منها على الأقل مباشرين للمستفيد/البرنامج ويرتبطان صراحة "
-                "بالمشكلة الاجتماعية أو impact_drivers أو برنامج قائم. اسمح بحد أقصى بتدخل تمكيني مستقل واحد (MEAL/تمويل/موارد/حوكمة). "
-                "يمكن دمج القياس والتمويل كـresults/outputs أو شروط دعم تحت تدخل مباشر. "
-                "لا تبدأ عناوين التدخلات المباشرة بتحليل/تقييم/قياس/إطار/منهجية/تمويل/موارد. "
-                "استخدم البرامج القائمة ومحركات الأثر كمرساة عندما تدعمها آراء المستشارين ضمن نطاقهم. "
-                "لا تخترع خدمة أو شراكة أو موردًا غير مدعوم. لا تخترع أي رقم أو نسبة أو مبلغ أو مدة أو تاريخ. "
-                "يجوز إعادة استخدام رقم موجود صراحة في case_context وبنفس الدلالة فقط. "
-                "اكتب النصوص بالعربية السليمة؛ يسمح فقط بالمصطلحات/الاختصارات الإنجليزية المعتادة مثل MEAL عند الحاجة. "
-                "لا تستخدم أي أحرف صينية أو يابانية أو كيريلية."
+                "هذه هي مرحلة التركيب النهائي للمجلس. لديك بيانات الحالة وآراء المستشارين المستقلة. "
+                "اجمع الآراء ولا تعرضها منفصلة. المطلوب النهائي فقط هو 2 إلى 4 تدخلات مقترحة لشاشة Impact Map. "
+                "التدخلات النهائية يجب أن تعكس حكم Meta Advisor بعد الموازنة بين الآراء، لا أن تكون رأيًا لكل مستشار. "
+                "اربط التدخلات بالمشكلة الاجتماعية ومحركات الأثر والفئة المستهدفة والبرامج القائمة. "
+                "عندما تكون بعض الآراء تمكينية مثل MEAL أو التمويل، ادمجها داخل تصميم/نتائج التدخلات المباشرة أو اجعل منها "
+                "تدخلًا تمكينيًا واحدًا فقط عند الحاجة؛ لا تجعلها تهيمن على القائمة. "
+                "لا تخترع أرقامًا أو نسبًا أو مبالغ أو مددًا أو تواريخ. يجوز فقط إعادة استخدام رقم موجود صراحة في بيانات الحالة وبنفس الدلالة. "
+                "لا تعرض أسماء أو أكواد المستشارين داخل نصوص التدخلات. "
+                "اكتب العربية سليمة ومباشرة ومناسبة للواجهة. "
+                "لا تكتب JSON ولا Markdown ولا أي شرح قبل أو بعد البلوكات. "
+                "استخدم البروتوكول النصي التالي حرفيًا لكل تدخل، وكرر البلوك من 2 إلى 4 مرات:\n"
+                "BEGIN_INTERVENTION\n"
+                "TITLE: عنوان التدخل\n"
+                "CONFIDENCE: مرتفعة أو متوسطة أو منخفضة\n"
+                "IMPACT: وصف الأثر المتوقع وكيف يعالج المشكلة\n"
+                "REPORTABLE: قيمة أو مؤشر قابل للقياس والتقرير دون اختراع مستهدف رقمي\n"
+                "RESULT: نتيجة متوقعة\n"
+                "OUTPUT: مخرج تنفيذي مباشر\n"
+                "OUTPUT: مخرج تنفيذي مباشر اختياري\n"
+                "RESULT: نتيجة ثانية اختيارية\n"
+                "OUTPUT: مخرج تنفيذي مباشر\n"
+                "END_INTERVENTION"
             ),
             "case_context": self._shared_context(request),
-            "advisor_ref_map": advisor_ref_map,
-            "advisor_scope_cards": scope_cards,
-            "selected_advisor_outputs": advisor_outputs,
-            "direct_anchors": {
-                "social_problem": str(imap.get("social_problem") or (goal.get("social_problem") if isinstance(goal, dict) else "") or ""),
-                "impact_drivers": str(imap.get("impact_drivers") or ""),
-                "target_group": str(goal.get("target_group") if isinstance(goal, dict) else ""),
-                "existing_program_names": [
-                    str(x.get("name") or "") for x in programs
-                    if isinstance(x, dict) and str(x.get("name") or "").strip()
+            "screen3_anchors": {
+                "social_problem": imap.get("social_problem") or goal.get("social_problem"),
+                "impact_drivers": imap.get("impact_drivers"),
+                "association_scope": imap.get("association_scope"),
+                "goal_statement": goal.get("statement"),
+                "target_group": goal.get("target_group"),
+                "existing_programs": [
+                    {
+                        "name": p.get("name"),
+                        "description": p.get("description"),
+                        "target_audience": p.get("target_audience"),
+                        "beneficiary_value": p.get("beneficiary_value"),
+                        "delivery_method": p.get("delivery_method"),
+                    }
+                    for p in programs if isinstance(p, dict)
                 ],
             },
-            "evidence_codes": ["E1", "E2", "E3", "I1", "I2", "A1", "U"],
-            "interaction_types": [
-                "CONSENSUS", "COMPLEMENTARY", "TRADE-OFF", "CONFLICT",
-                "EVIDENCE GAP", "SCOPE CONFLICT",
-            ],
-            "confidence_levels": ["High", "Medium", "Low"],
-            "required_schema": {
-                "recommendation_text": "string",
-                "suggestion": {
-                    "interventions": [
-                        {
-                            "title": "string",
-                            "impact_description": "string",
-                            "reportable_value": "string",
-                            "advisor_refs": ["1-based integers from advisor_ref_map only"],
-                            "evidence_classification": "one evidence code",
-                            "evidence_basis": "short string",
-                            "interaction_type": "one interaction type",
-                            "confidence_level": "High|Medium|Low",
-                            "results": [
-                                {"text": "string", "outputs": [{"text": "string"}]}
-                            ],
-                        }
-                    ]
-                },
-            },
+            "specialist_opinions": compact_opinions,
             "hard_rules": [
-                "Valid JSON only; double quotes only; no Markdown.",
-                "Return 2 to 4 interventions for this Screen-3 case when evidence supports them.",
-                "With 3-4 interventions, at least 2 are direct beneficiary/program interventions and at most 1 is a standalone enabler.",
-                "Each intervention has 1-2 results; each result has 1-2 outputs.",
-                "advisor_refs may contain only integers shown in advisor_ref_map.",
-                "No AOS/ATHAR advisor codes in prose or outputs.",
-                "No invented quantitative claims, budgets, durations, deadlines, or targets.",
+                "Return exactly 2-4 intervention blocks.",
+                "Each intervention must have TITLE, CONFIDENCE, IMPACT, REPORTABLE.",
+                "Each intervention must have at least one RESULT and each RESULT at least one OUTPUT.",
+                "Prefer direct beneficiary/program interventions anchored to impact drivers/programs.",
+                "At most one standalone enabler intervention in a 3-4 intervention result.",
+                "No invented numeric targets, budgets, dates, durations, or quantities.",
+                "No advisor IDs/names in public intervention text.",
             ],
         }
 
         meta_adapter = "meta" if COUNCIL_META_MODE == "adapter" else "base"
 
-        def generate_once(task: Dict[str, Any]) -> Dict[str, Any]:
+        def generate_and_parse(task_obj: Dict[str, Any]) -> List[Dict[str, Any]]:
             raw = self._generate(
                 meta_adapter,
                 self.meta_prompt,
-                json.dumps(task, ensure_ascii=False, indent=2),
-                META_MAX_NEW_TOKENS,
+                json.dumps(task_obj, ensure_ascii=False, indent=2),
+                min(META_MAX_NEW_TOKENS, 1800),
                 deterministic=True,
-                repetition_penalty=1.10,
-                no_repeat_ngram_size=8,
+                repetition_penalty=1.08,
+                no_repeat_ngram_size=7,
             )
-            parsed = self.extract_json_object(raw)
-            normalized = self._normalize_meta_result(parsed, selected_ids, request)
-            self._validate_backend_result(normalized, selected_ids)
-            return normalized
+            parsed = self._parse_meta_screen3_protocol(raw, request)
+            if not (2 <= len(parsed) <= 4):
+                raise ValueError(
+                    f"Meta line protocol produced {len(parsed)} valid interventions; expected 2-4."
+                )
+            return parsed
 
-        def language_violations(result: Dict[str, Any]) -> List[str]:
-            violations: List[str] = []
-            suggestion = result.get("suggestion") or {}
-            for i, intervention in enumerate(suggestion.get("interventions") or []):
-                if not isinstance(intervention, dict):
-                    continue
-                scan_values = {
-                    "title": intervention.get("title"),
-                    "impact_description": intervention.get("impact_description"),
-                    "reportable_value": intervention.get("reportable_value"),
-                    "evidence_basis": intervention.get("evidence_basis"),
-                    "results": intervention.get("results"),
-                }
-                for text in self._collect_strings(scan_values):
-                    if self._has_foreign_script(text):
-                        violations.append(f"interventions[{i}] contains foreign-script leakage")
-                        break
-                    if re.search(r"\b(?:ATHAR|AOS)-(?:LD|SP|FG|SE)?-?\d+\b", text, flags=re.I):
-                        violations.append(f"interventions[{i}] exposes advisor code in user-facing text")
-                        break
-            return list(dict.fromkeys(violations))
-
-        initial_error: Optional[Exception] = None
-        result: Optional[Dict[str, Any]] = None
+        interventions: Optional[List[Dict[str, Any]]] = None
+        first_error: Optional[Exception] = None
         try:
-            result = generate_once(meta_task)
+            interventions = generate_and_parse(task)
         except Exception as exc:
-            initial_error = exc
-            self._last_meta_debug["schema_retry_used"] = True
-            self._last_meta_debug["initial_error"] = str(exc)[:1200]
+            first_error = exc
+            self._last_meta_debug["retry_used"] = True
+            self._last_meta_debug["first_error"] = str(exc)[:1200]
 
-        if result is not None:
-            grounding = self._grounding_violations(result, request)
-            impact = self._screen3_impact_quality_violations(result, request)
-            language = language_violations(result)
-            self._last_meta_debug["initial_grounding_violations"] = list(grounding)
-            self._last_meta_debug["initial_impact_quality_violations"] = list(impact)
-            self._last_meta_debug["initial_language_violations"] = list(language)
-        else:
-            grounding, impact, language = [], [], []
-
-        needs_retry = result is None or bool(grounding or impact or language)
-        if needs_retry:
-            self._last_meta_debug["quality_retry_used"] = True
-            retry = dict(meta_task)
+        if interventions is None:
+            retry = dict(task)
             retry["instruction"] = (
-                meta_task["instruction"]
-                + " هذه محاولة القبول النهائية. اكتب JSON أقصر وبنية أبسط. "
-                  "اجعل التدخلين الأولين على الأقل مباشرين للمستفيد/البرنامج ومربوطين باسم برنامج قائم أو impact driver عندما تدعم الآراء ذلك. "
-                  "ادمج القياس والتمويل كدعم ولا تسمح لهما بالسيطرة على القائمة. "
-                  "راجع كل رقم واحذف أي رقم غير موجود حرفيًا في case_context. "
-                  "استخدم advisor_refs فقط ولا تكتب أي ID نصي للمستشار."
+                task["instruction"]
+                + "\nهذه محاولة إصلاح نهائية. أعد 2 أو 3 بلوكات فقط وبأقصر صياغة ممكنة. "
+                  "لا تحذف أي Marker من BEGIN_INTERVENTION إلى END_INTERVENTION. "
+                  "اجعل كل بلوك يحتوي RESULT واحدًا على الأقل وOUTPUT واحدًا على الأقل."
             )
-            retry["previous_errors"] = {
-                "schema": str(initial_error)[:900] if initial_error else None,
-                "grounding": grounding[:8],
-                "impact_quality": impact[:8],
-                "language": language[:8],
-            }
-            # Do not include the malformed/raw previous JSON; that tends to
-            # anchor the model on the exact syntax/ID mistakes we are repairing.
-            result = generate_once(retry)
+            interventions = generate_and_parse(retry)
 
-        grounding = self._grounding_violations(result, request)
-        impact = self._screen3_impact_quality_violations(result, request)
-        language = language_violations(result)
-        self._last_meta_debug["final_grounding_violations"] = list(grounding)
-        self._last_meta_debug["final_impact_quality_violations"] = list(impact)
-        self._last_meta_debug["final_language_violations"] = list(language)
+        result = {
+            "involved_advisor_ids": list(selected_ids),
+            "suggestion": {"interventions": interventions},
+        }
+        self._validate_screen3_public_response(result)
+
+        grounding = self._grounding_violations(
+            {"suggestion": {"interventions": interventions}},
+            request,
+        )
+        impact = self._screen3_impact_quality_violations(
+            {"suggestion": {"interventions": interventions}},
+            request,
+        )
+        self._last_meta_debug["final_grounding_violations"] = grounding
+        self._last_meta_debug["final_impact_quality_violations"] = impact
 
         if grounding:
-            raise ValueError("Council grounding validation failed: " + " | ".join(grounding[:8]))
+            raise ValueError(
+                "Meta final grounding validation failed: " + " | ".join(grounding[:8])
+            )
         if impact:
-            raise ValueError("Council Screen-3 impact quality validation failed: " + " | ".join(impact[:6]))
-        if language:
-            raise ValueError("Council language validation failed: " + " | ".join(language[:6]))
+            self._last_meta_debug["retry_used"] = True
+            retry = dict(task)
+            retry["instruction"] = (
+                task["instruction"]
+                + "\nالمحاولة السابقة لم تحقق جودة Impact Map. أعد التركيب من الصفر. "
+                  "اجعل تدخلين على الأقل مباشرين للمستفيد/البرنامج، مرتبطين صراحة ببرنامج قائم أو impact driver. "
+                  "ادمج MEAL والتمويل كدعم داخل التدخلات المباشرة أو احتفظ بتدخل تمكيني مستقل واحد فقط. "
+                  "التزم بنفس line protocol حرفيًا."
+            )
+            retry["quality_errors"] = impact[:6]
+            interventions = generate_and_parse(retry)
+            result = {
+                "involved_advisor_ids": list(selected_ids),
+                "suggestion": {"interventions": interventions},
+            }
+            self._validate_screen3_public_response(result)
+            grounding = self._grounding_violations(
+                {"suggestion": {"interventions": interventions}},
+                request,
+            )
+            impact = self._screen3_impact_quality_violations(
+                {"suggestion": {"interventions": interventions}},
+                request,
+            )
+            self._last_meta_debug["final_grounding_violations"] = grounding
+            self._last_meta_debug["final_impact_quality_violations"] = impact
+            if grounding:
+                raise ValueError(
+                    "Meta final grounding validation failed after retry: "
+                    + " | ".join(grounding[:8])
+                )
+            if impact:
+                raise ValueError(
+                    "Meta final Screen-3 quality validation failed after retry: "
+                    + " | ".join(impact[:6])
+                )
+
         return result
 
     @staticmethod
@@ -2091,7 +2347,7 @@ class AtharCouncilEngine:
             raise ValueError("Screen 3 suggestion must contain interventions only.")
         interventions = suggestion.get("interventions")
         if not isinstance(interventions, list) or not (1 <= len(interventions) <= 4):
-            raise ValueError("Screen 3 requires 1 to 4 interventions.")
+            raise ValueError("Screen 3 requires 1 to 4 final Meta interventions.")
 
         required = {
             "title", "confidence_level", "impact_description",
@@ -2131,11 +2387,10 @@ class AtharCouncilEngine:
                         raise ValueError(f"Screen 3 outputs[{k}] must contain text only.")
 
     def _regenerate_single_output(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """Screen-3 single-output regeneration sub-flow.
+        """Screen-3 single-output regeneration using Meta semantics, Python JSON.
 
-        This is a rewrite of one output block, not a new council decision.  The
-        Meta adapter is used to preserve the unified council style.  No new
-        quantitative claim may be introduced beyond the supplied context.
+        The Meta model returns one plain TEXT line; Python constructs the exact
+        regeneration envelope required by the backend contract.
         """
         input_obj = request.get("input") or {}
         existing_text = str(input_obj.get("existing_text") or "").strip()
@@ -2152,32 +2407,36 @@ class AtharCouncilEngine:
         }
         task = {
             "instruction": (
-                "أعد صياغة مخرج واحد فقط لشاشة خريطة الأثر. لا تنشئ تدخلًا جديدًا، "
-                "ولا تغير المقصود الاستراتيجي. أعد JSON صالحًا فقط بالمفتاح text. "
-                "اجعل النص أوضح وأكثر تنفيذية، ولا تخترع رقمًا أو نسبة أو تاريخًا أو مدة. "
-                "يجوز فقط الاحتفاظ برقم موجود أصلًا في السياق وبنفس الدلالة."
+                "أعد صياغة مخرج واحد فقط لشاشة خريطة الأثر. لا تنشئ تدخلًا جديدًا ولا تغير المقصود. "
+                "لا تخترع رقمًا أو نسبة أو تاريخًا أو مدة. يجوز الاحتفاظ فقط بما هو موجود في السياق وبنفس الدلالة. "
+                "أخرج سطرًا واحدًا فقط يبدأ حرفيًا بـ TEXT: ثم النص العربي الجديد. لا تكتب JSON أو Markdown."
             ),
             "context": source_context,
-            "required_schema": {"text": "string"},
         }
 
-        def generate(task_obj: Dict[str, Any]) -> str:
+        def generate_text(task_obj: Dict[str, Any]) -> str:
             raw = self._generate(
                 "meta" if COUNCIL_META_MODE == "adapter" else "base",
                 self.meta_prompt,
                 json.dumps(task_obj, ensure_ascii=False, indent=2),
-                500,
+                350,
                 deterministic=True,
                 repetition_penalty=1.08,
-                no_repeat_ngram_size=8,
+                no_repeat_ngram_size=7,
             )
-            parsed = self.extract_json_object(raw)
-            value = str(parsed.get("text") or "").strip()
+            clean = self.clean_model_text(raw).replace("```", "").strip()
+            m = re.search(r"(?im)^\s*(?:TEXT|النص)\s*[:=]\s*(.+)$", clean)
+            if m:
+                value = m.group(1).strip()
+            else:
+                lines = [x.strip() for x in clean.splitlines() if x.strip()]
+                value = lines[0] if lines else ""
+            value = self._clean_meta_public_text(value, request)
             if not value:
                 raise ValueError("Regenerated Screen 3 output is empty.")
             return value
 
-        generated_text = generate(task)
+        generated_text = generate_text(task)
         source_text = self._normalize_digits(
             json.dumps(source_context, ensure_ascii=False, sort_keys=True)
         )
@@ -2187,12 +2446,9 @@ class AtharCouncilEngine:
             if n not in source_numbers
         ]
         if unsupported:
-            repair = dict(task)
-            repair["instruction"] += (
-                " المحاولة السابقة أضافت أرقامًا غير موجودة. أعد الصياغة بدون أي رقم جديد."
-            )
-            repair["unsupported_numbers"] = unsupported
-            generated_text = generate(repair)
+            retry = dict(task)
+            retry["instruction"] += " احذف أي رقم غير موجود حرفيًا في السياق."
+            generated_text = generate_text(retry)
             unsupported = [
                 n for n in self._extract_number_tokens(generated_text)
                 if n not in source_numbers
@@ -2203,34 +2459,33 @@ class AtharCouncilEngine:
                     + ", ".join(unsupported)
                 )
 
-        raw_advisors = self._incoming_advisors(request)
         involved: List[str] = []
-        for advisor in raw_advisors:
-            if not isinstance(advisor, dict):
-                continue
-            canonical = self._canonical_advisor_id(advisor)
-            if canonical and canonical not in involved:
-                involved.append(canonical)
+        selected_raw = input_obj.get("selected_advisor_ids") or []
+        if isinstance(selected_raw, list):
+            for raw in selected_raw:
+                canonical = self._canonical_advisor_id(raw)
+                if canonical and canonical not in involved:
+                    involved.append(canonical)
+        if not involved:
+            for advisor in self._incoming_advisors(request):
+                if not isinstance(advisor, dict):
+                    continue
+                canonical = self._canonical_advisor_id(advisor)
+                if canonical and canonical not in involved:
+                    involved.append(canonical)
 
-        public = {
+        return {
             "involved_advisor_ids": involved,
             "suggestion": {"text": generated_text},
         }
-        if set(public.keys()) != {"involved_advisor_ids", "suggestion"}:
-            raise ValueError("Invalid regeneration envelope.")
-        if any(
-            re.fullmatch(r"AOS-(?:LD|SP|FG|SE)-\d{2}", x) is None
-            for x in involved
-        ):
-            raise ValueError("Regeneration involved_advisor_ids must use canonical AOS-* IDs.")
-        return public
 
     def consult(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """Current Screen-3 stage: selected Specialist opinions only, no Meta synthesis.
+        """Screen-3 production flow: Specialists internally -> Meta -> backend JSON.
 
-        Each selected advisor independently emits exactly one Screen-3 intervention
-        in the backend's existing Interventions -> Results -> Outputs schema.
-        AOS-META-00 is intentionally not called in this product stage.
+        1) Resolve the council selected by the backend.
+        2) Run every selected Specialist independently. Their opinions are internal.
+        3) Pass all opinions plus case context to AOS-META-00.
+        4) Return ONLY the final Meta synthesis in the exact Screen-3 envelope.
         """
         input_obj = request.get("input") or {}
         debug = bool(request.get("debug") or input_obj.get("debug"))
@@ -2250,74 +2505,51 @@ class AtharCouncilEngine:
 
         total_start = time.perf_counter()
         selected = self._resolve_selected_advisors(request)
-
-        # The backend Screen-3 contract currently allows at most four proposals.
-        # With Meta deliberately disabled, one proposal maps to one selected
-        # Specialist, so accepting more than four would silently drop opinions.
-        if len(selected) > 4:
-            raise ValueError(
-                "Current Screen-3 specialist-opinions stage supports at most 4 selected advisors "
-                "because the backend contract accepts at most 4 interventions."
-            )
+        if len(selected) > 16:
+            raise ValueError("A consultation may include at most 16 selected advisors.")
 
         advisor_outputs: List[Dict[str, Any]] = []
-        interventions: List[Dict[str, Any]] = []
         advisor_timings: Dict[str, float] = {}
-
         for item in selected:
             advisor_id = item["advisor_id"]
-            print(f"[specialist-only] Starting advisor {advisor_id}...", flush=True)
+            print(f"[council] Starting Specialist {advisor_id}...", flush=True)
             started = time.perf_counter()
-            output = self._run_advisor_screen3_intervention(item, request, selected)
+            output = self._run_advisor(item, request, selected)
             elapsed = time.perf_counter() - started
             advisor_timings[advisor_id] = round(elapsed, 3)
             advisor_outputs.append(output)
-            interventions.append(output["intervention"])
-            print(
-                f"[specialist-only] Finished advisor {advisor_id} in {elapsed:.2f}s",
-                flush=True,
-            )
+            print(f"[council] Finished Specialist {advisor_id} in {elapsed:.2f}s", flush=True)
 
-        involved_ids = self._backend_advisor_ids(selected)
-        public_result = {
-            "involved_advisor_ids": involved_ids,
-            "suggestion": {"interventions": interventions},
-        }
+        print(
+            f"[council] Starting AOS-META-00 synthesis for {len(advisor_outputs)} opinion(s)...",
+            flush=True,
+        )
+        meta_started = time.perf_counter()
+        public_result = self._run_meta(request, advisor_outputs)
+        meta_elapsed = time.perf_counter() - meta_started
+        total_elapsed = time.perf_counter() - total_start
+        print(
+            f"[council] Finished AOS-META-00 in {meta_elapsed:.2f}s; total {total_elapsed:.2f}s",
+            flush=True,
+        )
+
+        # Contract source of truth: only these two top-level fields are public.
         self._validate_screen3_public_response(public_result)
-
-        total_elapsed = round(time.perf_counter() - total_start, 3)
         timings = {
             "advisors": advisor_timings,
-            "meta": 0.0,
-            "total": total_elapsed,
-        }
-
-        internal = {
-            "mode": "specialist_opinions_only",
-            "meta_called": False,
-            "advisor_outputs": advisor_outputs,
-            "timings_seconds": timings,
-            "canonical_advisor_ids": involved_ids,
-            # Position i in interventions corresponds to position i in these IDs.
-            "intervention_advisor_map": [
-                {
-                    "index": i,
-                    "advisor_id": row["advisor_id"],
-                }
-                for i, row in enumerate(advisor_outputs)
-            ],
+            "meta": round(meta_elapsed, 3),
+            "total": round(total_elapsed, 3),
         }
 
         if not debug:
-            # Return the exact backend Screen-3 envelope only. Internal advisor
-            # prose/timings stay available through debug mode and server logs.
             return public_result
 
         return {
             "debug": True,
-            "mode": "specialist_opinions_only",
-            "selected_advisor_ids": involved_ids,
-            "advisor_outputs": advisor_outputs,
+            "mode": "specialists_then_meta",
+            "selected_advisor_ids": self._backend_advisor_ids(selected),
+            "advisor_outputs_internal": advisor_outputs,
+            "meta_debug": getattr(self, "_last_meta_debug", {}),
             "timings_seconds": timings,
             "final_result": public_result,
         }
