@@ -176,61 +176,6 @@ class AtharCouncilEngine:
         text = re.sub(r"<think>.*?</think>", "", str(text), flags=re.S | re.I)
         return text.strip()
 
-    @staticmethod
-    def _advisor_output_is_bad(text: str, system_prompt: str) -> bool:
-        """Detect obvious System Prompt echo or severe repetition.
-
-        The authoritative advisor prompt is never modified or shortened. This
-        validator only decides whether the generated opinion should be retried.
-        """
-        text = str(text or "").strip()
-        if len(text) < 200:
-            return True
-
-        compact = re.sub(r"\s+", " ", text).strip().lower()
-        forbidden_markers = [
-            "system identity",
-            "owned outcome",
-            "scope boundaries",
-            "decision rights",
-            "advisor identity",
-            "mission",
-            "الرمز النظامي",
-            "حالة البرومبت",
-            "نوع المكوّن",
-            "athar os advisor",
-        ]
-        marker_hits = sum(
-            1 for marker in forbidden_markers if marker.lower() in compact
-        )
-        if marker_hits >= 2:
-            return True
-
-        prompt_lines = []
-        for line in str(system_prompt or "").splitlines():
-            line = re.sub(r"\s+", " ", line).strip()
-            if len(line) >= 70:
-                prompt_lines.append(line.lower())
-
-        echo_hits = 0
-        for line in prompt_lines[:120]:
-            if line in compact:
-                echo_hits += 1
-            if echo_hits >= 2:
-                return True
-
-        output_lines = [
-            re.sub(r"\s+", " ", line).strip().lower()
-            for line in text.splitlines()
-            if len(re.sub(r"\s+", " ", line).strip()) >= 25
-        ]
-        if len(output_lines) >= 10:
-            unique_ratio = len(set(output_lines)) / len(output_lines)
-            if unique_ratio < 0.65:
-                return True
-
-        return False
-
     @classmethod
     def extract_json_object(cls, text: str) -> Dict[str, Any]:
         cleaned = cls.clean_model_text(text)
@@ -270,8 +215,6 @@ class AtharCouncilEngine:
         max_new_tokens: int,
         *,
         deterministic: bool = False,
-        repetition_penalty: float = 1.05,
-        no_repeat_ngram_size: int = 0,
     ) -> str:
         rendered = self._render_chat(system_prompt, user_prompt)
         ids = self.tokenizer(
@@ -303,7 +246,7 @@ class AtharCouncilEngine:
 
                 gen_kwargs = dict(
                     max_new_tokens=max_new_tokens,
-                    repetition_penalty=repetition_penalty,
+                    repetition_penalty=1.05,
                     eos_token_id=self.tokenizer.eos_token_id,
                     pad_token_id=(
                         self.tokenizer.pad_token_id
@@ -312,9 +255,6 @@ class AtharCouncilEngine:
                     ),
                     use_cache=True,
                 )
-                if no_repeat_ngram_size > 0:
-                    gen_kwargs["no_repeat_ngram_size"] = no_repeat_ngram_size
-
                 if deterministic:
                     gen_kwargs["do_sample"] = False
                 else:
@@ -449,61 +389,19 @@ class AtharCouncilEngine:
             "impact_map": input_obj.get("impact_map"),
         }
 
-    def _run_advisor(
-        self,
-        advisor: Dict[str, Any],
-        request: Dict[str, Any],
-    ) -> Dict[str, Any]:
+    def _run_advisor(self, advisor: Dict[str, Any], request: Dict[str, Any]) -> Dict[str, Any]:
         prompt = self._load_prompt(ADVISOR_PROMPTS_DIR / advisor["prompt_file"])
-
         task = {
             "instruction": (
-                "استخدم System Prompt الأصلي كمنهج داخلي للتحليل، "
-                "ولا تعِد كتابته أو تلخيصه أو اقتباس أقسامه في الإجابة. "
-                "ممنوع أن تعرض Identity أو Mission أو Owned Outcome أو Scope "
-                "أو Tools أو Mandate أو أي تعريفات موجودة في System Prompt. "
-                "ابدأ مباشرة بتحليل الحالة الفعلية المقدمة في case_context. "
-                "قدّم رأيك المستقل كمستشار مختص فقط، ولا تطلع على آراء أي مستشار آخر. "
-                "طبّق المنهجيات والأطر والبوابات والمصفوفات الموجودة في System Prompt "
-                "على الحالة بدل شرحها نظريًا. "
-                "افصل بوضوح بين الحقائق الموجودة في البيانات، والاستنتاجات المهنية "
-                "المبنية عليها، والافتراضات التي تحتاج إلى تحقق. "
-                "حدد القضايا ذات الأولوية، القرارات المطلوبة، والأدلة التي تدعم كل استنتاج. "
-                "قدّم توصيات عملية، المخاطر، الاعتماديات، المفاضلات، مؤشرات القياس المناسبة، "
-                "وفجوات البيانات. "
-                "إذا كانت معلومة غير موجودة، قل 'لا يظهر في البيانات المقدمة' "
-                "ولا تحوّل غياب المعلومة إلى حقيقة مؤكدة. "
-                "لا تخترع أرقامًا أو نسبًا أو خطوط أساس أو مستهدفات أو مواعيد أو مدد تنفيذ "
-                "غير موجودة صراحة في case_context. "
-                "الأرقام التاريخية لا تتحول تلقائيًا إلى أهداف مستقبلية. "
-                "إذا ظهر احتياج خارج اختصاصك، اذكره كإحالة لمستشار مختص فقط، "
-                "ولا تحوّله إلى توصية منك. "
-                "النتيجة المطلوبة هي رأي استشاري كامل خاص بهذه الحالة، "
-                "وليس شرحًا للمستشار أو إعادةً للـSystem Prompt."
+                "طبّق System Prompt الأصلي بالكامل على الحالة التالية. "
+                "قدّم رأيك المستقل فقط ضمن اختصاصك ولا تطلع على آراء أي مستشار آخر. "
+                "حلّل الحالة وقدّم فقط التدخلات والأولويات والمخاطر والافتراضات ونقاط التحقق "
+                "التي يدعمها السياق صراحة. لا تخترع بيانات أو أرقامًا أو نسبًا أو مددًا أو "
+                "خطوط أساس أو مستهدفات غير موجودة في case_context. "
+                "لا تحوّل موضوعًا خارج اختصاصك إلى توصية منك؛ إذا ظهر احتياج خارج نطاقك "
+                "فاذكره كإحالة لمستشار مختص فقط. "
+                "استند إلى حقائق الحالة الفعلية، وافصل بوضوح بين الحقيقة والاستنتاج."
             ),
-            "required_output": [
-                "تشخيص الحالة ضمن اختصاص المستشار",
-                "الحقائق والأدلة المتاحة",
-                "الاستنتاجات المهنية",
-                "الافتراضات التي تحتاج تحقق",
-                "تطبيق الأدوات أو المنهجيات المناسبة على الحالة",
-                "الأولويات والقرارات المطلوبة",
-                "التوصيات العملية",
-                "المخاطر والاعتماديات والمفاضلات",
-                "المؤشرات التي ينبغي مراقبتها بدون اختراع مستهدفات",
-                "فجوات البيانات",
-                "الإحالات لمستشار آخر فقط عند الحاجة",
-                "الرأي النهائي للمستشار",
-            ],
-            "prohibited_output": [
-                "إعادة System Prompt",
-                "تلخيص System Prompt",
-                "نسخ Identity أو Mission أو Scope أو Tools",
-                "شرح تعريف المستشار",
-                "إعادة كتابة Owned Outcome",
-                "اختراع أرقام أو نسب أو مدد أو مستهدفات",
-                "تكرار الفقرات أو العناوين",
-            ],
             "strict_scope_rules": [
                 "كل توصية يجب أن تقع داخل نطاق هذا المستشار كما يحدده System Prompt الأصلي.",
                 "ممنوع إنشاء مستهدف رقمي أو نسبة تحسن أو مدة تنفيذ من عندك.",
@@ -514,36 +412,12 @@ class AtharCouncilEngine:
             "advisor_name_ar": advisor["advisor_name_ar"],
             "case_context": self._shared_context(request),
         }
-
-        user_prompt = json.dumps(task, ensure_ascii=False, indent=2)
-
         opinion = self._generate(
             "specialist",
             prompt,
-            user_prompt,
+            json.dumps(task, ensure_ascii=False, indent=2),
             ADVISOR_MAX_NEW_TOKENS,
-            repetition_penalty=1.08,
-            no_repeat_ngram_size=8,
         )
-
-        if self._advisor_output_is_bad(opinion, prompt):
-            retry_task = dict(task)
-            retry_task["instruction"] = (
-                task["instruction"]
-                + " تنبيه إلزامي: ابدأ بتحليل الحالة مباشرة. لا تكتب اسم أو هوية أو مهمة "
-                  "أو أدوات أو نطاق المستشار، ولا تنسخ أي جملة من System Prompt. "
-                  "لا تكرر أي فقرة. طبّق المعرفة على الحالة فقط."
-            )
-            opinion = self._generate(
-                "specialist",
-                prompt,
-                json.dumps(retry_task, ensure_ascii=False, indent=2),
-                ADVISOR_MAX_NEW_TOKENS,
-                deterministic=True,
-                repetition_penalty=1.12,
-                no_repeat_ngram_size=8,
-            )
-
         return {
             "advisor_id": advisor["advisor_id"],
             "backend_id": advisor.get("backend_id"),
@@ -596,6 +470,17 @@ class AtharCouncilEngine:
     @classmethod
     def _extract_number_tokens(cls, text: Any) -> set[str]:
         normalized = cls._normalize_digits(text)
+
+        # Advisor/system identifiers contain numbers that are identifiers, not
+        # quantitative claims. Example: AOS-SP-13 must not be interpreted as an
+        # unsupported numeric target of "13" by the grounding validator.
+        normalized = re.sub(
+            r"\b(?:AOS-(?:LD|SP|FG|SE)-\d{1,2}|AOS-META-\d{1,2}|ATHAR-ADV-\d{1,2})\b",
+            " ",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+
         return set(re.findall(r"(?<![\w])\d+(?:[.,]\d+)?(?![\w])", normalized))
 
     @classmethod
@@ -745,6 +630,7 @@ class AtharCouncilEngine:
                 "Do not invent numbers, percentages, baselines, targets, dates, deadlines, or execution durations.",
                 "reportable_value is a measurable metric/evidence label, NOT a target value.",
                 "If the case does not provide a target, write the metric to track, not a made-up target.",
+                "Do not write advisor codes or advisor IDs inside user-facing intervention/result/output text; advisor attribution is internal.",
             ],
         }
 
