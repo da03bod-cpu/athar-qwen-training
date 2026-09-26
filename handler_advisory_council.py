@@ -2398,112 +2398,383 @@ class AtharCouncilEngine:
         }
         confidence_map = {"HIGH": "مرتفعة", "MEDIUM": "متوسطة", "LOW": "منخفضة"}
 
-        # Meta returns only decisions.  This is deliberately much smaller than a
-        # public prose block, so the model cannot leak unsupported public claims.
         decision_protocol = (
-            "ACTION=STRENGTHEN|IMPROVE|DEVELOP|EXPAND\n"
-            "DRIVER_ID=<one candidate id>\n"
-            "OUTCOME=ACCESS|ATTENDANCE|CONTINUITY|FAMILY_SUPPORT|SERVICE_QUALITY|LEARNING_SUPPORT|COVERAGE\n"
-            "MEASUREMENT=YES|NO\n"
-            "FUNDING=YES|NO\n"
-            "CONFIDENCE=HIGH|MEDIUM|LOW"
+            "Return EXACTLY these 6 fields, one field per line. "
+            "Replace every placeholder with ONE allowed value.\\n"
+            "ACTION=<ONE_ACTION>\\n"
+            "DRIVER_ID=<ONE_CANDIDATE_ID>\\n"
+            "OUTCOME=<ONE_OUTCOME>\\n"
+            "MEASUREMENT=<YES_OR_NO>\\n"
+            "FUNDING=<YES_OR_NO>\\n"
+            "CONFIDENCE=<ONE_CONFIDENCE>\\n\\n"
+            "Allowed ACTION values: STRENGTHEN, IMPROVE, DEVELOP, EXPAND.\\n"
+            "Allowed OUTCOME values: ACCESS, ATTENDANCE, CONTINUITY, "
+            "FAMILY_SUPPORT, SERVICE_QUALITY, LEARNING_SUPPORT, COVERAGE.\\n"
+            "Allowed MEASUREMENT values: YES, NO.\\n"
+            "Allowed FUNDING values: YES, NO.\\n"
+            "Allowed CONFIDENCE values: HIGH, MEDIUM, LOW.\\n"
+            "Never output multiple choices for one field. "
+            "Never copy the allowed-value lists. "
+            "Never output JSON, Markdown, explanation, or Arabic field names."
         )
 
         meta_adapter = "meta" if COUNCIL_META_MODE == "adapter" else "base"
         meta_system = (
             self.meta_prompt
-            + "\n\nCURRENT SCREEN-3 DECISION MODE — OVERRIDES OUTPUT STYLE ONLY:\n"
+            + "\\n\\nCURRENT SCREEN-3 DECISION MODE — OVERRIDES OUTPUT STYLE ONLY:\\n"
               "بعد قراءة آراء المستشارين كلهم، لا تكتب توصية نثرية. "
-              "اتخذ قرارًا تركيبيًا مختصرًا لكل مرساة باستخدام القيم المسموحة فقط. "
+              "اتخذ قرارًا تركيبيًا مختصرًا لكل مرساة باستخدام قيمة واحدة فقط لكل حقل. "
               "اختر محرك الأثر الأنسب من DRIVER_CANDIDATES، واختر النتيجة الأساسية، "
               "وهل يحتاج التدخل دعمًا من القياس أو الاستدامة المالية. "
-              "لا تكتب أي تفسير أو JSON أو Markdown."
+              "يجب إرجاع الحقول الستة فقط، دون JSON أو Markdown أو شرح."
         )
 
+        decision_keys = (
+            "ACTION", "DRIVER_ID", "OUTCOME",
+            "MEASUREMENT", "FUNDING", "CONFIDENCE",
+        )
+
+        action_aliases = {
+            "STRENGTHEN": "STRENGTHEN",
+            "IMPROVE": "IMPROVE",
+            "DEVELOP": "DEVELOP",
+            "EXPAND": "EXPAND",
+            "تعزيز": "STRENGTHEN",
+            "تحسين": "IMPROVE",
+            "تطوير": "DEVELOP",
+            "توسيع": "EXPAND",
+        }
+        outcome_aliases = {
+            "ACCESS": "ACCESS",
+            "ATTENDANCE": "ATTENDANCE",
+            "CONTINUITY": "CONTINUITY",
+            "FAMILY_SUPPORT": "FAMILY_SUPPORT",
+            "SERVICE_QUALITY": "SERVICE_QUALITY",
+            "LEARNING_SUPPORT": "LEARNING_SUPPORT",
+            "COVERAGE": "COVERAGE",
+            "الوصول": "ACCESS",
+            "الانتظام": "ATTENDANCE",
+            "الاستمرارية": "CONTINUITY",
+            "دعم الأسر": "FAMILY_SUPPORT",
+            "دعم الاسر": "FAMILY_SUPPORT",
+            "جودة الخدمة": "SERVICE_QUALITY",
+            "الاستمرار في التعليم": "LEARNING_SUPPORT",
+            "التغطية": "COVERAGE",
+        }
+        yes_no_aliases = {
+            "YES": "YES", "NO": "NO",
+            "نعم": "YES", "لا": "NO",
+        }
+        confidence_aliases = {
+            "HIGH": "HIGH", "MEDIUM": "MEDIUM", "LOW": "LOW",
+            "مرتفعة": "HIGH", "عالية": "HIGH",
+            "متوسطة": "MEDIUM",
+            "منخفضة": "LOW",
+        }
+
+        def _clean_decision_value(value: Any) -> str:
+            value = str(value or "").strip()
+            value = value.strip("`*_#[](){}<>\\\"' ")
+            value = re.sub(r"[،,؛;.]$", "", value).strip()
+            return value
+
+        def _normalize_alias(value: Any, aliases: Dict[str, str]) -> str:
+            value = _clean_decision_value(value)
+            upper = value.upper()
+            if upper in aliases:
+                return aliases[upper]
+            if value in aliases:
+                return aliases[value]
+            return upper
+
         def parse_decision(raw: str) -> Dict[str, Any]:
-            text = self.clean_model_text(raw)
+            text = self.clean_model_text(raw).replace("```", "").strip()
             fields: Dict[str, str] = {}
+
+            if "{" in text and "}" in text:
+                try:
+                    obj = self.extract_json_object(text)
+                    for key in decision_keys:
+                        if key in obj:
+                            fields[key] = _clean_decision_value(obj.get(key))
+                        elif key.lower() in obj:
+                            fields[key] = _clean_decision_value(obj.get(key.lower()))
+                except Exception:
+                    pass
+
             for line in text.splitlines():
-                m = re.match(r"^\s*([A-Z_]+)\s*=\s*([^\n]+?)\s*$", line.strip(), flags=re.I)
+                clean_line = re.sub(
+                    r"^\\s*(?:[-*•#]+|\\d+[\\).:-]?)\\s*",
+                    "",
+                    line.strip(),
+                )
+                m = re.match(
+                    r"^(ACTION|DRIVER_ID|OUTCOME|MEASUREMENT|FUNDING|CONFIDENCE)"
+                    r"\\s*[:=]\\s*(.+?)\\s*$",
+                    clean_line,
+                    flags=re.I,
+                )
                 if m:
-                    fields[m.group(1).upper()] = m.group(2).strip().upper()
+                    fields[m.group(1).upper()] = _clean_decision_value(m.group(2))
+
+            for key in decision_keys:
+                if fields.get(key):
+                    continue
+                m = re.search(
+                    rf"(?i)\\b{re.escape(key)}\\b\\s*[:=]\\s*"
+                    r"([A-Za-z0-9_\\-]+|[\\u0600-\\u06FF ]{1,40})",
+                    text,
+                )
+                if m:
+                    fields[key] = _clean_decision_value(m.group(1))
+
+            if "ACTION" in fields:
+                fields["ACTION"] = _normalize_alias(fields["ACTION"], action_aliases)
+            if "OUTCOME" in fields:
+                fields["OUTCOME"] = _normalize_alias(fields["OUTCOME"], outcome_aliases)
+            if "MEASUREMENT" in fields:
+                fields["MEASUREMENT"] = _normalize_alias(fields["MEASUREMENT"], yes_no_aliases)
+            if "FUNDING" in fields:
+                fields["FUNDING"] = _normalize_alias(fields["FUNDING"], yes_no_aliases)
+            if "CONFIDENCE" in fields:
+                fields["CONFIDENCE"] = _normalize_alias(fields["CONFIDENCE"], confidence_aliases)
+
+            if "DRIVER_ID" in fields:
+                fields["DRIVER_ID"] = re.sub(r"\\D", "", str(fields["DRIVER_ID"]))
+
+            upper_text = text.upper()
+
+            def unique_enum(options: List[str]) -> Optional[str]:
+                found = [
+                    option for option in options
+                    if re.search(rf"(?<![A-Z_]){re.escape(option)}(?![A-Z_])", upper_text)
+                ]
+                found = list(dict.fromkeys(found))
+                return found[0] if len(found) == 1 else None
+
+            if fields.get("ACTION") not in action_map:
+                one = unique_enum(list(action_map.keys()))
+                if one:
+                    fields["ACTION"] = one
+
+            if fields.get("OUTCOME") not in outcome_map:
+                one = unique_enum(list(outcome_map.keys()))
+                if one:
+                    fields["OUTCOME"] = one
+
+            if fields.get("CONFIDENCE") not in confidence_map:
+                one = unique_enum(list(confidence_map.keys()))
+                if one:
+                    fields["CONFIDENCE"] = one
+
             return fields
+
+        def validate_decision(
+            decision: Dict[str, Any],
+            candidate_ids: set[str],
+        ) -> tuple[Dict[str, Any], List[str]]:
+            decision = dict(decision or {})
+            errors: List[str] = []
+
+            if decision.get("ACTION") not in action_map:
+                errors.append("ACTION invalid")
+            if decision.get("OUTCOME") not in outcome_map:
+                errors.append("OUTCOME invalid")
+            if decision.get("MEASUREMENT") not in {"YES", "NO"}:
+                errors.append("MEASUREMENT invalid")
+            if decision.get("FUNDING") not in {"YES", "NO"}:
+                errors.append("FUNDING invalid")
+            if decision.get("CONFIDENCE") not in confidence_map:
+                errors.append("CONFIDENCE invalid")
+
+            driver_id = re.sub(r"\\D", "", str(decision.get("DRIVER_ID") or ""))
+            if driver_id not in candidate_ids:
+                errors.append("DRIVER_ID invalid")
+            else:
+                decision["DRIVER_ID"] = driver_id
+
+            return decision, errors
+
+        def deterministic_decision_fallback(
+            anchor: Dict[str, Any],
+            candidates: List[Dict[str, Any]],
+        ) -> Dict[str, Any]:
+            if not candidates:
+                raise ValueError("Decision fallback requires at least one driver candidate.")
+
+            best_driver_id = str(candidates[0].get("id"))
+            program = anchor.get("program") or {}
+            blob = " ".join(
+                str(x or "")
+                for x in (
+                    anchor.get("label"),
+                    program.get("name"),
+                    program.get("description"),
+                    program.get("target_audience"),
+                    program.get("beneficiary_value"),
+                    program.get("delivery_method"),
+                    imap.get("social_problem"),
+                    goal.get("target_group"),
+                )
+            ).lower()
+
+            if any(k in blob for k in ("غياب", "انتظام", "حضور")):
+                outcome = "ATTENDANCE"
+            elif any(k in blob for k in ("نقل", "حافل", "مواصل", "وصول", "طريق")):
+                outcome = "ACCESS"
+            elif any(k in blob for k in ("حقيبة", "زي", "أسر", "اسر", "عبء مالي", "مستلزم")):
+                outcome = "FAMILY_SUPPORT"
+            elif any(k in blob for k in ("تعليم", "تعلم", "تحصيل", "دراس", "مدرس")):
+                outcome = "LEARNING_SUPPORT"
+            elif any(k in blob for k in ("تغطية", "نطاق", "قرى", "مناطق", "وصول البرنامج")):
+                outcome = "COVERAGE"
+            elif any(k in blob for k in ("استمرار", "استدام", "استمرارية")):
+                outcome = "CONTINUITY"
+            else:
+                outcome = "SERVICE_QUALITY"
+
+            action = "DEVELOP" if str(anchor.get("kind") or "") == "impact_driver" else "STRENGTHEN"
+
+            opinions_blob = json.dumps(compact_opinions, ensure_ascii=False).lower()
+            funding = (
+                "YES"
+                if any(
+                    k in opinions_blob
+                    for k in (
+                        "تمويل", "استدامة مالية", "تنمية الموارد",
+                        "مانح", "موارد مالية", "شراكات مؤسسية",
+                    )
+                )
+                else "NO"
+            )
+
+            return {
+                "ACTION": action,
+                "DRIVER_ID": best_driver_id,
+                "OUTCOME": outcome,
+                "MEASUREMENT": "YES",
+                "FUNDING": funding,
+                "CONFIDENCE": "MEDIUM",
+            }
 
         def choose_decision(anchor: Dict[str, Any]) -> Dict[str, Any]:
             candidates = anchor.get("driver_candidates") or []
             candidate_ids = {str(x.get("id")) for x in candidates}
-            errors: List[str] = []
-            for attempt in range(3):
-                prompt_obj = {
-                    "role": "AOS-META-00",
-                    "task": "Synthesize all Specialist opinions into one decision vector for this Screen-3 anchor.",
+            if not candidates:
+                raise ValueError(f"Anchor «{anchor.get('label')}» has no DRIVER_CANDIDATES.")
+
+            prompt_obj = {
+                "role": "AOS-META-00",
+                "task": "Synthesize all Specialist opinions into ONE decision vector for this Screen-3 anchor.",
+                "anchor": anchor.get("label"),
+                "program": anchor.get("program"),
+                "driver_candidates": [
+                    {"id": x.get("id"), "text": x.get("text")}
+                    for x in candidates
+                ],
+                "social_problem": imap.get("social_problem") or goal.get("social_problem"),
+                "target_group": goal.get("target_group"),
+                "specialist_opinions": compact_opinions,
+                "required_protocol": decision_protocol,
+                "rules": [
+                    "Return exactly six fields and no explanation.",
+                    "Use exactly ONE allowed enum value for every enum field.",
+                    "Never return an option list separated by |, comma, slash, or OR.",
+                    "Choose exactly one DRIVER_ID from DRIVER_CANDIDATES.",
+                    "Base the semantic decision on all useful Specialist opinions.",
+                    "MEASUREMENT=YES only when measurement materially strengthens the intervention.",
+                    "FUNDING=YES only when sustainability/resource advice materially strengthens the intervention.",
+                ],
+            }
+
+            raw = self._generate(
+                meta_adapter,
+                meta_system,
+                json.dumps(prompt_obj, ensure_ascii=False, indent=2),
+                min(META_MAX_NEW_TOKENS, 120),
+                deterministic=True,
+                repetition_penalty=1.03,
+            )
+            self._last_meta_debug.setdefault("raw_decisions", []).append({
+                "anchor": anchor.get("label"),
+                "attempt": 1,
+                "kind": "meta",
+                "raw": raw,
+            })
+
+            decision, errors = validate_decision(parse_decision(raw), candidate_ids)
+            if not errors:
+                self._last_meta_debug["anchor_attempts"].append({
                     "anchor": anchor.get("label"),
-                    "program": anchor.get("program"),
-                    "driver_candidates": [
-                        {"id": x.get("id"), "text": x.get("text")}
-                        for x in candidates
-                    ],
-                    "social_problem": imap.get("social_problem") or goal.get("social_problem"),
-                    "target_group": goal.get("target_group"),
-                    "specialist_opinions": compact_opinions,
-                    "required_protocol": decision_protocol,
-                    "rules": [
-                        "Use only the listed enum values.",
-                        "Choose exactly one DRIVER_ID from DRIVER_CANDIDATES.",
-                        "Base the decision on all useful Specialist opinions, but do not echo their text.",
-                        "MEASUREMENT=YES only when measurement materially strengthens the intervention.",
-                        "FUNDING=YES only when sustainability/resource advice materially strengthens the intervention.",
-                    ],
-                }
-                if errors:
-                    prompt_obj["previous_errors"] = errors[:8]
-                raw = self._generate(
-                    meta_adapter,
-                    meta_system,
-                    json.dumps(prompt_obj, ensure_ascii=False, indent=2),
-                    min(META_MAX_NEW_TOKENS, 180),
-                    deterministic=True,
-                    repetition_penalty=1.05,
-                    no_repeat_ngram_size=5,
+                    "attempts": 1,
+                    "accepted": True,
+                    "fallback_used": False,
+                })
+                return decision
+
+            self._last_meta_debug["retry_used"] = True
+            repair_prompt = {
+                "role": "AOS-META-00",
+                "task": "Repair ONLY the formatting of your previous Screen-3 decision.",
+                "anchor": anchor.get("label"),
+                "candidate_ids": sorted(candidate_ids),
+                "previous_output": raw,
+                "validation_errors": errors,
+                "required_protocol": decision_protocol,
+                "rules": [
+                    "Preserve your intended semantic choices where they are recoverable.",
+                    "Return exactly the six fields.",
+                    "Use one allowed value per field.",
+                    "Return no explanation, JSON, Markdown, or option lists.",
+                ],
+            }
+
+            repaired_raw = self._generate(
+                meta_adapter,
+                meta_system,
+                json.dumps(repair_prompt, ensure_ascii=False, indent=2),
+                min(META_MAX_NEW_TOKENS, 80),
+                deterministic=True,
+                repetition_penalty=1.01,
+            )
+            self._last_meta_debug.setdefault("raw_decisions", []).append({
+                "anchor": anchor.get("label"),
+                "attempt": 2,
+                "kind": "repair",
+                "raw": repaired_raw,
+            })
+
+            decision, errors = validate_decision(parse_decision(repaired_raw), candidate_ids)
+            if not errors:
+                self._last_meta_debug["anchor_attempts"].append({
+                    "anchor": anchor.get("label"),
+                    "attempts": 2,
+                    "accepted": True,
+                    "fallback_used": False,
+                })
+                return decision
+
+            fallback = deterministic_decision_fallback(anchor, candidates)
+            fallback, fallback_errors = validate_decision(fallback, candidate_ids)
+            if fallback_errors:
+                raise ValueError(
+                    f"Internal fallback failed for anchor «{anchor.get('label')}»: "
+                    + " | ".join(fallback_errors)
                 )
-                decision = parse_decision(raw)
-                errors = []
-                if decision.get("ACTION") not in action_map:
-                    errors.append("ACTION invalid")
-                if decision.get("OUTCOME") not in outcome_map:
-                    errors.append("OUTCOME invalid")
-                if decision.get("MEASUREMENT") not in {"YES", "NO"}:
-                    errors.append("MEASUREMENT invalid")
-                if decision.get("FUNDING") not in {"YES", "NO"}:
-                    errors.append("FUNDING invalid")
-                if decision.get("CONFIDENCE") not in confidence_map:
-                    errors.append("CONFIDENCE invalid")
-                driver_id = re.sub(r"\D", "", decision.get("DRIVER_ID", ""))
-                if driver_id not in candidate_ids:
-                    errors.append("DRIVER_ID invalid")
-                if not errors:
-                    decision["DRIVER_ID"] = driver_id
-                    self._last_meta_debug["anchor_attempts"].append({
-                        "anchor": anchor.get("label"),
-                        "attempts": attempt + 1,
-                        "accepted": True,
-                    })
-                    if attempt:
-                        self._last_meta_debug["retry_used"] = True
-                    return decision
-                if attempt < 2:
-                    self._last_meta_debug["retry_used"] = True
 
             self._last_meta_debug["anchor_attempts"].append({
                 "anchor": anchor.get("label"),
-                "attempts": 3,
-                "accepted": False,
-                "errors": errors[:8],
+                "attempts": 2,
+                "accepted": True,
+                "fallback_used": True,
+                "meta_errors": errors[:8],
             })
-            raise ValueError(
-                f"Meta could not produce a valid decision vector for anchor «{anchor.get('label')}»: "
-                + " | ".join(errors[:8])
-            )
+            self._last_meta_debug.setdefault("decision_fallbacks", []).append({
+                "anchor": anchor.get("label"),
+                "reason": "Meta decision vector remained invalid after one repair.",
+                "decision": dict(fallback),
+            })
+            return fallback
 
         def driver_for_decision(anchor: Dict[str, Any], decision: Dict[str, Any]) -> str:
             did = str(decision.get("DRIVER_ID") or "")
@@ -2976,4 +3247,3 @@ class AtharCouncilEngine:
             "timings_seconds": timings,
             "final_result": public_result,
         }
-
