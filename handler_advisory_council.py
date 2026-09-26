@@ -2193,6 +2193,8 @@ class AtharCouncilEngine:
             "final_hygiene_violations": [],
             "final_anchor_violations": [],
             "meta_decisions": [],
+            "semantic_overrides": [],
+            "semantic_checks": [],
         }
 
         input_obj = request.get("input") or {}
@@ -2284,40 +2286,101 @@ class AtharCouncilEngine:
                 str(program.get("delivery_method") or ""),
             ]).lower()
 
-        # Weighted semantic hints are used only to rank which authoritative
-        # Impact Driver is most plausible for each existing program.  The final
-        # driver choice is still made by AOS-META-00 from the candidate list.
-        concept_groups = {
-            "transport": {
-                "program": ("نقل", "حافل", "مواصل", "طريق", "مسار", "خطين", "الغياب", "الوصول"),
-                "driver": ("نقل", "مواصل", "وصول", "آمن", "المدرسي"),
-            },
-            "family_support": {
-                "program": ("حقيبة", "زي", "مستلزم", "الأسر", "اسر", "أولياء", "العبء", "مالي", "الدعم الاجتماعي"),
-                "driver": ("دعم", "الأسر", "اسر", "مصاريف", "تكاليف", "المتعففة", "مالي"),
-            },
-            "learning_environment": {
-                "program": ("تعليم", "مدرس", "تحصيل", "دراسة", "تعلم"),
-                "driver": ("تعليم", "بيئة", "محفز", "مدرس", "تعلم"),
-            },
+        # Generic semantic ranking for authoritative Impact Drivers.
+        #
+        # Earlier versions contained education-specific boosts such as transport,
+        # family support and learning environment.  That worked for the test case
+        # but could bias unrelated NGOs.  The ranker below is domain-agnostic:
+        # it compares normalized program facts directly with the Impact Drivers
+        # supplied by the backend.
+        semantic_stop_tokens = {
+            "الجمعيه", "الجمعية", "برنامج", "البرنامج", "مشروع", "المشروع",
+            "مبادرة", "المبادرة", "خدمة", "الخدمة", "خدمات",
+            "المستفيد", "المستفيدين", "الفئة", "الفئه", "المستهدفة", "المستهدفه",
+            "الحالي", "الحالية", "الحاليه", "من", "في", "على", "الى", "إلى",
+            "عن", "مع", "ضمن", "بين", "و", "او", "أو", "ثم", "هذا", "هذه",
+            "ذلك", "التي", "الذي", "بما", "لدى", "كل",
         }
 
-        generic_driver_tokens = {
-            "المدرسي", "المدرسية", "الطلاب", "الطالب", "التعليم", "الدعم", "خدمة", "خدمات"
-        }
+        def semantic_normalize(value: Any) -> str:
+            value = str(value or "").lower()
+            value = re.sub(r"[\u064B-\u065F\u0670\u06D6-\u06ED]", "", value)
+            value = (
+                value
+                .replace("أ", "ا")
+                .replace("إ", "ا")
+                .replace("آ", "ا")
+                .replace("ى", "ي")
+                .replace("ؤ", "و")
+                .replace("ئ", "ي")
+            )
+            value = re.sub(r"[^0-9a-z\u0600-\u06FF]+", " ", value)
+            return re.sub(r"\s+", " ", value).strip()
+
+        def semantic_tokenize(value: Any) -> set[str]:
+            normalized = semantic_normalize(value)
+            tokens: set[str] = set()
+
+            for raw in normalized.split():
+                token = raw.strip()
+                if len(token) < 3 or token in semantic_stop_tokens:
+                    continue
+
+                tokens.add(token)
+
+                # Add a lightweight Arabic matching form.  This is only for
+                # similarity scoring; original text is never modified.
+                simplified = token
+                for prefix in ("وال", "بال", "فال", "كال", "لل", "ال"):
+                    if simplified.startswith(prefix) and len(simplified) - len(prefix) >= 3:
+                        simplified = simplified[len(prefix):]
+                        break
+
+                if len(simplified) >= 3:
+                    tokens.add(simplified)
+
+            return tokens
+
+        def semantic_bigrams(value: Any) -> set[str]:
+            tokens = [
+                x for x in semantic_normalize(value).split()
+                if len(x) >= 3 and x not in semantic_stop_tokens
+            ]
+            return {
+                f"{tokens[i]} {tokens[i + 1]}"
+                for i in range(len(tokens) - 1)
+            }
 
         def driver_score(program: Dict[str, Any], driver: str) -> float:
             pblob = program_blob(program)
-            dblob = str(driver or "").lower()
-            pt = self._impact_tokens(pblob) - generic_driver_tokens
-            dt = self._impact_tokens(dblob) - generic_driver_tokens
-            score = float(len(pt & dt))
-            for group in concept_groups.values():
-                p_hit = any(k in pblob for k in group["program"])
-                d_hit = any(k in dblob for k in group["driver"])
-                if p_hit and d_hit:
-                    score += 8.0
-            return score
+            dblob = str(driver or "")
+
+            pt = semantic_tokenize(pblob)
+            dt = semantic_tokenize(dblob)
+            if not dt:
+                return 0.0
+
+            token_overlap = pt & dt
+            token_coverage = len(token_overlap) / max(1, len(dt))
+
+            pb = semantic_bigrams(pblob)
+            db = semantic_bigrams(dblob)
+            bigram_overlap = pb & db
+
+            score = 0.0
+            score += 3.0 * len(token_overlap)
+            score += 5.0 * token_coverage
+            score += 4.0 * len(bigram_overlap)
+
+            pnorm = semantic_normalize(pblob)
+            dnorm = semantic_normalize(dblob)
+
+            # Exact driver phrase appearing in program facts is very strong
+            # evidence and works across sectors without a domain dictionary.
+            if dnorm and len(dnorm) >= 5 and dnorm in pnorm:
+                score += 10.0
+
+            return round(score, 4)
 
         anchors: List[Dict[str, Any]] = []
         for program in program_rows[:4]:
@@ -2504,13 +2567,13 @@ class AtharCouncilEngine:
 
             for line in text.splitlines():
                 clean_line = re.sub(
-                    r"^\\s*(?:[-*•#]+|\\d+[\\).:-]?)\\s*",
+                    r"^\s*(?:[-*•#]+|\d+[\).:-]?)\s*",
                     "",
                     line.strip(),
                 )
                 m = re.match(
                     r"^(ACTION|DRIVER_ID|OUTCOME|MEASUREMENT|FUNDING|CONFIDENCE)"
-                    r"\\s*[:=]\\s*(.+?)\\s*$",
+                    r"\s*[:=]\s*(.+?)\s*$",
                     clean_line,
                     flags=re.I,
                 )
@@ -2521,8 +2584,8 @@ class AtharCouncilEngine:
                 if fields.get(key):
                     continue
                 m = re.search(
-                    rf"(?i)\\b{re.escape(key)}\\b\\s*[:=]\\s*"
-                    r"([A-Za-z0-9_\\-]+|[\\u0600-\\u06FF ]{1,40})",
+                    rf"(?i)\b{re.escape(key)}\b\s*[:=]\s*"
+                    r"([A-Za-z0-9_\-]+|[\u0600-\u06FF ]{1,40})",
                     text,
                 )
                 if m:
@@ -2540,7 +2603,7 @@ class AtharCouncilEngine:
                 fields["CONFIDENCE"] = _normalize_alias(fields["CONFIDENCE"], confidence_aliases)
 
             if "DRIVER_ID" in fields:
-                fields["DRIVER_ID"] = re.sub(r"\\D", "", str(fields["DRIVER_ID"]))
+                fields["DRIVER_ID"] = re.sub(r"\D", "", str(fields["DRIVER_ID"]))
 
             upper_text = text.upper()
 
@@ -2587,13 +2650,267 @@ class AtharCouncilEngine:
             if decision.get("CONFIDENCE") not in confidence_map:
                 errors.append("CONFIDENCE invalid")
 
-            driver_id = re.sub(r"\\D", "", str(decision.get("DRIVER_ID") or ""))
+            driver_id = re.sub(r"\D", "", str(decision.get("DRIVER_ID") or ""))
             if driver_id not in candidate_ids:
                 errors.append("DRIVER_ID invalid")
             else:
                 decision["DRIVER_ID"] = driver_id
 
             return decision, errors
+
+        # Outcome profiles describe the meaning of the seven API outcomes.
+        # They are schema semantics, not NGO/program-specific rules.
+        outcome_semantic_profiles = {
+            "ACCESS": {
+                "phrases": (
+                    "الوصول للخدمة", "الوصول الي الخدمة", "الوصول إلى الخدمة",
+                    "امكانية الوصول", "إمكانية الوصول", "سهولة الوصول",
+                    "بعد المسافة", "صعوبة الوصول", "النقل", "المواصلات",
+                    "التنقل", "حاجز مكاني", "موقع الخدمة", "قرب الخدمة",
+                ),
+                "tokens": (
+                    "وصول", "اتاحة", "إتاحة", "نقل", "مواصلات", "تنقل",
+                    "مسافة", "موقع", "قرب", "بعد",
+                ),
+            },
+            "ATTENDANCE": {
+                "phrases": (
+                    "الانتظام في الحضور", "انتظام الحضور", "خفض الغياب",
+                    "تقليل الغياب", "الحد من الغياب", "المواظبة",
+                    "الالتزام بالحضور", "استمرار الحضور",
+                ),
+                "tokens": (
+                    "انتظام", "حضور", "غياب", "مواظبة", "التزام",
+                ),
+            },
+            "CONTINUITY": {
+                "phrases": (
+                    "استمرارية الاستفادة", "استمرار الاستفادة",
+                    "استمرارية الخدمة", "استمرار الخدمة",
+                    "عدم الانقطاع", "تقليل الانقطاع", "الحد من الانقطاع",
+                    "الاستبقاء", "البقاء في البرنامج",
+                ),
+                "tokens": (
+                    "استمرارية", "استمرار", "انقطاع", "استبقاء", "بقاء",
+                ),
+            },
+            "FAMILY_SUPPORT": {
+                "phrases": (
+                    "دعم الاسر", "دعم الأسر", "العبء المالي",
+                    "تخفيف العبء", "تكاليف الاسرة", "تكاليف الأسرة",
+                    "المساعدات العينية", "الدعم الاجتماعي",
+                    "الاحتياجات الاساسية", "الاحتياجات الأساسية",
+                    "حماية الاسرة", "حماية الأسرة",
+                ),
+                "tokens": (
+                    "اسر", "أسر", "اسرة", "أسرة", "عائلات", "عائلة",
+                    "عبء", "تكاليف", "مصاريف", "مساعدات", "اعانة", "إعانة",
+                    "اجتماعي", "حماية",
+                ),
+            },
+            "SERVICE_QUALITY": {
+                "phrases": (
+                    "جودة الخدمة", "جودة التنفيذ", "تحسين الجودة",
+                    "رضا المستفيدين", "كفاءة التنفيذ", "فعالية الخدمة",
+                    "سلامة الخدمة", "معايير الجودة", "تجربة المستفيد",
+                ),
+                "tokens": (
+                    "جودة", "رضا", "كفاءة", "فعالية", "سلامة",
+                    "معايير", "تجربة",
+                ),
+            },
+            "LEARNING_SUPPORT": {
+                "phrases": (
+                    "الاستمرار في التعليم", "دعم التعلم",
+                    "التحصيل الدراسي", "التحصيل التعليمي",
+                    "صعوبات التعلم", "الدعم التعليمي",
+                    "التسرب الدراسي", "الحد من التسرب",
+                    "المهارات التعليمية",
+                ),
+                "tokens": (
+                    "تعليم", "تعلم", "تحصيل", "دراسي", "دراسة",
+                    "تسرب", "اكاديمي", "أكاديمي", "قراءة", "تعليمي",
+                ),
+            },
+            "COVERAGE": {
+                "phrases": (
+                    "نطاق التغطية", "توسيع التغطية", "زيادة التغطية",
+                    "توسيع النطاق", "مناطق اضافية", "مناطق إضافية",
+                    "الانتشار الجغرافي", "تغطية المستفيدين",
+                    "شمول مناطق", "الوصول الى مناطق", "الوصول إلى مناطق",
+                ),
+                "tokens": (
+                    "تغطية", "نطاق", "انتشار", "توسع", "توسيع",
+                    "مناطق", "جغرافي", "شمول",
+                ),
+            },
+        }
+
+        def _profile_score(text: str, profile: Dict[str, Any]) -> float:
+            normalized = semantic_normalize(text)
+            tokens = semantic_tokenize(text)
+            score = 0.0
+
+            # Explicit phrases are stronger than isolated words.
+            for phrase in profile.get("phrases", ()):
+                p = semantic_normalize(phrase)
+                if p and p in normalized:
+                    score += 3.0
+
+            profile_tokens = semantic_tokenize(
+                " ".join(str(x) for x in profile.get("tokens", ()))
+            )
+            overlap = tokens & profile_tokens
+            score += 1.0 * len(overlap)
+
+            return score
+
+        def semantic_outcome_evidence(
+            anchor: Dict[str, Any],
+            decision: Optional[Dict[str, Any]] = None,
+        ) -> Dict[str, Any]:
+            """
+            Score the seven API outcomes against authoritative anchor facts.
+
+            This is intentionally conservative.  It does not try to replace the
+            Meta Advisor.  It only identifies a strong contradiction when the
+            program facts overwhelmingly support a different outcome.
+            """
+            program = anchor.get("program") or {}
+
+            selected_driver = ""
+            if decision:
+                did = str(decision.get("DRIVER_ID") or "")
+                for candidate in anchor.get("driver_candidates") or []:
+                    if str(candidate.get("id")) == did:
+                        selected_driver = str(candidate.get("text") or "")
+                        break
+
+            # Field weighting reflects evidence reliability for the outcome:
+            # beneficiary value + selected impact driver are strongest.
+            evidence_fields = [
+                (str(program.get("beneficiary_value") or ""), 3.0),
+                (selected_driver, 3.0),
+                (str(program.get("description") or ""), 2.0),
+                (str(anchor.get("label") or ""), 1.5),
+                (str(program.get("target_audience") or ""), 1.0),
+                (str(program.get("delivery_method") or ""), 0.75),
+            ]
+
+            scores: Dict[str, float] = {
+                outcome: 0.0 for outcome in outcome_map
+            }
+
+            for value, weight in evidence_fields:
+                if not value.strip():
+                    continue
+                for outcome, profile in outcome_semantic_profiles.items():
+                    scores[outcome] += weight * _profile_score(value, profile)
+
+            ordered = sorted(
+                scores.items(),
+                key=lambda item: (-item[1], item[0]),
+            )
+
+            best_outcome, best_score = ordered[0]
+            second_score = ordered[1][1] if len(ordered) > 1 else 0.0
+            current_outcome = (
+                str((decision or {}).get("OUTCOME") or "")
+                if decision
+                else ""
+            )
+            current_score = scores.get(current_outcome, 0.0)
+
+            # Strong evidence gate:
+            # - enough direct semantic evidence;
+            # - winner is clearly separated from the second option;
+            # - current Meta outcome has materially weaker support.
+            strong = (
+                best_score >= 7.0
+                and (best_score - second_score) >= 2.5
+                and (
+                    not current_outcome
+                    or best_outcome == current_outcome
+                    or current_score <= max(2.0, best_score * 0.45)
+                )
+            )
+
+            return {
+                "best_outcome": best_outcome,
+                "best_score": round(best_score, 3),
+                "second_score": round(second_score, 3),
+                "current_outcome": current_outcome or None,
+                "current_score": round(current_score, 3),
+                "strong": bool(strong),
+                "scores": {
+                    key: round(value, 3)
+                    for key, value in scores.items()
+                    if value > 0
+                },
+            }
+
+        def semantic_outcome_for_anchor(
+            anchor: Dict[str, Any],
+            decision: Optional[Dict[str, Any]] = None,
+        ) -> Optional[str]:
+            evidence = semantic_outcome_evidence(anchor, decision)
+            if evidence["strong"]:
+                return str(evidence["best_outcome"])
+            return None
+
+        def reconcile_semantic_decision(
+            anchor: Dict[str, Any],
+            decision: Dict[str, Any],
+        ) -> Dict[str, Any]:
+            """
+            Meta remains the primary decision maker.
+
+            Python overrides OUTCOME only when authoritative program facts show a
+            high-confidence contradiction.  Ambiguous cases are left untouched.
+            """
+            decision = dict(decision)
+            evidence = semantic_outcome_evidence(anchor, decision)
+
+            current_outcome = decision.get("OUTCOME")
+            semantic_outcome = (
+                evidence["best_outcome"]
+                if evidence["strong"]
+                else None
+            )
+
+            if (
+                semantic_outcome
+                and current_outcome in outcome_map
+                and semantic_outcome != current_outcome
+            ):
+                self._last_meta_debug.setdefault(
+                    "semantic_overrides", []
+                ).append({
+                    "anchor": anchor.get("label"),
+                    "from_outcome": current_outcome,
+                    "to_outcome": semantic_outcome,
+                    "reason": "strong_authoritative_semantic_contradiction",
+                    "evidence": evidence,
+                })
+
+                decision["OUTCOME"] = semantic_outcome
+
+                # If Python had to correct a high-confidence Meta decision,
+                # reduce the public confidence one level instead of overstating it.
+                if decision.get("CONFIDENCE") == "HIGH":
+                    decision["CONFIDENCE"] = "MEDIUM"
+
+            else:
+                self._last_meta_debug.setdefault(
+                    "semantic_checks", []
+                ).append({
+                    "anchor": anchor.get("label"),
+                    "decision_outcome": current_outcome,
+                    "override": False,
+                    "evidence": evidence,
+                })
+
+            return decision
 
         def deterministic_decision_fallback(
             anchor: Dict[str, Any],
@@ -2618,12 +2935,9 @@ class AtharCouncilEngine:
                 )
             ).lower()
 
-            if any(k in blob for k in ("غياب", "انتظام", "حضور")):
-                outcome = "ATTENDANCE"
-            elif any(k in blob for k in ("نقل", "حافل", "مواصل", "وصول", "طريق")):
-                outcome = "ACCESS"
-            elif any(k in blob for k in ("حقيبة", "زي", "أسر", "اسر", "عبء مالي", "مستلزم")):
-                outcome = "FAMILY_SUPPORT"
+            semantic_outcome = semantic_outcome_for_anchor(anchor)
+            if semantic_outcome:
+                outcome = semantic_outcome
             elif any(k in blob for k in ("تعليم", "تعلم", "تحصيل", "دراس", "مدرس")):
                 outcome = "LEARNING_SUPPORT"
             elif any(k in blob for k in ("تغطية", "نطاق", "قرى", "مناطق", "وصول البرنامج")):
@@ -2682,6 +2996,10 @@ class AtharCouncilEngine:
                     "Never return an option list separated by |, comma, slash, or OR.",
                     "Choose exactly one DRIVER_ID from DRIVER_CANDIDATES.",
                     "Base the semantic decision on all useful Specialist opinions.",
+                    "Choose FAMILY_SUPPORT for interventions whose primary value is reducing family financial/material barriers such as school bags, uniforms, supplies, or study costs.",
+                    "Choose ATTENDANCE when the primary intended result is reducing absence or improving regular attendance.",
+                    "Choose ACCESS when the primary intended result is physical/service access such as transport availability, unless attendance is the more specific stated result.",
+                    "Choose LEARNING_SUPPORT when the primary intended result is learning continuity, achievement, or educational support.",
                     "MEASUREMENT=YES only when measurement materially strengthens the intervention.",
                     "FUNDING=YES only when sustainability/resource advice materially strengthens the intervention.",
                 ],
@@ -2704,6 +3022,7 @@ class AtharCouncilEngine:
 
             decision, errors = validate_decision(parse_decision(raw), candidate_ids)
             if not errors:
+                decision = reconcile_semantic_decision(anchor, decision)
                 self._last_meta_debug["anchor_attempts"].append({
                     "anchor": anchor.get("label"),
                     "attempts": 1,
@@ -2746,6 +3065,7 @@ class AtharCouncilEngine:
 
             decision, errors = validate_decision(parse_decision(repaired_raw), candidate_ids)
             if not errors:
+                decision = reconcile_semantic_decision(anchor, decision)
                 self._last_meta_debug["anchor_attempts"].append({
                     "anchor": anchor.get("label"),
                     "attempts": 2,
@@ -2769,6 +3089,7 @@ class AtharCouncilEngine:
                 "fallback_used": True,
                 "meta_errors": errors[:8],
             })
+            fallback = reconcile_semantic_decision(anchor, fallback)
             self._last_meta_debug.setdefault("decision_fallbacks", []).append({
                 "anchor": anchor.get("label"),
                 "reason": "Meta decision vector remained invalid after one repair.",
@@ -2804,7 +3125,7 @@ class AtharCouncilEngine:
 
             # Grounded, reusable verbalization.  The selected action/driver/outcome
             # come from Meta; program facts come only from the backend input.
-            impact_parts = [f"يسهم التدخل في تعزيز دور {label}"]
+            impact_parts = [f"يسهم التدخل في {action} {label}"]
             if driver:
                 impact_parts.append(f"من خلال التركيز على {driver}")
             if target:
@@ -2816,8 +3137,8 @@ class AtharCouncilEngine:
                 "ACCESS": "استمرارية وصول المستفيدين إلى الخدمة",
                 "ATTENDANCE": "انتظام استفادة الفئة المستهدفة من الخدمة",
                 "CONTINUITY": "استمرارية الاستفادة من البرنامج",
-                "FAMILY_SUPPORT": "مدى تخفيف العوائق عن الأسر المستفيدة",
-                "SERVICE_QUALITY": "جودة تنفيذ الخدمة واستمراريتها",
+                "FAMILY_SUPPORT": "مدى تخفيف العبء والعوائق عن الأسر المستفيدة",
+                "SERVICE_QUALITY": "جودة تنفيذ الخدمة وتجربة المستفيد",
                 "LEARNING_SUPPORT": "استمرارية المستفيدين في التعليم والاستفادة من الدعم",
                 "COVERAGE": "نطاق وصول البرنامج إلى الفئة المستهدفة",
             }
@@ -2827,7 +3148,7 @@ class AtharCouncilEngine:
                 "ACCESS": "تحسن وصول الفئة المستهدفة إلى الخدمة المرتبطة بالتدخل.",
                 "ATTENDANCE": "تحسن انتظام الفئة المستهدفة في الاستفادة من الخدمة المرتبطة بالتدخل.",
                 "CONTINUITY": "تحسن استمرارية استفادة الفئة المستهدفة من البرنامج.",
-                "FAMILY_SUPPORT": "انخفاض العوائق التي تحد من استفادة الأسر المستهدفة من البرنامج.",
+                "FAMILY_SUPPORT": "تحسن استفادة الأسر المستهدفة من الدعم مع تخفيف الأعباء والعوائق المرتبطة بالحالة.",
                 "SERVICE_QUALITY": "تحسن جودة تنفيذ البرنامج واتساق تقديم الخدمة للمستفيدين.",
                 "LEARNING_SUPPORT": "تحسن استمرارية المستفيدين في التعليم والاستفادة من الدعم المقدم.",
                 "COVERAGE": "تحسن وصول البرنامج إلى الفئة المستهدفة ضمن نطاق عمل الجمعية.",
