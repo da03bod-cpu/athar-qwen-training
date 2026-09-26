@@ -2166,31 +2166,33 @@ class AtharCouncilEngine:
         return unique[:4]
 
     def _run_meta(self, request: Dict[str, Any], advisor_outputs: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Run AOS-META-00 after all selected Specialists, then expose only Meta's final Screen-3 synthesis.
+        """Run Specialists -> AOS-META-00 -> deterministic Screen-3 verbalization.
 
-        v5 synthesizes one authoritative program anchor at a time and hard-constrains Meta decoding.  The
-        Meta adapter still reads all Specialist opinions for every intervention, but
-        short per-anchor calls sharply reduce the cross-domain leakage, invented
-        schedules, advisor-name leakage, and fabricated numeric targets observed when
-        the model was asked to draft the whole nested recommendation in one pass.
+        v6 changes the *Meta output contract*, not the council logic.  All selected
+        Specialists still run first and their opinions remain internal.  AOS-META-00
+        reads all opinions plus the authoritative Screen-3 context and returns a
+        compact decision vector for each program anchor.  Python then verbalizes that
+        decision using grounded templates and the exact program/driver text from the
+        request.
 
-        Python does NOT author intervention semantics.  It only selects authoritative
-        input anchors, parses Meta's line protocol, validates grounding/hygiene, and
-        assembles the backend JSON envelope.
+        This keeps the *decision* with AOS-META-00 while removing the failure mode in
+        which the Meta language model invented percentages, schedules, advisor names,
+        or cross-domain terminology while drafting long public prose.
         """
         selected_ids = [str(x["advisor_id"]) for x in advisor_outputs]
         if not selected_ids:
             raise ValueError("Meta synthesis requires at least one Specialist opinion.")
 
         self._last_meta_debug = {
-            "mode": "specialists_then_meta_per_anchor",
-            "meta_output_protocol": "line_protocol_v5_constrained_per_anchor",
+            "mode": "specialists_then_meta_decision_projection",
+            "meta_output_protocol": "decision_vector_v1",
             "retry_used": False,
             "anchor_attempts": [],
             "final_grounding_violations": [],
             "final_impact_quality_violations": [],
             "final_hygiene_violations": [],
             "final_anchor_violations": [],
+            "meta_decisions": [],
         }
 
         input_obj = request.get("input") or {}
@@ -2211,10 +2213,6 @@ class AtharCouncilEngine:
         source_numbers = self._extract_number_tokens(source_text)
         source_lower = re.sub(r"\s+", " ", source_text).lower()
 
-        # Meta must still receive every selected Specialist opinion.  Before
-        # synthesis we remove only obvious unsupported leakage from those internal
-        # drafts (invented schedules/numbers/cross-domain fragments).  We do not
-        # create or replace substantive advice here.
         contamination_terms = (
             "طبيب", "أطباء", "مرضى", "مريض", "علاج", "مستشفى",
             "الحج", "حجاج", "معتمر", "معتمرين", "ضيوف الرحمن",
@@ -2226,11 +2224,6 @@ class AtharCouncilEngine:
         )
 
         def safe_internal_opinion(value: Any) -> str:
-            """Keep qualitative Specialist advice only for Meta final synthesis.
-
-            Numeric/source targets are intentionally hidden from this final writing
-            pass so the Meta adapter cannot echo or mutate them into public claims.
-            """
             raw = self.clean_model_text(str(value or ""))
             kept_lines: List[str] = []
             for line in raw.splitlines():
@@ -2238,19 +2231,20 @@ class AtharCouncilEngine:
                 if not line:
                     continue
                 low = line.lower()
-                if re.search(r"[0-9٠-٩۰-۹%٪/]", line):
-                    continue
                 if any(term in low and term not in source_lower for term in contamination_terms):
                     continue
-                if any(term in low for term in unsafe_time_terms):
+                if any(term in low and term not in source_lower for term in unsafe_time_terms):
+                    continue
+                nums = self._extract_number_tokens(line)
+                if any(n not in source_numbers for n in nums):
                     continue
                 if re.search(r"\b(?:AOS|ATHAR)[-_]", line, flags=re.I):
                     continue
                 if self._has_foreign_script(line):
                     continue
-                line = re.sub(r"\s+", " ", line).strip()
-                if line:
-                    kept_lines.append(line)
+                # Keep the specialist's actual qualitative advice, but cap it so
+                # the Meta decision pass stays focused and inexpensive.
+                kept_lines.append(line)
                 if sum(len(x) for x in kept_lines) >= 1200:
                     break
             return "\n".join(kept_lines)[:1400].strip()
@@ -2260,21 +2254,25 @@ class AtharCouncilEngine:
             text = re.sub(r"^(?:المستشار|مستشار)\s+", "", text)
             return text[:120]
 
-        compact_opinions = [
-            {
-                "specialty": specialty_label(row.get("advisor_name_ar")),
-                "opinion": safe_internal_opinion(row.get("opinion")),
-            }
-            for row in advisor_outputs
-            if safe_internal_opinion(row.get("opinion"))
-        ]
+        compact_opinions = []
+        for row in advisor_outputs:
+            opinion = safe_internal_opinion(row.get("opinion"))
+            if opinion:
+                compact_opinions.append({
+                    "specialty": specialty_label(row.get("advisor_name_ar")),
+                    "opinion": opinion,
+                })
 
-        # Split Impact Drivers into authoritative phrases, preserving source order.
         impact_drivers_text = str(imap.get("impact_drivers") or "").strip()
         drivers = [
             re.sub(r"\s+", " ", x).strip(" .،؛-–—")
             for x in re.split(r"[،؛;\n]+", impact_drivers_text)
             if re.sub(r"\s+", " ", x).strip(" .،؛-–—")
+        ]
+
+        program_rows = [
+            p for p in programs
+            if isinstance(p, dict) and str(p.get("name") or "").strip()
         ]
 
         def program_blob(program: Dict[str, Any]) -> str:
@@ -2284,39 +2282,60 @@ class AtharCouncilEngine:
                 str(program.get("target_audience") or ""),
                 str(program.get("beneficiary_value") or ""),
                 str(program.get("delivery_method") or ""),
-            ])
+            ]).lower()
 
-        # Screen 3 contract expects 2-4 interventions.  Prefer two existing
-        # program/project anchors when available because they are the strongest
-        # beneficiary-facing evidence in the input.  This is constraint selection,
-        # not intervention authoring; all public prose still comes from AOS-META-00.
-        program_rows = [p for p in programs if isinstance(p, dict) and str(p.get("name") or "").strip()]
-        anchors: List[Dict[str, Any]] = []
-        used_drivers = set()
-        for program in program_rows[:2]:
+        # Weighted semantic hints are used only to rank which authoritative
+        # Impact Driver is most plausible for each existing program.  The final
+        # driver choice is still made by AOS-META-00 from the candidate list.
+        concept_groups = {
+            "transport": {
+                "program": ("نقل", "حافل", "مواصل", "طريق", "مسار", "خطين", "الغياب", "الوصول"),
+                "driver": ("نقل", "مواصل", "وصول", "آمن", "المدرسي"),
+            },
+            "family_support": {
+                "program": ("حقيبة", "زي", "مستلزم", "الأسر", "اسر", "أولياء", "العبء", "مالي", "الدعم الاجتماعي"),
+                "driver": ("دعم", "الأسر", "اسر", "مصاريف", "تكاليف", "المتعففة", "مالي"),
+            },
+            "learning_environment": {
+                "program": ("تعليم", "مدرس", "تحصيل", "دراسة", "تعلم"),
+                "driver": ("تعليم", "بيئة", "محفز", "مدرس", "تعلم"),
+            },
+        }
+
+        generic_driver_tokens = {
+            "المدرسي", "المدرسية", "الطلاب", "الطالب", "التعليم", "الدعم", "خدمة", "خدمات"
+        }
+
+        def driver_score(program: Dict[str, Any], driver: str) -> float:
             pblob = program_blob(program)
-            ptoks = self._impact_tokens(pblob)
-            best_driver = ""
-            best_score = -1
-            best_idx = 10**6
-            for idx, driver in enumerate(drivers):
-                dt = self._impact_tokens(driver)
-                score = len(ptoks & dt)
-                # Prefer an unused driver when scores are tied.
-                tie_bias = 0 if driver not in used_drivers else 1
-                key = (score, -tie_bias, -idx)
-                if score > best_score or (score == best_score and idx < best_idx and driver not in used_drivers):
-                    best_score = score
-                    best_idx = idx
-                    best_driver = driver
-            if not best_driver and drivers:
-                best_driver = next((d for d in drivers if d not in used_drivers), drivers[0])
-            if best_driver:
-                used_drivers.add(best_driver)
+            dblob = str(driver or "").lower()
+            pt = self._impact_tokens(pblob) - generic_driver_tokens
+            dt = self._impact_tokens(dblob) - generic_driver_tokens
+            score = float(len(pt & dt))
+            for group in concept_groups.values():
+                p_hit = any(k in pblob for k in group["program"])
+                d_hit = any(k in dblob for k in group["driver"])
+                if p_hit and d_hit:
+                    score += 8.0
+            return score
+
+        anchors: List[Dict[str, Any]] = []
+        for program in program_rows[:4]:
+            ranked = sorted(
+                [
+                    {
+                        "id": idx + 1,
+                        "text": driver,
+                        "score": driver_score(program, driver),
+                    }
+                    for idx, driver in enumerate(drivers)
+                ],
+                key=lambda x: (-x["score"], x["id"]),
+            )
+            candidates = ranked[: min(3, len(ranked))]
             anchors.append({
                 "kind": "existing_program",
                 "label": str(program.get("name") or "").strip(),
-                "matched_impact_driver": best_driver,
                 "program": {
                     "name": program.get("name"),
                     "description": program.get("description"),
@@ -2324,23 +2343,27 @@ class AtharCouncilEngine:
                     "beneficiary_value": program.get("beneficiary_value"),
                     "delivery_method": program.get("delivery_method"),
                 },
+                "driver_candidates": candidates,
             })
 
-        # If fewer than two programs are available, fill remaining slots from
-        # authoritative impact drivers.  Never invent an anchor.
-        for driver in drivers:
-            if len(anchors) >= 2:
-                break
-            if driver in used_drivers:
-                continue
-            anchors.append({
-                "kind": "impact_driver",
-                "label": driver,
-                "matched_impact_driver": driver,
-                "program": {},
-            })
-            used_drivers.add(driver)
+        # Screen 3 normally returns 2-4 interventions.  If there are fewer than
+        # two existing programs, create additional anchors directly from the
+        # authoritative Impact Drivers.  Nothing synthetic is introduced.
+        if len(anchors) < 2:
+            existing_labels = {x["label"] for x in anchors}
+            for idx, driver in enumerate(drivers):
+                if len(anchors) >= 2:
+                    break
+                if driver in existing_labels:
+                    continue
+                anchors.append({
+                    "kind": "impact_driver",
+                    "label": driver,
+                    "program": {},
+                    "driver_candidates": [{"id": idx + 1, "text": driver, "score": 999.0}],
+                })
 
+        anchors = anchors[:4]
         if not anchors:
             raise ValueError(
                 "Screen 3 Meta synthesis needs at least one authoritative existing program or impact driver."
@@ -2350,231 +2373,244 @@ class AtharCouncilEngine:
             {
                 "kind": x.get("kind"),
                 "label": x.get("label"),
-                "matched_impact_driver": x.get("matched_impact_driver"),
+                "driver_candidates": [
+                    {"id": d.get("id"), "text": d.get("text")}
+                    for d in x.get("driver_candidates", [])
+                ],
             }
             for x in anchors
         ]
 
-        def qualitative_text(value: Any) -> str:
-            text = re.sub(r"\s+", " ", str(value or "")).strip()
-            # Remove explicit numeric targets/ranges and schedule language from the
-            # context shown to Meta; authoritative full context remains available
-            # to validators but not to the final prose generator.
-            text = re.sub(r"بنسبة\s*[0-9٠-٩۰-۹.,]+\s*[%٪]", "", text)
-            text = re.sub(
-                r"من\s*[0-9٠-٩۰-۹]+\s*(?:إلى|الى|-)\s*[0-9٠-٩۰-۹]+\s*(?:سنة|سنوات|عام|أعوام)?",
-                "",
-                text,
-            )
-            text = re.sub(r"[0-9٠-٩۰-۹]+(?:[.,][0-9٠-٩۰-۹]+)?\s*[%٪]?", "", text)
-            text = re.sub(r"\b(?:بحلول|بنهاية|الربع\s+\S+|موعد)\b", "", text, flags=re.I)
-            text = text.replace("/", " ")
-            text = re.sub(r"\s+", " ", text).strip(" -–—،,؛;:.")
-            return text
-
-        qualitative_context = {
-            "social_problem": qualitative_text(imap.get("social_problem") or goal.get("social_problem")),
-            "goal_direction": qualitative_text(goal.get("statement")),
-            "target_group": qualitative_text(goal.get("target_group")),
-            "association_scope": qualitative_text(imap.get("association_scope")),
-            "impact_drivers": [qualitative_text(x) for x in drivers if qualitative_text(x)],
+        action_map = {
+            "STRENGTHEN": "تعزيز",
+            "IMPROVE": "تحسين",
+            "DEVELOP": "تطوير",
+            "EXPAND": "توسيع",
         }
+        outcome_map = {
+            "ACCESS": "الوصول",
+            "ATTENDANCE": "الانتظام",
+            "CONTINUITY": "الاستمرارية",
+            "FAMILY_SUPPORT": "دعم الأسر",
+            "SERVICE_QUALITY": "جودة الخدمة",
+            "LEARNING_SUPPORT": "الاستمرار في التعليم",
+            "COVERAGE": "التغطية",
+        }
+        confidence_map = {"HIGH": "مرتفعة", "MEDIUM": "متوسطة", "LOW": "منخفضة"}
 
-        line_protocol = (
-            "BEGIN_INTERVENTION\n"
-            "TITLE: كلمة فعل واحدة فقط: تعزيز أو تحسين أو تطوير أو توسيع\n"
-            "CONFIDENCE: مرتفعة أو متوسطة أو منخفضة\n"
-            "IMPACT: وصف الأثر المتوقع وكيف يعالج المشكلة\n"
-            "REPORTABLE: اسم مؤشر أو قيمة قابلة للقياس بلا مستهدف رقمي\n"
-            "RESULT: نتيجة متوقعة\n"
-            "OUTPUT: مخرج تنفيذي مباشر\n"
-            "OUTPUT: مخرج تنفيذي مباشر اختياري\n"
-            "RESULT: نتيجة ثانية اختيارية\n"
-            "OUTPUT: مخرج تنفيذي مباشر\n"
-            "END_INTERVENTION"
+        # Meta returns only decisions.  This is deliberately much smaller than a
+        # public prose block, so the model cannot leak unsupported public claims.
+        decision_protocol = (
+            "ACTION=STRENGTHEN|IMPROVE|DEVELOP|EXPAND\n"
+            "DRIVER_ID=<one candidate id>\n"
+            "OUTCOME=ACCESS|ATTENDANCE|CONTINUITY|FAMILY_SUPPORT|SERVICE_QUALITY|LEARNING_SUPPORT|COVERAGE\n"
+            "MEASUREMENT=YES|NO\n"
+            "FUNDING=YES|NO\n"
+            "CONFIDENCE=HIGH|MEDIUM|LOW"
         )
 
         meta_adapter = "meta" if COUNCIL_META_MODE == "adapter" else "base"
         meta_system = (
             self.meta_prompt
-            + "\n\nCURRENT SCREEN-3 API MODE — OVERRIDES OUTPUT STYLE ONLY:\n"
-              "أنت الآن في مرحلة التركيب النهائي بعد استلام آراء جميع المستشارين. "
-              "لا تعرض أسماء المستشارين أو المجلس ولا تكتب تحليلاً خارج بروتوكول التدخل. "
-              "ممنوع استخدام كلمات: مستشار، المجلس، بحلول، بنهاية، الربع، موعد، deadline. "
-              "ممنوع استخدام الشرطة المائلة. لا تكتب أي رقم أو نسبة مئوية في النص النهائي. "
-              "لا تنسخ اسم البرنامج في TITLE؛ TITLE يجب أن يكون فعلًا واحدًا فقط من: تعزيز، تحسين، تطوير، توسيع. "
-              "سيضيف النظام اسم البرنامج الموثق إلى TITLE بعد اختيارك للفعل. اجعل REPORTABLE اسم مؤشر فقط."
+            + "\n\nCURRENT SCREEN-3 DECISION MODE — OVERRIDES OUTPUT STYLE ONLY:\n"
+              "بعد قراءة آراء المستشارين كلهم، لا تكتب توصية نثرية. "
+              "اتخذ قرارًا تركيبيًا مختصرًا لكل مرساة باستخدام القيم المسموحة فقط. "
+              "اختر محرك الأثر الأنسب من DRIVER_CANDIDATES، واختر النتيجة الأساسية، "
+              "وهل يحتاج التدخل دعمًا من القياس أو الاستدامة المالية. "
+              "لا تكتب أي تفسير أو JSON أو Markdown."
         )
 
-        def one_anchor_task(anchor: Dict[str, Any], repair_errors: Optional[List[str]] = None) -> Dict[str, Any]:
-            driver = str(anchor.get("matched_impact_driver") or "").strip()
-            label = str(anchor.get("label") or "").strip()
-            instruction = (
-                "ركّب رأيًا نهائيًا واحدًا فقط بصفة AOS-META-00 بعد قراءة كل آراء المستشارين أدناه. "
-                "لا تعرض آراءهم منفصلة. التدخل النهائي يجب أن يكون مباشرًا للمستفيد/البرنامج. "
-                f"المرساة الإلزامية هي البرنامج أو المحرك الموثق: «{label}». لا تنسخ الاسم في TITLE. "
-                "في TITLE اكتب كلمة واحدة فقط من: تعزيز، تحسين، تطوير، توسيع. "
-                "النظام سيركب هذه الكلمة مع اسم المرساة الموثق دون تغيير معنى توصيتك. "
-            )
-            if driver:
-                instruction += (
-                    f"محرك الأثر الإلزامي هو: «{driver}». اذكر هذا المعنى بوضوح في IMPACT أو RESULT. "
-                )
-            instruction += (
-                "استفد من آراء القياس والتمويل والمحفظة فقط كدعم داخل RESULT/OUTPUT عند الحاجة، ولا تحولها إلى تدخل مستقل. "
-                "لا تذكر أي مستشار أو مجلس أو كود AOS. لا تكتب أي أرقام أو نسب أو مبالغ أو تواريخ أو أرباع أو مواعيد. "
-                "لا تستخدم كلمة بحلول أو بنهاية أو الربع أو أي شرطة مائلة. لا تضف مهنة أو فئة مستفيد غير موجودة في الحالة. "
-                "REPORTABLE يجب أن يكون اسم مؤشر فقط مثل معدل الحضور أو استمرارية الاستفادة، وليس مستهدفًا رقميًا. "
-                "اكتب عربية سليمة قصيرة. أخرج بلوكًا واحدًا فقط بالبروتوكول المحدد، بلا JSON وبلا Markdown وبلا أي نص خارجه."
-            )
-            task = {
-                "role": "AOS-META-00",
-                "instruction": instruction,
-                "required_anchor": {
-                    "kind": anchor.get("kind"),
-                    "label": label,
-                    "matched_impact_driver": qualitative_text(driver),
-                    "beneficiary_value": qualitative_text((anchor.get("program") or {}).get("beneficiary_value")),
-                    "target_audience": qualitative_text((anchor.get("program") or {}).get("target_audience")),
-                    "delivery_method": qualitative_text((anchor.get("program") or {}).get("delivery_method")),
-                },
-                "screen3_context": qualitative_context,
-                "all_selected_specialist_opinions": compact_opinions,
-                "required_output_protocol": line_protocol,
-                "hard_rules": [
-                    "Exactly one intervention block.",
-                    "TITLE is exactly one action word from: تعزيز, تحسين, تطوير, توسيع.",
-                    "Direct beneficiary/program-facing intervention only.",
-                    "At least one RESULT and one OUTPUT.",
-                    "No digits and no percentage sign anywhere in public text.",
-                    "No advisor/council/AOS language.",
-                    "No scheduling language such as بحلول, بنهاية, الربع, موعد.",
-                    "No slash composite terminology.",
-                    "No invented profession, sector, beneficiary group, budget, quantity, date, target, or duration.",
-                    "REPORTABLE is a metric/measure name, never a target value.",
-                ],
-            }
-            if repair_errors:
-                task["previous_validation_errors"] = repair_errors[:10]
-                task["repair_instruction"] = (
-                    "المحاولة السابقة رُفضت. أعد كتابة البلوك من الصفر بصياغة أقصر. "
-                    "لا تعِد أي عبارة مرفوضة، ولا تستخدم أرقامًا أو مواعيد أو أسماء مستشارين."
-                )
-            return task
+        def parse_decision(raw: str) -> Dict[str, Any]:
+            text = self.clean_model_text(raw)
+            fields: Dict[str, str] = {}
+            for line in text.splitlines():
+                m = re.match(r"^\s*([A-Z_]+)\s*=\s*([^\n]+?)\s*$", line.strip(), flags=re.I)
+                if m:
+                    fields[m.group(1).upper()] = m.group(2).strip().upper()
+            return fields
 
-        def validate_anchor_row(row: Dict[str, Any], anchor: Dict[str, Any]) -> List[str]:
-            errors: List[str] = []
-            envelope = {
-                "involved_advisor_ids": list(selected_ids),
-                "suggestion": {"interventions": [row]},
-            }
-            try:
-                self._validate_screen3_public_response(envelope)
-            except Exception as exc:
-                errors.append(str(exc))
-
-            grounding = self._grounding_violations(
-                {"suggestion": {"interventions": [row]}}, request
-            )
-            errors.extend(grounding)
-            errors.extend(self._meta_public_hygiene_violations([row], request))
-
-            # v4 intentionally forbids all public digits/percentages in Meta's
-            # Screen-3 synthesis.  Grounded source numbers remain available to the
-            # backend/input but are not needed to express these recommendations.
-            for txt in self._collect_strings(row):
-                if re.search(r"[0-9٠-٩۰-۹]", str(txt)):
-                    errors.append("public intervention contains a digit; v4 Meta synthesis is qualitative-only")
-                if "%" in str(txt) or "٪" in str(txt):
-                    errors.append("public intervention contains a percentage sign")
-
-            label = str(anchor.get("label") or "").strip()
-            title = str(row.get("title") or "").strip()
-            blob = " ".join(self._collect_strings({
-                "title": row.get("title"),
-                "impact": row.get("impact_description"),
-                "results": row.get("results"),
-            }))
-            if label and label not in title:
-                errors.append(f"projected TITLE must contain authoritative anchor label: {label}")
-
-            driver = str(anchor.get("matched_impact_driver") or "").strip()
-            if driver:
-                dt = self._impact_tokens(driver)
-                bt = self._impact_tokens(blob)
-                if dt and not (dt & bt):
-                    errors.append(f"intervention does not visibly address matched impact driver: {driver}")
-
-            # A direct program intervention must not be titled as an internal
-            # support function even if the body mentions the program.
-            if re.search(
-                r"^(?:تحليل|تقييم|مراجعة|قياس|إطار|منهجية|تمويل|استراتيجية تمويل|محفظة|مؤشرات|متابعة)",
-                title,
-            ):
-                errors.append("intervention title is support/enabler-led rather than program-facing")
-            return list(dict.fromkeys(errors))
-
-        def generate_one(anchor: Dict[str, Any]) -> Dict[str, Any]:
+        def choose_decision(anchor: Dict[str, Any]) -> Dict[str, Any]:
+            candidates = anchor.get("driver_candidates") or []
+            candidate_ids = {str(x.get("id")) for x in candidates}
             errors: List[str] = []
             for attempt in range(3):
-                task_obj = one_anchor_task(anchor, errors if attempt else None)
+                prompt_obj = {
+                    "role": "AOS-META-00",
+                    "task": "Synthesize all Specialist opinions into one decision vector for this Screen-3 anchor.",
+                    "anchor": anchor.get("label"),
+                    "program": anchor.get("program"),
+                    "driver_candidates": [
+                        {"id": x.get("id"), "text": x.get("text")}
+                        for x in candidates
+                    ],
+                    "social_problem": imap.get("social_problem") or goal.get("social_problem"),
+                    "target_group": goal.get("target_group"),
+                    "specialist_opinions": compact_opinions,
+                    "required_protocol": decision_protocol,
+                    "rules": [
+                        "Use only the listed enum values.",
+                        "Choose exactly one DRIVER_ID from DRIVER_CANDIDATES.",
+                        "Base the decision on all useful Specialist opinions, but do not echo their text.",
+                        "MEASUREMENT=YES only when measurement materially strengthens the intervention.",
+                        "FUNDING=YES only when sustainability/resource advice materially strengthens the intervention.",
+                    ],
+                }
+                if errors:
+                    prompt_obj["previous_errors"] = errors[:8]
                 raw = self._generate(
                     meta_adapter,
                     meta_system,
-                    json.dumps(task_obj, ensure_ascii=False, indent=2),
-                    min(META_MAX_NEW_TOKENS, 560 if attempt == 0 else 480),
+                    json.dumps(prompt_obj, ensure_ascii=False, indent=2),
+                    min(META_MAX_NEW_TOKENS, 180),
                     deterministic=True,
-                    repetition_penalty=1.12 + (0.02 * attempt),
-                    no_repeat_ngram_size=8,
-                    forbidden_token_regex=r"[0-9٠-٩۰-۹%٪/]",
-                    forbidden_phrases=[
-                        "بحلول", "بنهاية", "الربع", "موعد", "deadline",
-                        "مستشار", "المستشار", "المجلس", "AOS", "ATHAR",
-                    ],
+                    repetition_penalty=1.05,
+                    no_repeat_ngram_size=5,
                 )
-                rows = self._parse_meta_screen3_protocol(raw, request)
-                if len(rows) != 1:
-                    errors = [
-                        f"Meta line protocol produced {len(rows)} valid interventions; expected exactly one."
-                    ]
-                else:
-                    row = rows[0]
-                    raw_title = str(row.get("title") or "").strip()
-                    allowed_actions = ("تعزيز", "تحسين", "تطوير", "توسيع")
-                    action = next((a for a in allowed_actions if re.search(rf"(?:^|\s){re.escape(a)}(?:$|\s)", raw_title)), None)
-                    if action is None:
-                        errors = [
-                            "Meta TITLE must choose one action word: تعزيز or تحسين or تطوير or توسيع."
-                        ]
-                    else:
-                        # Structural projection only: Meta chooses the action; Python
-                        # attaches the authoritative input anchor so the model never
-                        # has to reproduce names exactly.
-                        row["title"] = f"{action} {str(anchor.get('label') or '').strip()}".strip()
-                        errors = validate_anchor_row(row, anchor)
-                    if not errors:
-                        self._last_meta_debug["anchor_attempts"].append({
-                            "anchor": anchor.get("label"),
-                            "attempts": attempt + 1,
-                            "accepted": True,
-                        })
-                        if attempt:
-                            self._last_meta_debug["retry_used"] = True
-                        return rows[0]
+                decision = parse_decision(raw)
+                errors = []
+                if decision.get("ACTION") not in action_map:
+                    errors.append("ACTION invalid")
+                if decision.get("OUTCOME") not in outcome_map:
+                    errors.append("OUTCOME invalid")
+                if decision.get("MEASUREMENT") not in {"YES", "NO"}:
+                    errors.append("MEASUREMENT invalid")
+                if decision.get("FUNDING") not in {"YES", "NO"}:
+                    errors.append("FUNDING invalid")
+                if decision.get("CONFIDENCE") not in confidence_map:
+                    errors.append("CONFIDENCE invalid")
+                driver_id = re.sub(r"\D", "", decision.get("DRIVER_ID", ""))
+                if driver_id not in candidate_ids:
+                    errors.append("DRIVER_ID invalid")
+                if not errors:
+                    decision["DRIVER_ID"] = driver_id
+                    self._last_meta_debug["anchor_attempts"].append({
+                        "anchor": anchor.get("label"),
+                        "attempts": attempt + 1,
+                        "accepted": True,
+                    })
+                    if attempt:
+                        self._last_meta_debug["retry_used"] = True
+                    return decision
                 if attempt < 2:
                     self._last_meta_debug["retry_used"] = True
+
             self._last_meta_debug["anchor_attempts"].append({
                 "anchor": anchor.get("label"),
                 "attempts": 3,
                 "accepted": False,
-                "errors": errors[:10],
+                "errors": errors[:8],
             })
             raise ValueError(
-                f"Meta could not produce a grounded Screen-3 intervention for anchor «{anchor.get('label')}»: "
-                + " | ".join(errors[:10])
+                f"Meta could not produce a valid decision vector for anchor «{anchor.get('label')}»: "
+                + " | ".join(errors[:8])
             )
 
-        interventions = [generate_one(anchor) for anchor in anchors]
+        def driver_for_decision(anchor: Dict[str, Any], decision: Dict[str, Any]) -> str:
+            did = str(decision.get("DRIVER_ID") or "")
+            for row in anchor.get("driver_candidates") or []:
+                if str(row.get("id")) == did:
+                    return str(row.get("text") or "").strip()
+            return ""
+
+        def clean_source_phrase(value: Any) -> str:
+            text = re.sub(r"\s+", " ", str(value or "")).strip()
+            text = text.replace("/", " ")
+            text = re.sub(r"\s+", " ", text).strip(" -–—،,؛;:.")
+            return text
+
+        def render_intervention(anchor: Dict[str, Any], decision: Dict[str, Any]) -> Dict[str, Any]:
+            label = clean_source_phrase(anchor.get("label"))
+            program = anchor.get("program") or {}
+            target = clean_source_phrase(program.get("target_audience") or goal.get("target_group"))
+            delivery = clean_source_phrase(program.get("delivery_method"))
+            beneficiary_value = clean_source_phrase(program.get("beneficiary_value"))
+            driver = clean_source_phrase(driver_for_decision(anchor, decision))
+            action = action_map[decision["ACTION"]]
+            outcome = decision["OUTCOME"]
+            confidence = confidence_map[decision["CONFIDENCE"]]
+
+            title = f"{action} {label}".strip()
+
+            # Grounded, reusable verbalization.  The selected action/driver/outcome
+            # come from Meta; program facts come only from the backend input.
+            impact_parts = [f"يسهم التدخل في تعزيز دور {label}"]
+            if driver:
+                impact_parts.append(f"من خلال التركيز على {driver}")
+            if target:
+                impact_parts.append(f"لخدمة {target}")
+            impact_parts.append("بما يدعم معالجة المشكلة الاجتماعية المرتبطة بالحالة")
+            impact_description = "، ".join(impact_parts) + "."
+
+            metric_by_outcome = {
+                "ACCESS": "استمرارية وصول المستفيدين إلى الخدمة",
+                "ATTENDANCE": "انتظام استفادة الفئة المستهدفة من الخدمة",
+                "CONTINUITY": "استمرارية الاستفادة من البرنامج",
+                "FAMILY_SUPPORT": "مدى تخفيف العوائق عن الأسر المستفيدة",
+                "SERVICE_QUALITY": "جودة تنفيذ الخدمة واستمراريتها",
+                "LEARNING_SUPPORT": "استمرارية المستفيدين في التعليم والاستفادة من الدعم",
+                "COVERAGE": "نطاق وصول البرنامج إلى الفئة المستهدفة",
+            }
+            reportable = metric_by_outcome[outcome]
+
+            result_by_outcome = {
+                "ACCESS": "تحسن وصول الفئة المستهدفة إلى الخدمة المرتبطة بالتدخل.",
+                "ATTENDANCE": "تحسن انتظام الفئة المستهدفة في الاستفادة من الخدمة المرتبطة بالتدخل.",
+                "CONTINUITY": "تحسن استمرارية استفادة الفئة المستهدفة من البرنامج.",
+                "FAMILY_SUPPORT": "انخفاض العوائق التي تحد من استفادة الأسر المستهدفة من البرنامج.",
+                "SERVICE_QUALITY": "تحسن جودة تنفيذ البرنامج واتساق تقديم الخدمة للمستفيدين.",
+                "LEARNING_SUPPORT": "تحسن استمرارية المستفيدين في التعليم والاستفادة من الدعم المقدم.",
+                "COVERAGE": "تحسن وصول البرنامج إلى الفئة المستهدفة ضمن نطاق عمل الجمعية.",
+            }
+            outputs: List[Dict[str, str]] = []
+            if delivery:
+                outputs.append({
+                    "text": f"مراجعة آلية التنفيذ الحالية للبرنامج، وهي {delivery}، وتحديد التحسينات اللازمة بما يخدم {driver or outcome_map[outcome]}."
+                })
+            elif beneficiary_value:
+                outputs.append({
+                    "text": f"تطوير آلية تنفيذ البرنامج بما يحافظ على القيمة المقدمة للمستفيدين: {beneficiary_value}."
+                })
+            else:
+                outputs.append({
+                    "text": f"تطوير آلية تنفيذ {label} بما يعالج {driver or outcome_map[outcome]} ضمن نطاق عمل الجمعية."
+                })
+
+            if decision.get("MEASUREMENT") == "YES":
+                outputs.append({
+                    "text": f"اعتماد متابعة دورية لمؤشر {reportable} وربطه بنتائج {label}."
+                })
+            if decision.get("FUNDING") == "YES":
+                outputs.append({
+                    "text": f"ربط احتياجات استدامة {label} بخطة تنمية الموارد والشراكات المؤسسية دون تغيير هدف التدخل."
+                })
+            if len(outputs) == 1:
+                outputs.append({
+                    "text": f"مراجعة نتائج {label} بصورة دورية واتخاذ قرارات التحسين بناءً على بيانات التنفيذ والمستفيدين."
+                })
+
+            return {
+                "title": title,
+                "confidence_level": confidence,
+                "impact_description": impact_description,
+                "reportable_value": reportable,
+                "results": [
+                    {
+                        "text": result_by_outcome[outcome],
+                        "outputs": outputs[:3],
+                    }
+                ],
+            }
+
+        interventions: List[Dict[str, Any]] = []
+        for anchor in anchors:
+            decision = choose_decision(anchor)
+            row = render_intervention(anchor, decision)
+            self._last_meta_debug["meta_decisions"].append({
+                "anchor": anchor.get("label"),
+                "decision": dict(decision),
+                "driver": driver_for_decision(anchor, decision),
+            })
+            interventions.append(row)
 
         result = {
             "involved_advisor_ids": list(selected_ids),
@@ -2590,10 +2626,19 @@ class AtharCouncilEngine:
         )
         hygiene = self._meta_public_hygiene_violations(interventions, request)
 
+        # The deterministic renderer must not leak internal advisor/council terms,
+        # unsupported foreign scripts, or malformed text.
         anchor_errors: List[str] = []
         for idx, (row, anchor) in enumerate(zip(interventions, anchors)):
-            for err in validate_anchor_row(row, anchor):
-                anchor_errors.append(f"interventions[{idx}]: {err}")
+            title = str(row.get("title") or "")
+            if clean_source_phrase(anchor.get("label")) not in title:
+                anchor_errors.append(
+                    f"interventions[{idx}] title is not anchored to the authoritative program/driver label"
+                )
+            for text_value in self._collect_strings(row):
+                if self._has_foreign_script(str(text_value)):
+                    anchor_errors.append(f"interventions[{idx}] contains foreign-script leakage")
+                    break
 
         self._last_meta_debug["final_grounding_violations"] = list(grounding)
         self._last_meta_debug["final_impact_quality_violations"] = list(impact)
@@ -2603,7 +2648,7 @@ class AtharCouncilEngine:
         all_errors = grounding + impact + hygiene + anchor_errors
         if all_errors:
             raise ValueError(
-                "Meta final Screen-3 validation failed after per-anchor synthesis: "
+                "Meta decision projection failed Screen-3 validation: "
                 + " | ".join(all_errors[:12])
             )
 
