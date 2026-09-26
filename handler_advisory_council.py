@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 import torch
 from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, LogitsProcessor, LogitsProcessorList
 
 
 ROOT = Path(os.getenv("ATHAR_ROOT", "/workspace/data/athar"))
@@ -51,6 +51,18 @@ CONFIDENCE_LEVELS = {"High", "Medium", "Low"}
 
 
 
+class _RegexTokenBlocker(LogitsProcessor):
+    """Hard-mask token IDs whose decoded token matches a forbidden regex."""
+
+    def __init__(self, token_ids: List[int]) -> None:
+        self.token_ids = list(dict.fromkeys(int(x) for x in token_ids))
+
+    def __call__(self, input_ids, scores):
+        if self.token_ids:
+            scores[:, self.token_ids] = -float("inf")
+        return scores
+
+
 class AtharCouncilEngine:
     """Runs selected advisors independently, then synthesizes with AOS-META-00.
 
@@ -81,6 +93,7 @@ class AtharCouncilEngine:
         }
         self.meta_prompt = self._load_prompt(META_PROMPT_PATH)
         self.model_lock = model_lock or threading.RLock()
+        self._forbidden_token_cache: Dict[str, List[int]] = {}
 
         specialist_adapter_path = self._require_adapter(
             specialist_adapter_path,
@@ -313,6 +326,27 @@ class AtharCouncilEngine:
         except TypeError:
             return self.tokenizer.apply_chat_template(messages, **kwargs)
 
+    def _forbidden_token_ids(self, pattern: str) -> List[int]:
+        cached = self._forbidden_token_cache.get(pattern)
+        if cached is not None:
+            return cached
+        rx = re.compile(pattern)
+        bad: List[int] = []
+        vocab_size = len(self.tokenizer)
+        for token_id in range(vocab_size):
+            try:
+                piece = self.tokenizer.decode(
+                    [token_id],
+                    skip_special_tokens=False,
+                    clean_up_tokenization_spaces=False,
+                )
+            except Exception:
+                piece = str(self.tokenizer.convert_ids_to_tokens(token_id) or "")
+            if piece and rx.search(piece):
+                bad.append(token_id)
+        self._forbidden_token_cache[pattern] = bad
+        return bad
+
     def _generate(
         self,
         adapter: str,
@@ -323,6 +357,8 @@ class AtharCouncilEngine:
         deterministic: bool = False,
         repetition_penalty: float = 1.05,
         no_repeat_ngram_size: Optional[int] = None,
+        forbidden_token_regex: Optional[str] = None,
+        forbidden_phrases: Optional[List[str]] = None,
     ) -> str:
         rendered = self._render_chat(system_prompt, user_prompt)
         ids = self.tokenizer(
@@ -373,6 +409,34 @@ class AtharCouncilEngine:
                         temperature=GEN_TEMPERATURE,
                         top_p=GEN_TOP_P,
                     )
+
+                processors = []
+                if forbidden_token_regex:
+                    bad_ids = self._forbidden_token_ids(forbidden_token_regex)
+                    if bad_ids:
+                        processors.append(_RegexTokenBlocker(bad_ids))
+                if processors:
+                    gen_kwargs["logits_processor"] = LogitsProcessorList(processors)
+
+                if forbidden_phrases:
+                    sequences: List[List[int]] = []
+                    seen = set()
+                    for phrase in forbidden_phrases:
+                        phrase = str(phrase or "").strip()
+                        if not phrase:
+                            continue
+                        for variant in (phrase, " " + phrase):
+                            seq = self.tokenizer(
+                                variant,
+                                add_special_tokens=False,
+                                return_attention_mask=False,
+                            )["input_ids"]
+                            key = tuple(int(x) for x in seq)
+                            if key and key not in seen:
+                                seen.add(key)
+                                sequences.append(list(key))
+                    if sequences:
+                        gen_kwargs["bad_words_ids"] = sequences
 
                 with torch.inference_mode():
                     output_ids = self.model.generate(**inputs, **gen_kwargs)
@@ -2104,7 +2168,7 @@ class AtharCouncilEngine:
     def _run_meta(self, request: Dict[str, Any], advisor_outputs: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Run AOS-META-00 after all selected Specialists, then expose only Meta's final Screen-3 synthesis.
 
-        v4 deliberately synthesizes one authoritative program anchor at a time.  The
+        v5 synthesizes one authoritative program anchor at a time and hard-constrains Meta decoding.  The
         Meta adapter still reads all Specialist opinions for every intervention, but
         short per-anchor calls sharply reduce the cross-domain leakage, invented
         schedules, advisor-name leakage, and fabricated numeric targets observed when
@@ -2120,7 +2184,7 @@ class AtharCouncilEngine:
 
         self._last_meta_debug = {
             "mode": "specialists_then_meta_per_anchor",
-            "meta_output_protocol": "line_protocol_v4_per_anchor",
+            "meta_output_protocol": "line_protocol_v5_constrained_per_anchor",
             "retry_used": False,
             "anchor_attempts": [],
             "final_grounding_violations": [],
@@ -2162,6 +2226,11 @@ class AtharCouncilEngine:
         )
 
         def safe_internal_opinion(value: Any) -> str:
+            """Keep qualitative Specialist advice only for Meta final synthesis.
+
+            Numeric/source targets are intentionally hidden from this final writing
+            pass so the Meta adapter cannot echo or mutate them into public claims.
+            """
             raw = self.clean_model_text(str(value or ""))
             kept_lines: List[str] = []
             for line in raw.splitlines():
@@ -2169,29 +2238,35 @@ class AtharCouncilEngine:
                 if not line:
                     continue
                 low = line.lower()
+                if re.search(r"[0-9٠-٩۰-۹%٪/]", line):
+                    continue
                 if any(term in low and term not in source_lower for term in contamination_terms):
                     continue
-                if any(term in low and term not in source_lower for term in unsafe_time_terms):
+                if any(term in low for term in unsafe_time_terms):
                     continue
-                nums = self._extract_number_tokens(line)
-                if any(n not in source_numbers for n in nums):
+                if re.search(r"\b(?:AOS|ATHAR)[-_]", line, flags=re.I):
                     continue
                 if self._has_foreign_script(line):
-                    line = re.sub(r"[\u0400-\u052F\u4E00-\u9FFF\u3040-\u30FF]", "", line)
+                    continue
                 line = re.sub(r"\s+", " ", line).strip()
                 if line:
                     kept_lines.append(line)
-                if sum(len(x) for x in kept_lines) >= 1500:
+                if sum(len(x) for x in kept_lines) >= 1200:
                     break
-            return "\n".join(kept_lines)[:1700].strip()
+            return "\n".join(kept_lines)[:1400].strip()
+
+        def specialty_label(name: Any) -> str:
+            text = re.sub(r"\s+", " ", str(name or "")).strip()
+            text = re.sub(r"^(?:المستشار|مستشار)\s+", "", text)
+            return text[:120]
 
         compact_opinions = [
             {
-                "advisor_id": row["advisor_id"],
-                "advisor_name_ar": row.get("advisor_name_ar"),
+                "specialty": specialty_label(row.get("advisor_name_ar")),
                 "opinion": safe_internal_opinion(row.get("opinion")),
             }
             for row in advisor_outputs
+            if safe_internal_opinion(row.get("opinion"))
         ]
 
         # Split Impact Drivers into authoritative phrases, preserving source order.
@@ -2280,9 +2355,34 @@ class AtharCouncilEngine:
             for x in anchors
         ]
 
+        def qualitative_text(value: Any) -> str:
+            text = re.sub(r"\s+", " ", str(value or "")).strip()
+            # Remove explicit numeric targets/ranges and schedule language from the
+            # context shown to Meta; authoritative full context remains available
+            # to validators but not to the final prose generator.
+            text = re.sub(r"بنسبة\s*[0-9٠-٩۰-۹.,]+\s*[%٪]", "", text)
+            text = re.sub(
+                r"من\s*[0-9٠-٩۰-۹]+\s*(?:إلى|الى|-)\s*[0-9٠-٩۰-۹]+\s*(?:سنة|سنوات|عام|أعوام)?",
+                "",
+                text,
+            )
+            text = re.sub(r"[0-9٠-٩۰-۹]+(?:[.,][0-9٠-٩۰-۹]+)?\s*[%٪]?", "", text)
+            text = re.sub(r"\b(?:بحلول|بنهاية|الربع\s+\S+|موعد)\b", "", text, flags=re.I)
+            text = text.replace("/", " ")
+            text = re.sub(r"\s+", " ", text).strip(" -–—،,؛;:.")
+            return text
+
+        qualitative_context = {
+            "social_problem": qualitative_text(imap.get("social_problem") or goal.get("social_problem")),
+            "goal_direction": qualitative_text(goal.get("statement")),
+            "target_group": qualitative_text(goal.get("target_group")),
+            "association_scope": qualitative_text(imap.get("association_scope")),
+            "impact_drivers": [qualitative_text(x) for x in drivers if qualitative_text(x)],
+        }
+
         line_protocol = (
             "BEGIN_INTERVENTION\n"
-            "TITLE: عنوان التدخل\n"
+            "TITLE: كلمة فعل واحدة فقط: تعزيز أو تحسين أو تطوير أو توسيع\n"
             "CONFIDENCE: مرتفعة أو متوسطة أو منخفضة\n"
             "IMPACT: وصف الأثر المتوقع وكيف يعالج المشكلة\n"
             "REPORTABLE: اسم مؤشر أو قيمة قابلة للقياس بلا مستهدف رقمي\n"
@@ -2301,8 +2401,9 @@ class AtharCouncilEngine:
               "أنت الآن في مرحلة التركيب النهائي بعد استلام آراء جميع المستشارين. "
               "لا تعرض أسماء المستشارين أو المجلس ولا تكتب تحليلاً خارج بروتوكول التدخل. "
               "ممنوع استخدام كلمات: مستشار، المجلس، بحلول، بنهاية، الربع، موعد، deadline. "
-              "ممنوع استخدام الشرطة المائلة /. لا تكتب أي رقم أو نسبة مئوية في النص النهائي. "
-              "استخدم أسماء البرامج ومحركات الأثر كما وردت في الحالة، واجعل REPORTABLE اسم مؤشر فقط."
+              "ممنوع استخدام الشرطة المائلة. لا تكتب أي رقم أو نسبة مئوية في النص النهائي. "
+              "لا تنسخ اسم البرنامج في TITLE؛ TITLE يجب أن يكون فعلًا واحدًا فقط من: تعزيز، تحسين، تطوير، توسيع. "
+              "سيضيف النظام اسم البرنامج الموثق إلى TITLE بعد اختيارك للفعل. اجعل REPORTABLE اسم مؤشر فقط."
         )
 
         def one_anchor_task(anchor: Dict[str, Any], repair_errors: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -2311,7 +2412,9 @@ class AtharCouncilEngine:
             instruction = (
                 "ركّب رأيًا نهائيًا واحدًا فقط بصفة AOS-META-00 بعد قراءة كل آراء المستشارين أدناه. "
                 "لا تعرض آراءهم منفصلة. التدخل النهائي يجب أن يكون مباشرًا للمستفيد/البرنامج. "
-                f"المرساة الإلزامية هي: «{label}». اذكر اسم المرساة حرفيًا في TITLE. "
+                f"المرساة الإلزامية هي البرنامج أو المحرك الموثق: «{label}». لا تنسخ الاسم في TITLE. "
+                "في TITLE اكتب كلمة واحدة فقط من: تعزيز، تحسين، تطوير، توسيع. "
+                "النظام سيركب هذه الكلمة مع اسم المرساة الموثق دون تغيير معنى توصيتك. "
             )
             if driver:
                 instruction += (
@@ -2327,19 +2430,20 @@ class AtharCouncilEngine:
             task = {
                 "role": "AOS-META-00",
                 "instruction": instruction,
-                "required_anchor": anchor,
-                "screen3_context": {
-                    "social_problem": imap.get("social_problem") or goal.get("social_problem"),
-                    "goal_statement": goal.get("statement"),
-                    "target_group": goal.get("target_group"),
-                    "association_scope": imap.get("association_scope"),
-                    "impact_drivers": imap.get("impact_drivers"),
+                "required_anchor": {
+                    "kind": anchor.get("kind"),
+                    "label": label,
+                    "matched_impact_driver": qualitative_text(driver),
+                    "beneficiary_value": qualitative_text((anchor.get("program") or {}).get("beneficiary_value")),
+                    "target_audience": qualitative_text((anchor.get("program") or {}).get("target_audience")),
+                    "delivery_method": qualitative_text((anchor.get("program") or {}).get("delivery_method")),
                 },
+                "screen3_context": qualitative_context,
                 "all_selected_specialist_opinions": compact_opinions,
                 "required_output_protocol": line_protocol,
                 "hard_rules": [
                     "Exactly one intervention block.",
-                    "TITLE contains the exact anchor label.",
+                    "TITLE is exactly one action word from: تعزيز, تحسين, تطوير, توسيع.",
                     "Direct beneficiary/program-facing intervention only.",
                     "At least one RESULT and one OUTPUT.",
                     "No digits and no percentage sign anywhere in public text.",
@@ -2392,7 +2496,7 @@ class AtharCouncilEngine:
                 "results": row.get("results"),
             }))
             if label and label not in title:
-                errors.append(f"TITLE must contain exact anchor label: {label}")
+                errors.append(f"projected TITLE must contain authoritative anchor label: {label}")
 
             driver = str(anchor.get("matched_impact_driver") or "").strip()
             if driver:
@@ -2418,10 +2522,15 @@ class AtharCouncilEngine:
                     meta_adapter,
                     meta_system,
                     json.dumps(task_obj, ensure_ascii=False, indent=2),
-                    min(META_MAX_NEW_TOKENS, 620 if attempt == 0 else 520),
+                    min(META_MAX_NEW_TOKENS, 560 if attempt == 0 else 480),
                     deterministic=True,
                     repetition_penalty=1.12 + (0.02 * attempt),
                     no_repeat_ngram_size=8,
+                    forbidden_token_regex=r"[0-9٠-٩۰-۹%٪/]",
+                    forbidden_phrases=[
+                        "بحلول", "بنهاية", "الربع", "موعد", "deadline",
+                        "مستشار", "المستشار", "المجلس", "AOS", "ATHAR",
+                    ],
                 )
                 rows = self._parse_meta_screen3_protocol(raw, request)
                 if len(rows) != 1:
@@ -2429,7 +2538,20 @@ class AtharCouncilEngine:
                         f"Meta line protocol produced {len(rows)} valid interventions; expected exactly one."
                     ]
                 else:
-                    errors = validate_anchor_row(rows[0], anchor)
+                    row = rows[0]
+                    raw_title = str(row.get("title") or "").strip()
+                    allowed_actions = ("تعزيز", "تحسين", "تطوير", "توسيع")
+                    action = next((a for a in allowed_actions if re.search(rf"(?:^|\s){re.escape(a)}(?:$|\s)", raw_title)), None)
+                    if action is None:
+                        errors = [
+                            "Meta TITLE must choose one action word: تعزيز or تحسين or تطوير or توسيع."
+                        ]
+                    else:
+                        # Structural projection only: Meta chooses the action; Python
+                        # attaches the authoritative input anchor so the model never
+                        # has to reproduce names exactly.
+                        row["title"] = f"{action} {str(anchor.get('label') or '').strip()}".strip()
+                        errors = validate_anchor_row(row, anchor)
                     if not errors:
                         self._last_meta_debug["anchor_attempts"].append({
                             "anchor": anchor.get("label"),
