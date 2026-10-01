@@ -21,9 +21,22 @@ MODEL_ID = os.getenv("MODEL_ID", "Qwen/Qwen3-14B")
 ADVISOR_PROMPTS_DIR = Path(
     os.getenv("ADVISOR_PROMPTS_DIR", str(ROOT / "prompts" / "advisors"))
 )
-META_PROMPT_PATH = Path(
-    os.getenv("META_PROMPT_PATH", str(ROOT / "prompts" / "meta" / "AOS-META-00.md"))
+META_PROMPTS_DIR = Path(
+    os.getenv("META_PROMPTS_DIR", str(ROOT / "prompts" / "meta"))
 )
+DEFAULT_META_ADVISOR_SLUG = os.getenv(
+    "DEFAULT_META_ADVISOR_SLUG", "AOS-META-01"
+).strip()
+
+# The confirmed backend contract currently sends AOS-META-01, while the
+# production GitHub repository historically stores the same Meta DNA as
+# prompts/meta/AOS-META-00.md. Exact slug files always take precedence.
+# This compatibility alias lets the new contract work immediately without
+# duplicating or weakening the current full Meta prompt. Future Meta Advisors
+# require no Python change: add prompts/meta/<SLUG>.md and send that slug.
+META_PROMPT_COMPAT_ALIASES = {
+    "AOS-META-01": "AOS-META-00",
+}
 ADVISOR_REGISTRY_PATH = Path(
     os.getenv("ADVISOR_REGISTRY_PATH", str(ROOT / "advisors" / "advisors_registry_35.json"))
 )
@@ -91,7 +104,8 @@ class AtharCouncilEngine:
         self.registry_by_name = {
             self._norm(x["advisor_name_ar"]): x for x in advisors
         }
-        self.meta_prompt = self._load_prompt(META_PROMPT_PATH)
+        self._meta_prompt_cache: Dict[str, str] = {}
+        self._meta_prompt_path_cache: Dict[str, Path] = {}
         self.model_lock = model_lock or threading.RLock()
         self._forbidden_token_cache: Dict[str, List[int]] = {}
 
@@ -182,6 +196,65 @@ class AtharCouncilEngine:
         if not text:
             raise ValueError(f"Prompt file is empty: {path}")
         return text
+
+    def _resolve_meta_advisor(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Resolve the Meta persona from input.meta_advisor.slug.
+
+        Resolution order:
+        1) prompts/meta/<slug>.md or .txt
+        2) compatibility alias for the current production prompt
+        3) the configured default slug when meta_advisor is null
+
+        This keeps Meta selection data-driven. Adding a new Meta persona later
+        only requires adding prompts/meta/<NEW-SLUG>.md to GitHub and sending that
+        slug in the backend request; no handler code change is required.
+        """
+        raw = request.get("meta_advisor")
+        if raw is not None and not isinstance(raw, dict):
+            raise ValueError("meta_advisor must be an object or null.")
+
+        slug = str((raw or {}).get("slug") or DEFAULT_META_ADVISOR_SLUG).strip()
+        name = str((raw or {}).get("name") or "المستشار الأعلى").strip()
+        if not slug:
+            slug = DEFAULT_META_ADVISOR_SLUG
+
+        # Prevent path traversal and malformed registry codes.
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{1,79}", slug) is None:
+            raise ValueError(f"Invalid meta_advisor.slug: {slug!r}")
+
+        candidates: List[Path] = [
+            META_PROMPTS_DIR / f"{slug}.md",
+            META_PROMPTS_DIR / f"{slug}.txt",
+        ]
+
+        alias = META_PROMPT_COMPAT_ALIASES.get(slug)
+        if alias:
+            candidates.extend([
+                META_PROMPTS_DIR / f"{alias}.md",
+                META_PROMPTS_DIR / f"{alias}.txt",
+            ])
+
+        prompt_path = next((p for p in candidates if p.exists()), None)
+        if prompt_path is None:
+            looked = ", ".join(str(p) for p in candidates)
+            raise FileNotFoundError(
+                f"No Meta Advisor persona file found for slug {slug}. Looked in: {looked}. "
+                f"Add prompts/meta/{slug}.md to GitHub."
+            )
+
+        cache_key = str(prompt_path.resolve())
+        prompt = self._meta_prompt_cache.get(cache_key)
+        if prompt is None:
+            prompt = self._load_prompt(prompt_path)
+            self._meta_prompt_cache[cache_key] = prompt
+            self._meta_prompt_path_cache[cache_key] = prompt_path
+
+        return {
+            "slug": slug,
+            "name": name,
+            "prompt": prompt,
+            "prompt_path": str(prompt_path),
+        }
 
     @staticmethod
     def _require_adapter(path: Optional[str | Path], label: str) -> Path:
@@ -446,20 +519,28 @@ class AtharCouncilEngine:
                     self.tokenizer.decode(generated, skip_special_tokens=True)
                 )
 
+    @staticmethod
+    def _payload(request: Dict[str, Any]) -> Dict[str, Any]:
+        """Return Screen-3 payload for the current backend contract."""
+        payload = request.get("payload")
+        if isinstance(payload, dict):
+            return payload
+        legacy = request.get("input")
+        if isinstance(legacy, dict):
+            return legacy
+        return {}
+
     def _incoming_advisors(self, request: Dict[str, Any]) -> List[Dict[str, Any]]:
-        value = (request.get("input") or {}).get("advisors") or []
+        value = self._payload(request).get("advisors") or []
         return value if isinstance(value, list) else []
 
     def _resolve_incoming(self, incoming: Dict[str, Any]) -> Dict[str, Any]:
-        """Resolve one backend advisor to the authoritative Athar registry.
-
-        The agreed backend identifier is now the canonical Athar ID itself
-        (for example ``AOS-SP-13``).  Legacy integer IDs are still accepted only
-        as an integration fallback, but every public response is canonical AOS-*.
-        """
+        """Resolve a backend advisor slug to the authoritative Athar Expert DNA."""
+        incoming_slug = str(incoming.get("slug") or "").strip()
         incoming_id = incoming.get("id")
         model_id = (
-            incoming.get("model_advisor_id")
+            incoming_slug
+            or incoming.get("model_advisor_id")
             or incoming.get("advisor_id")
             or incoming.get("system_code")
             or incoming.get("code")
@@ -469,87 +550,75 @@ class AtharCouncilEngine:
         registry_entry = None
         if isinstance(model_id, str):
             registry_entry = self.registry_by_model_id.get(model_id.strip())
-
-        # Transitional compatibility only. Do not expose these numeric IDs back
-        # to the caller; the canonical AOS-* identifier is authoritative.
         if registry_entry is None and isinstance(incoming_id, int):
             registry_entry = self.registry_by_number.get(incoming_id)
-
         if registry_entry is None:
             name = self._norm(incoming.get("name") or incoming.get("advisor_name_ar"))
             registry_entry = self.registry_by_name.get(name)
-
         if registry_entry is None:
             raise ValueError(
-                "Could not map Backend advisor to an Athar advisor. "
-                f"Incoming advisor: {incoming}. Send id/model_advisor_id such as AOS-SP-08."
+                "Could not map backend advisor slug to an Athar advisor. "
+                f"Incoming advisor: {incoming}."
             )
 
         result = dict(registry_entry)
-        result["backend_id"] = registry_entry["advisor_id"]
-        # Preserve the incoming payload for audit/debug without letting it alter
-        # the authoritative Expert DNA identity.
+        result["backend_id"] = incoming_slug or registry_entry["advisor_id"]
         result["backend_payload"] = {
             k: incoming.get(k)
-            for k in ("id", "name", "title", "capabilities")
+            for k in ("slug", "id", "name", "title", "capabilities", "traits")
             if k in incoming
         }
         return result
 
     def _resolve_selected_advisors(self, request: Dict[str, Any]) -> List[Dict[str, Any]]:
-        input_obj = request.get("input") or {}
+        payload = self._payload(request)
         incoming = self._incoming_advisors(request)
-        incoming_by_backend_id = {
-            x.get("id"): x
-            for x in incoming
-            if isinstance(x, dict) and x.get("id") is not None
-        }
-        incoming_by_model_id: Dict[str, Dict[str, Any]] = {}
-        for x in incoming:
-            if not isinstance(x, dict):
-                continue
-            mid = (
-                x.get("model_advisor_id")
-                or x.get("advisor_id")
-                or x.get("system_code")
-                or x.get("code")
-                or (x.get("id") if isinstance(x.get("id"), str) else None)
-            )
-            if isinstance(mid, str):
-                incoming_by_model_id[mid.strip()] = x
 
-        selected = input_obj.get("selected_advisor_ids")
+        selected = payload.get("selected_advisor_ids")
         if selected is None:
-            selected = input_obj.get("selected_advisors")
+            selected = payload.get("selected_advisors")
 
         resolved: List[Dict[str, Any]] = []
+        incoming_by_model_id: Dict[str, Dict[str, Any]] = {}
+        incoming_by_backend_id: Dict[Any, Dict[str, Any]] = {}
+
+        for item in incoming:
+            if not isinstance(item, dict):
+                continue
+            slug = str(item.get("slug") or "").strip()
+            mid = (
+                slug
+                or item.get("model_advisor_id")
+                or item.get("advisor_id")
+                or item.get("system_code")
+                or item.get("code")
+                or (item.get("id") if isinstance(item.get("id"), str) else None)
+            )
+            if isinstance(mid, str) and mid.strip():
+                incoming_by_model_id[mid.strip()] = item
+            if item.get("id") is not None:
+                incoming_by_backend_id[item.get("id")] = item
 
         if isinstance(selected, list) and selected:
             for raw in selected:
                 if isinstance(raw, dict):
                     resolved.append(self._resolve_incoming(raw))
                     continue
-
                 if isinstance(raw, str):
-                    canonical = raw.strip()
-                    reg = self.registry_by_model_id.get(canonical)
-                    if reg is None:
-                        # Backward-compatible numeric string support.
-                        if canonical.isdigit():
-                            reg = self.registry_by_number.get(int(canonical))
-                        if reg is None:
-                            raise ValueError(f"Unknown Athar advisor ID: {raw}")
-                    item = dict(reg)
-                    mapped = incoming_by_model_id.get(item["advisor_id"])
-                    item["backend_id"] = item["advisor_id"]
+                    mapped = incoming_by_model_id.get(raw.strip())
                     if mapped is not None:
-                        item["backend_payload"] = dict(mapped)
+                        resolved.append(self._resolve_incoming(mapped))
+                        continue
+                    reg = self.registry_by_model_id.get(raw.strip())
+                    if reg is None and raw.strip().isdigit():
+                        reg = self.registry_by_number.get(int(raw.strip()))
+                    if reg is None:
+                        raise ValueError(f"Unknown Athar advisor ID: {raw}")
+                    item = dict(reg)
+                    item["backend_id"] = item["advisor_id"]
                     resolved.append(item)
                     continue
-
                 if isinstance(raw, int):
-                    # Numeric values remain accepted only for legacy callers with
-                    # an explicit input.advisors mapping, or as advisor numbers 1..35.
                     mapped = incoming_by_backend_id.get(raw)
                     if mapped is not None:
                         resolved.append(self._resolve_incoming(mapped))
@@ -561,41 +630,44 @@ class AtharCouncilEngine:
                     item["backend_id"] = item["advisor_id"]
                     resolved.append(item)
                     continue
-
                 raise ValueError(f"Unsupported selected advisor value: {raw!r}")
         else:
+            # Current contract: payload.advisors is the selected council.
             for item in incoming:
                 if isinstance(item, dict):
                     resolved.append(self._resolve_incoming(item))
 
         if not resolved:
-            raise ValueError(
-                "No selected advisors received. Send selected_advisor_ids using canonical "
-                "IDs such as AOS-SP-13."
-            )
+            raise ValueError("payload.advisors must contain at least one known advisor slug.")
 
         unique: List[Dict[str, Any]] = []
         seen = set()
         for item in resolved:
-            model_id = item["advisor_id"]
-            if model_id not in seen:
-                seen.add(model_id)
+            key = (item["advisor_id"], str(item.get("backend_id") or ""))
+            if key not in seen:
+                seen.add(key)
                 unique.append(item)
         if len(unique) > 16:
             raise ValueError("A consultation may include at most 16 selected advisors.")
         return unique
 
     def _shared_context(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        input_obj = request.get("input") or {}
+        payload = self._payload(request)
         return {
             "run_id": request.get("run_id"),
             "consultation_id": request.get("consultation_id"),
+            "meta_advisor": request.get("meta_advisor"),
             "topic": request.get("topic"),
-            "organization": input_obj.get("organization"),
-            "programs": input_obj.get("programs"),
-            "track": input_obj.get("track"),
-            "goal": input_obj.get("goal"),
-            "impact_map": input_obj.get("impact_map"),
+            "kind": request.get("kind"),
+            "reason": request.get("reason"),
+            "organization": payload.get("organization"),
+            "programs": payload.get("programs"),
+            "track": payload.get("track"),
+            "goal": payload.get("goal"),
+            "impact_map": payload.get("impact_map"),
+            "target": payload.get("target"),
+            "output": payload.get("output"),
+            "intervention": payload.get("intervention"),
         }
 
     @staticmethod
@@ -882,7 +954,7 @@ class AtharCouncilEngine:
         # specialist answer from leaking a typo or an unsupported contextual claim
         # into the backend contract. The actual recommendations below still come
         # from the independent Specialist opinion.
-        input_obj = request.get("input") or {}
+        input_obj = self._payload(request)
         track = input_obj.get("track") or {}
         goal_obj = input_obj.get("goal") or {}
         org_obj = input_obj.get("organization") or {}
@@ -1119,7 +1191,7 @@ class AtharCouncilEngine:
 
     def _canonical_advisor_id(self, value: Any) -> Optional[str]:
         if isinstance(value, dict):
-            value = value.get("advisor_id") or value.get("model_advisor_id") or value.get("id")
+            value = value.get("slug") or value.get("advisor_id") or value.get("model_advisor_id") or value.get("id")
         if isinstance(value, int):
             row = self.registry_by_number.get(value)
             return row["advisor_id"] if row else None
@@ -1329,7 +1401,7 @@ class AtharCouncilEngine:
         result["schema_version"] = CONSULTATION_SCHEMA_VERSION
         result["consultation_id"] = (
             request.get("consultation_id")
-            or (request.get("input") or {}).get("consultation_id")
+            or self._payload(request).get("consultation_id")
         )
         result["status"] = OPEN_STATUS
         result["involved_advisor_ids"] = list(selected_ids)
@@ -1648,6 +1720,7 @@ class AtharCouncilEngine:
                     "reportable_value": intervention.get("reportable_value"),
                     "evidence_basis": intervention.get("evidence_basis"),
                     "results": intervention.get("results"),
+                    "outputs": intervention.get("outputs"),
                 },
             )
         for idx, sprint in enumerate(suggestion.get("sprints") or []):
@@ -1690,7 +1763,7 @@ class AtharCouncilEngine:
         driver, target group, or an existing program. Analysis/MEAL/finance/resource
         management may support those proposals, but normally cannot dominate them.
         """
-        input_obj = request.get("input") or {}
+        input_obj = self._payload(request)
         topic = str(request.get("topic") or input_obj.get("topic") or "").strip().lower()
         impact_map = input_obj.get("impact_map") or {}
         if topic != "interventions" and not isinstance(impact_map, dict):
@@ -2165,1085 +2238,385 @@ class AtharCouncilEngine:
             unique.append(item)
         return unique[:4]
 
-    def _run_meta(self, request: Dict[str, Any], advisor_outputs: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Run Specialists -> AOS-META-00 -> deterministic Screen-3 verbalization.
+    def _run_meta(
+        self,
+        request: Dict[str, Any],
+        advisor_outputs: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Final Screen-3 generate contract.
 
-        v6 changes the *Meta output contract*, not the council logic.  All selected
-        Specialists still run first and their opinions remain internal.  AOS-META-00
-        reads all opinions plus the authoritative Screen-3 context and returns a
-        compact decision vector for each program anchor.  Python then verbalizes that
-        decision using grounded templates and the exact program/driver text from the
-        request.
+        Specialists keep their independent First Pass. The selected Meta persona
+        then reviews every public Specialist reasoning and builds 2-3 strategic
+        interventions for the 90-day challenge.
 
-        This keeps the *decision* with AOS-META-00 while removing the failure mode in
-        which the Meta language model invented percentages, schedules, advisor names,
-        or cross-domain terminology while drafting long public prose.
+        Backend compatibility note:
+        the confirmed API shape is intervention -> outputs[] -> results[].
+        Product architecture requires 12 weekly Result units, each with 1-3
+        executable deliverables. Therefore every returned ``outputs[i]`` is one
+        ordered Sprint unit: ``output.text`` is that sprint's Result statement,
+        and ``output.results`` contains its 1-3 executable 5-day deliverables.
+        Array order maps directly to Sprint 1 ... Sprint 12 without adding
+        unsupported schema fields.
         """
-        selected_ids = [str(x["advisor_id"]) for x in advisor_outputs]
-        if not selected_ids:
-            raise ValueError("Meta synthesis requires at least one Specialist opinion.")
+        payload = self._payload(request)
+        meta = self._resolve_meta_advisor(request)
+        advisor_reasonings = self._build_advisor_reasonings(advisor_outputs, request)
+        involved_ids = [x["advisor_id"] for x in advisor_reasonings]
+        if not involved_ids:
+            raise ValueError("Generate requires at least one usable Specialist reasoning.")
 
-        self._last_meta_debug = {
-            "mode": "specialists_then_meta_decision_projection",
-            "meta_output_protocol": "decision_vector_v1",
-            "retry_used": False,
-            "anchor_attempts": [],
-            "final_grounding_violations": [],
-            "final_impact_quality_violations": [],
-            "final_hygiene_violations": [],
-            "final_anchor_violations": [],
-            "meta_decisions": [],
-            "semantic_overrides": [],
-            "semantic_checks": [],
+        reasonings_by_id = {
+            row["advisor_id"]: row["reasoning"] for row in advisor_reasonings
         }
 
-        input_obj = request.get("input") or {}
-        goal = input_obj.get("goal") or {}
-        imap = input_obj.get("impact_map") or {}
-        programs = input_obj.get("programs") or []
-        if not isinstance(goal, dict):
-            goal = {}
-        if not isinstance(imap, dict):
-            imap = {}
-        if not isinstance(programs, list):
-            programs = []
+        # Send compact public-safe Specialist reasoning into the Meta pass, not
+        # the long internal prose. The full Expert DNA was already applied in the
+        # Specialist First Pass.
+        council = [
+            {
+                "advisor_id": row["advisor_id"],
+                "reasoning": row["reasoning"],
+            }
+            for row in advisor_reasonings
+        ]
 
-        case_context = self._shared_context(request)
-        source_text = self._normalize_digits(
-            json.dumps(case_context, ensure_ascii=False, sort_keys=True)
+        protocol = (
+            "Return ONLY the following plain-text protocol. Do not output JSON or Markdown.\n"
+            "One REVIEW line for EVERY advisor:\n"
+            "REVIEW=<advisor_slug>||<Meta assessment of that advisor reasoning>\n"
+            "Then exactly 2 or 3 intervention blocks:\n"
+            "BEGIN_INTERVENTION\n"
+            "TITLE=<short Arabic title>\n"
+            "CONFIDENCE=<high|medium|low>\n"
+            "IMPACT=<how it addresses the social problem>\n"
+            "REPORTABLE=<measurable reportable value without invented numbers>\n"
+            "SPRINT=1\nRESULT=<weekly result>\nTEXT=<deliverable>\n[TEXT=<deliverable>]\n[TEXT=<deliverable>]\nEND_SPRINT\n"
+            "Repeat SPRINT sequentially through SPRINT=12, exactly once each.\n"
+            "END_INTERVENTION\n"
+            "After all interventions: FINAL=<brief Meta synthesis>.\n"
+            "Never use || except on REVIEW lines."
         )
-        source_numbers = self._extract_number_tokens(source_text)
-        source_lower = re.sub(r"\s+", " ", source_text).lower()
 
-        contamination_terms = (
-            "طبيب", "أطباء", "مرضى", "مريض", "علاج", "مستشفى",
-            "الحج", "حجاج", "معتمر", "معتمرين", "ضيوف الرحمن",
-            "زائرات", "زائرين",
-        )
-        unsafe_time_terms = (
-            "بحلول", "بنهاية", "الربع الأول", "الربع الثاني",
-            "الربع الثالث", "الربع الرابع", "نهاية الربع",
-        )
+        task = {
+            "role": meta["slug"],
+            "meta_advisor_name": meta["name"],
+            "task": (
+                "Lead the Athar OS council for Screen 3 and produce the complete "
+                "90-day Impact Challenge plan from the independent Specialist opinions."
+            ),
+            "organization": payload.get("organization"),
+            "programs": payload.get("programs") or [],
+            "track": payload.get("track"),
+            "goal": payload.get("goal"),
+            "impact_map": payload.get("impact_map"),
+            "specialist_reasonings": council,
+            "required_protocol": protocol,
+            "mandatory_rules": [
+                "Generate exactly 2 or 3 materially distinct interventions; prefer 2 unless a third adds independent strategic value.",
+                "Every intervention must contain exactly 12 sequential sprint units: 1 through 12, with none missing or duplicated.",
+                "Each sprint unit represents one weekly Result and must contain 1 to 3 executable deliverables using TEXT lines.",
+                "Every deliverable must be realistically completable within one 5-working-day sprint.",
+                "The 12 results must form a coherent progression toward the organization's primary 90-day goal.",
+                "Do not invent facts, percentages, budgets, counts, dates, partners, staffing, or capacity not present in the request.",
+                "Historical numbers in the request are evidence, not automatic future targets.",
+                "When no numeric target is grounded, use measurable completion/quality/status language without fabricating a number.",
+                "Keep each RESULT and TEXT concise, concrete, operational, and non-duplicative.",
+                "For every Specialist advisor, write one REVIEW line that evaluates how that advisor's reasoning affects the final plan.",
+                "Use advisor slugs only; never use advisor persona names inside the protocol.",
+                "Write professional Arabic suitable for Saudi nonprofit organizations.",
+            ],
+        }
 
-        def safe_internal_opinion(value: Any) -> str:
-            raw = self.clean_model_text(str(value or ""))
-            kept_lines: List[str] = []
-            for line in raw.splitlines():
-                line = re.sub(r"\s+", " ", line).strip()
+        def parse_plan(raw: str) -> Dict[str, Any]:
+            clean = self.clean_model_text(raw).replace("```", "").strip()
+            reviews: Dict[str, str] = {}
+            interventions: List[Dict[str, Any]] = []
+            final_message = ""
+            current: Optional[Dict[str, Any]] = None
+            sprint: Optional[Dict[str, Any]] = None
+
+            def finish_sprint() -> None:
+                nonlocal sprint, current
+                if sprint is None:
+                    return
+                if current is not None:
+                    current.setdefault("sprints", []).append(sprint)
+                sprint = None
+
+            def finish_intervention() -> None:
+                nonlocal current
+                finish_sprint()
+                if current is not None:
+                    interventions.append(current)
+                current = None
+
+            for raw_line in clean.splitlines():
+                line = raw_line.strip()
                 if not line:
                     continue
-                low = line.lower()
-                if any(term in low and term not in source_lower for term in contamination_terms):
-                    continue
-                if any(term in low and term not in source_lower for term in unsafe_time_terms):
-                    continue
-                nums = self._extract_number_tokens(line)
-                if any(n not in source_numbers for n in nums):
-                    continue
-                if re.search(r"\b(?:AOS|ATHAR)[-_]", line, flags=re.I):
-                    continue
-                if self._has_foreign_script(line):
-                    continue
-                # Keep the specialist's actual qualitative advice, but cap it so
-                # the Meta decision pass stays focused and inexpensive.
-                kept_lines.append(line)
-                if sum(len(x) for x in kept_lines) >= 1200:
-                    break
-            return "\n".join(kept_lines)[:1400].strip()
+                line = re.sub(r"^[\-*•]+\s*", "", line)
 
-        def specialty_label(name: Any) -> str:
-            text = re.sub(r"\s+", " ", str(name or "")).strip()
-            text = re.sub(r"^(?:المستشار|مستشار)\s+", "", text)
-            return text[:120]
-
-        compact_opinions = []
-        for row in advisor_outputs:
-            opinion = safe_internal_opinion(row.get("opinion"))
-            if opinion:
-                compact_opinions.append({
-                    "specialty": specialty_label(row.get("advisor_name_ar")),
-                    "opinion": opinion,
-                })
-
-        impact_drivers_text = str(imap.get("impact_drivers") or "").strip()
-        drivers = [
-            re.sub(r"\s+", " ", x).strip(" .،؛-–—")
-            for x in re.split(r"[،؛;\n]+", impact_drivers_text)
-            if re.sub(r"\s+", " ", x).strip(" .،؛-–—")
-        ]
-
-        program_rows = [
-            p for p in programs
-            if isinstance(p, dict) and str(p.get("name") or "").strip()
-        ]
-
-        def program_blob(program: Dict[str, Any]) -> str:
-            return " ".join([
-                str(program.get("name") or ""),
-                str(program.get("description") or ""),
-                str(program.get("target_audience") or ""),
-                str(program.get("beneficiary_value") or ""),
-                str(program.get("delivery_method") or ""),
-            ]).lower()
-
-        # Generic semantic ranking for authoritative Impact Drivers.
-        #
-        # Earlier versions contained education-specific boosts such as transport,
-        # family support and learning environment.  That worked for the test case
-        # but could bias unrelated NGOs.  The ranker below is domain-agnostic:
-        # it compares normalized program facts directly with the Impact Drivers
-        # supplied by the backend.
-        semantic_stop_tokens = {
-            "الجمعيه", "الجمعية", "برنامج", "البرنامج", "مشروع", "المشروع",
-            "مبادرة", "المبادرة", "خدمة", "الخدمة", "خدمات",
-            "المستفيد", "المستفيدين", "الفئة", "الفئه", "المستهدفة", "المستهدفه",
-            "الحالي", "الحالية", "الحاليه", "من", "في", "على", "الى", "إلى",
-            "عن", "مع", "ضمن", "بين", "و", "او", "أو", "ثم", "هذا", "هذه",
-            "ذلك", "التي", "الذي", "بما", "لدى", "كل",
-        }
-
-        def semantic_normalize(value: Any) -> str:
-            value = str(value or "").lower()
-            value = re.sub(r"[\u064B-\u065F\u0670\u06D6-\u06ED]", "", value)
-            value = (
-                value
-                .replace("أ", "ا")
-                .replace("إ", "ا")
-                .replace("آ", "ا")
-                .replace("ى", "ي")
-                .replace("ؤ", "و")
-                .replace("ئ", "ي")
-            )
-            value = re.sub(r"[^0-9a-z\u0600-\u06FF]+", " ", value)
-            return re.sub(r"\s+", " ", value).strip()
-
-        def semantic_tokenize(value: Any) -> set[str]:
-            normalized = semantic_normalize(value)
-            tokens: set[str] = set()
-
-            for raw in normalized.split():
-                token = raw.strip()
-                if len(token) < 3 or token in semantic_stop_tokens:
+                m = re.match(r"^REVIEW\s*[:=]\s*([^|]+?)\s*\|\|\s*(.+)$", line, flags=re.I)
+                if m:
+                    aid = m.group(1).strip()
+                    msg = m.group(2).strip()
+                    if aid and msg:
+                        reviews[aid] = msg
                     continue
 
-                tokens.add(token)
+                if re.fullmatch(r"BEGIN_INTERVENTION", line, flags=re.I):
+                    if current is not None:
+                        finish_intervention()
+                    current = {"sprints": []}
+                    sprint = None
+                    continue
 
-                # Add a lightweight Arabic matching form.  This is only for
-                # similarity scoring; original text is never modified.
-                simplified = token
-                for prefix in ("وال", "بال", "فال", "كال", "لل", "ال"):
-                    if simplified.startswith(prefix) and len(simplified) - len(prefix) >= 3:
-                        simplified = simplified[len(prefix):]
+                if re.fullmatch(r"END_INTERVENTION", line, flags=re.I):
+                    finish_intervention()
+                    continue
+
+                if current is None:
+                    m = re.match(r"^FINAL\s*[:=]\s*(.+)$", line, flags=re.I)
+                    if m:
+                        final_message = m.group(1).strip()
+                    continue
+
+                for key, public_key in (
+                    ("TITLE", "title"),
+                    ("CONFIDENCE", "confidence_level"),
+                    ("IMPACT", "impact_description"),
+                    ("REPORTABLE", "reportable_value"),
+                ):
+                    m = re.match(rf"^{key}\s*[:=]\s*(.+)$", line, flags=re.I)
+                    if m:
+                        current[public_key] = m.group(1).strip()
                         break
+                else:
+                    m = re.match(r"^SPRINT\s*[:=]\s*(\d+)\s*$", line, flags=re.I)
+                    if m:
+                        finish_sprint()
+                        sprint = {
+                            "number": int(m.group(1)),
+                            "result": "",
+                            "deliverables": [],
+                        }
+                        continue
 
-                if len(simplified) >= 3:
-                    tokens.add(simplified)
+                    if re.fullmatch(r"END_SPRINT", line, flags=re.I):
+                        finish_sprint()
+                        continue
 
-            return tokens
+                    m = re.match(r"^RESULT\s*[:=]\s*(.+)$", line, flags=re.I)
+                    if m and sprint is not None:
+                        sprint["result"] = m.group(1).strip()
+                        continue
 
-        def semantic_bigrams(value: Any) -> set[str]:
-            tokens = [
-                x for x in semantic_normalize(value).split()
-                if len(x) >= 3 and x not in semantic_stop_tokens
-            ]
-            return {
-                f"{tokens[i]} {tokens[i + 1]}"
-                for i in range(len(tokens) - 1)
-            }
+                    m = re.match(r"^TEXT\s*[:=]\s*(.+)$", line, flags=re.I)
+                    if m and sprint is not None:
+                        value = m.group(1).strip()
+                        if value:
+                            sprint["deliverables"].append(value)
+                        continue
 
-        def driver_score(program: Dict[str, Any], driver: str) -> float:
-            pblob = program_blob(program)
-            dblob = str(driver or "")
+            if current is not None:
+                finish_intervention()
 
-            pt = semantic_tokenize(pblob)
-            dt = semantic_tokenize(dblob)
-            if not dt:
-                return 0.0
+            # Deterministic public cleanup and exact backend projection.
+            projected: List[Dict[str, Any]] = []
+            for item in interventions:
+                title = self._clean_meta_public_text(item.get("title"), request)
+                confidence = str(item.get("confidence_level") or "medium").strip().lower()
+                impact = self._clean_meta_public_text(item.get("impact_description"), request)
+                reportable = self._clean_meta_public_text(item.get("reportable_value"), request)
 
-            token_overlap = pt & dt
-            token_coverage = len(token_overlap) / max(1, len(dt))
+                outputs: List[Dict[str, Any]] = []
+                for unit in item.get("sprints") or []:
+                    result_text = self._clean_meta_public_text(unit.get("result"), request)
+                    deliverables: List[Dict[str, str]] = []
+                    for value in unit.get("deliverables") or []:
+                        cleaned = self._clean_meta_public_text(value, request)
+                        if cleaned and cleaned not in [x["text"] for x in deliverables]:
+                            deliverables.append({"text": cleaned})
+                    outputs.append({
+                        "_sprint": int(unit.get("number") or 0),
+                        "text": result_text,
+                        "results": deliverables[:3],
+                    })
 
-            pb = semantic_bigrams(pblob)
-            db = semantic_bigrams(dblob)
-            bigram_overlap = pb & db
-
-            score = 0.0
-            score += 3.0 * len(token_overlap)
-            score += 5.0 * token_coverage
-            score += 4.0 * len(bigram_overlap)
-
-            pnorm = semantic_normalize(pblob)
-            dnorm = semantic_normalize(dblob)
-
-            # Exact driver phrase appearing in program facts is very strong
-            # evidence and works across sectors without a domain dictionary.
-            if dnorm and len(dnorm) >= 5 and dnorm in pnorm:
-                score += 10.0
-
-            return round(score, 4)
-
-        anchors: List[Dict[str, Any]] = []
-        for program in program_rows[:4]:
-            ranked = sorted(
-                [
-                    {
-                        "id": idx + 1,
-                        "text": driver,
-                        "score": driver_score(program, driver),
-                    }
-                    for idx, driver in enumerate(drivers)
-                ],
-                key=lambda x: (-x["score"], x["id"]),
-            )
-            candidates = ranked[: min(3, len(ranked))]
-            anchors.append({
-                "kind": "existing_program",
-                "label": str(program.get("name") or "").strip(),
-                "program": {
-                    "name": program.get("name"),
-                    "description": program.get("description"),
-                    "target_audience": program.get("target_audience"),
-                    "beneficiary_value": program.get("beneficiary_value"),
-                    "delivery_method": program.get("delivery_method"),
-                },
-                "driver_candidates": candidates,
-            })
-
-        # Screen 3 normally returns 2-4 interventions.  If there are fewer than
-        # two existing programs, create additional anchors directly from the
-        # authoritative Impact Drivers.  Nothing synthetic is introduced.
-        if len(anchors) < 2:
-            existing_labels = {x["label"] for x in anchors}
-            for idx, driver in enumerate(drivers):
-                if len(anchors) >= 2:
-                    break
-                if driver in existing_labels:
-                    continue
-                anchors.append({
-                    "kind": "impact_driver",
-                    "label": driver,
-                    "program": {},
-                    "driver_candidates": [{"id": idx + 1, "text": driver, "score": 999.0}],
+                projected.append({
+                    "title": title,
+                    "confidence_level": confidence,
+                    "impact_description": impact,
+                    "reportable_value": reportable,
+                    "outputs": outputs,
                 })
 
-        anchors = anchors[:4]
-        if not anchors:
-            raise ValueError(
-                "Screen 3 Meta synthesis needs at least one authoritative existing program or impact driver."
-            )
-
-        self._last_meta_debug["required_anchors"] = [
-            {
-                "kind": x.get("kind"),
-                "label": x.get("label"),
-                "driver_candidates": [
-                    {"id": d.get("id"), "text": d.get("text")}
-                    for d in x.get("driver_candidates", [])
-                ],
+            clean_reviews = {
+                aid: self._clean_meta_public_text(msg, request)
+                for aid, msg in reviews.items()
+                if aid and msg
             }
-            for x in anchors
-        ]
+            final_clean = self._clean_meta_public_text(final_message, request)
+            return {
+                "reviews": clean_reviews,
+                "interventions": projected,
+                "final": final_clean,
+                "raw": raw,
+            }
 
-        action_map = {
-            "STRENGTHEN": "تعزيز",
-            "IMPROVE": "تحسين",
-            "DEVELOP": "تطوير",
-            "EXPAND": "توسيع",
-        }
-        outcome_map = {
-            "ACCESS": "الوصول",
-            "ATTENDANCE": "الانتظام",
-            "CONTINUITY": "الاستمرارية",
-            "FAMILY_SUPPORT": "دعم الأسر",
-            "SERVICE_QUALITY": "جودة الخدمة",
-            "LEARNING_SUPPORT": "الاستمرار في التعليم",
-            "COVERAGE": "التغطية",
-        }
-        confidence_map = {"HIGH": "مرتفعة", "MEDIUM": "متوسطة", "LOW": "منخفضة"}
+        def plan_errors(parsed: Dict[str, Any]) -> List[str]:
+            errors: List[str] = []
+            reviews = parsed.get("reviews") or {}
+            for aid in involved_ids:
+                if not str(reviews.get(aid) or "").strip():
+                    errors.append(f"missing REVIEW for {aid}")
 
-        decision_protocol = (
-            "Return EXACTLY these 6 fields, one field per line. "
-            "Replace every placeholder with ONE allowed value.\\n"
-            "ACTION=<ONE_ACTION>\\n"
-            "DRIVER_ID=<ONE_CANDIDATE_ID>\\n"
-            "OUTCOME=<ONE_OUTCOME>\\n"
-            "MEASUREMENT=<YES_OR_NO>\\n"
-            "FUNDING=<YES_OR_NO>\\n"
-            "CONFIDENCE=<ONE_CONFIDENCE>\\n\\n"
-            "Allowed ACTION values: STRENGTHEN, IMPROVE, DEVELOP, EXPAND.\\n"
-            "Allowed OUTCOME values: ACCESS, ATTENDANCE, CONTINUITY, "
-            "FAMILY_SUPPORT, SERVICE_QUALITY, LEARNING_SUPPORT, COVERAGE.\\n"
-            "Allowed MEASUREMENT values: YES, NO.\\n"
-            "Allowed FUNDING values: YES, NO.\\n"
-            "Allowed CONFIDENCE values: HIGH, MEDIUM, LOW.\\n"
-            "Never output multiple choices for one field. "
-            "Never copy the allowed-value lists. "
-            "Never output JSON, Markdown, explanation, or Arabic field names."
-        )
+            interventions = parsed.get("interventions") or []
+            if not (2 <= len(interventions) <= 3):
+                errors.append(f"expected 2-3 interventions, got {len(interventions)}")
+
+            for i, item in enumerate(interventions):
+                for key in ("title", "impact_description", "reportable_value"):
+                    if not str(item.get(key) or "").strip():
+                        errors.append(f"intervention {i+1} missing {key}")
+                if str(item.get("confidence_level") or "").lower() not in {"high", "medium", "low"}:
+                    errors.append(f"intervention {i+1} invalid confidence")
+
+                outputs = item.get("outputs") or []
+                numbers = [int(x.get("_sprint") or 0) for x in outputs if isinstance(x, dict)]
+                if numbers != list(range(1, 13)):
+                    errors.append(
+                        f"intervention {i+1} must contain sprints 1..12 exactly; got {numbers}"
+                    )
+                    continue
+                for j, unit in enumerate(outputs, start=1):
+                    if not str(unit.get("text") or "").strip():
+                        errors.append(f"intervention {i+1} sprint {j} missing result text")
+                    deliverables = unit.get("results") or []
+                    if not (1 <= len(deliverables) <= 3):
+                        errors.append(
+                            f"intervention {i+1} sprint {j} requires 1-3 executable texts"
+                        )
+                    for d in deliverables:
+                        if not isinstance(d, dict) or not str(d.get("text") or "").strip():
+                            errors.append(
+                                f"intervention {i+1} sprint {j} contains empty executable text"
+                            )
+
+            if not str(parsed.get("final") or "").strip():
+                errors.append("missing FINAL Meta synthesis")
+            return errors
 
         meta_adapter = "meta" if COUNCIL_META_MODE == "adapter" else "base"
-        meta_system = (
-            self.meta_prompt
-            + "\\n\\nCURRENT SCREEN-3 DECISION MODE — OVERRIDES OUTPUT STYLE ONLY:\\n"
-              "بعد قراءة آراء المستشارين كلهم، لا تكتب توصية نثرية. "
-              "اتخذ قرارًا تركيبيًا مختصرًا لكل مرساة باستخدام قيمة واحدة فقط لكل حقل. "
-              "اختر محرك الأثر الأنسب من DRIVER_CANDIDATES، واختر النتيجة الأساسية، "
-              "وهل يحتاج التدخل دعمًا من القياس أو الاستدامة المالية. "
-              "يجب إرجاع الحقول الستة فقط، دون JSON أو Markdown أو شرح."
-        )
 
-        decision_keys = (
-            "ACTION", "DRIVER_ID", "OUTCOME",
-            "MEASUREMENT", "FUNDING", "CONFIDENCE",
-        )
-
-        action_aliases = {
-            "STRENGTHEN": "STRENGTHEN",
-            "IMPROVE": "IMPROVE",
-            "DEVELOP": "DEVELOP",
-            "EXPAND": "EXPAND",
-            "تعزيز": "STRENGTHEN",
-            "تحسين": "IMPROVE",
-            "تطوير": "DEVELOP",
-            "توسيع": "EXPAND",
-        }
-        outcome_aliases = {
-            "ACCESS": "ACCESS",
-            "ATTENDANCE": "ATTENDANCE",
-            "CONTINUITY": "CONTINUITY",
-            "FAMILY_SUPPORT": "FAMILY_SUPPORT",
-            "SERVICE_QUALITY": "SERVICE_QUALITY",
-            "LEARNING_SUPPORT": "LEARNING_SUPPORT",
-            "COVERAGE": "COVERAGE",
-            "الوصول": "ACCESS",
-            "الانتظام": "ATTENDANCE",
-            "الاستمرارية": "CONTINUITY",
-            "دعم الأسر": "FAMILY_SUPPORT",
-            "دعم الاسر": "FAMILY_SUPPORT",
-            "جودة الخدمة": "SERVICE_QUALITY",
-            "الاستمرار في التعليم": "LEARNING_SUPPORT",
-            "التغطية": "COVERAGE",
-        }
-        yes_no_aliases = {
-            "YES": "YES", "NO": "NO",
-            "نعم": "YES", "لا": "NO",
-        }
-        confidence_aliases = {
-            "HIGH": "HIGH", "MEDIUM": "MEDIUM", "LOW": "LOW",
-            "مرتفعة": "HIGH", "عالية": "HIGH",
-            "متوسطة": "MEDIUM",
-            "منخفضة": "LOW",
-        }
-
-        def _clean_decision_value(value: Any) -> str:
-            value = str(value or "").strip()
-            value = value.strip("`*_#[](){}<>\\\"' ")
-            value = re.sub(r"[،,؛;.]$", "", value).strip()
-            return value
-
-        def _normalize_alias(value: Any, aliases: Dict[str, str]) -> str:
-            value = _clean_decision_value(value)
-            upper = value.upper()
-            if upper in aliases:
-                return aliases[upper]
-            if value in aliases:
-                return aliases[value]
-            return upper
-
-        def parse_decision(raw: str) -> Dict[str, Any]:
-            text = self.clean_model_text(raw).replace("```", "").strip()
-            fields: Dict[str, str] = {}
-
-            if "{" in text and "}" in text:
-                try:
-                    obj = self.extract_json_object(text)
-                    for key in decision_keys:
-                        if key in obj:
-                            fields[key] = _clean_decision_value(obj.get(key))
-                        elif key.lower() in obj:
-                            fields[key] = _clean_decision_value(obj.get(key.lower()))
-                except Exception:
-                    pass
-
-            for line in text.splitlines():
-                clean_line = re.sub(
-                    r"^\s*(?:[-*•#]+|\d+[\).:-]?)\s*",
-                    "",
-                    line.strip(),
-                )
-                m = re.match(
-                    r"^(ACTION|DRIVER_ID|OUTCOME|MEASUREMENT|FUNDING|CONFIDENCE)"
-                    r"\s*[:=]\s*(.+?)\s*$",
-                    clean_line,
-                    flags=re.I,
-                )
-                if m:
-                    fields[m.group(1).upper()] = _clean_decision_value(m.group(2))
-
-            for key in decision_keys:
-                if fields.get(key):
-                    continue
-                m = re.search(
-                    rf"(?i)\b{re.escape(key)}\b\s*[:=]\s*"
-                    r"([A-Za-z0-9_\-]+|[\u0600-\u06FF ]{1,40})",
-                    text,
-                )
-                if m:
-                    fields[key] = _clean_decision_value(m.group(1))
-
-            if "ACTION" in fields:
-                fields["ACTION"] = _normalize_alias(fields["ACTION"], action_aliases)
-            if "OUTCOME" in fields:
-                fields["OUTCOME"] = _normalize_alias(fields["OUTCOME"], outcome_aliases)
-            if "MEASUREMENT" in fields:
-                fields["MEASUREMENT"] = _normalize_alias(fields["MEASUREMENT"], yes_no_aliases)
-            if "FUNDING" in fields:
-                fields["FUNDING"] = _normalize_alias(fields["FUNDING"], yes_no_aliases)
-            if "CONFIDENCE" in fields:
-                fields["CONFIDENCE"] = _normalize_alias(fields["CONFIDENCE"], confidence_aliases)
-
-            if "DRIVER_ID" in fields:
-                fields["DRIVER_ID"] = re.sub(r"\D", "", str(fields["DRIVER_ID"]))
-
-            upper_text = text.upper()
-
-            def unique_enum(options: List[str]) -> Optional[str]:
-                found = [
-                    option for option in options
-                    if re.search(rf"(?<![A-Z_]){re.escape(option)}(?![A-Z_])", upper_text)
-                ]
-                found = list(dict.fromkeys(found))
-                return found[0] if len(found) == 1 else None
-
-            if fields.get("ACTION") not in action_map:
-                one = unique_enum(list(action_map.keys()))
-                if one:
-                    fields["ACTION"] = one
-
-            if fields.get("OUTCOME") not in outcome_map:
-                one = unique_enum(list(outcome_map.keys()))
-                if one:
-                    fields["OUTCOME"] = one
-
-            if fields.get("CONFIDENCE") not in confidence_map:
-                one = unique_enum(list(confidence_map.keys()))
-                if one:
-                    fields["CONFIDENCE"] = one
-
-            return fields
-
-        def validate_decision(
-            decision: Dict[str, Any],
-            candidate_ids: set[str],
-        ) -> tuple[Dict[str, Any], List[str]]:
-            decision = dict(decision or {})
-            errors: List[str] = []
-
-            if decision.get("ACTION") not in action_map:
-                errors.append("ACTION invalid")
-            if decision.get("OUTCOME") not in outcome_map:
-                errors.append("OUTCOME invalid")
-            if decision.get("MEASUREMENT") not in {"YES", "NO"}:
-                errors.append("MEASUREMENT invalid")
-            if decision.get("FUNDING") not in {"YES", "NO"}:
-                errors.append("FUNDING invalid")
-            if decision.get("CONFIDENCE") not in confidence_map:
-                errors.append("CONFIDENCE invalid")
-
-            driver_id = re.sub(r"\D", "", str(decision.get("DRIVER_ID") or ""))
-            if driver_id not in candidate_ids:
-                errors.append("DRIVER_ID invalid")
-            else:
-                decision["DRIVER_ID"] = driver_id
-
-            return decision, errors
-
-        # Outcome profiles describe the meaning of the seven API outcomes.
-        # They are schema semantics, not NGO/program-specific rules.
-        outcome_semantic_profiles = {
-            "ACCESS": {
-                "phrases": (
-                    "الوصول للخدمة", "الوصول الي الخدمة", "الوصول إلى الخدمة",
-                    "امكانية الوصول", "إمكانية الوصول", "سهولة الوصول",
-                    "بعد المسافة", "صعوبة الوصول", "النقل", "المواصلات",
-                    "التنقل", "حاجز مكاني", "موقع الخدمة", "قرب الخدمة",
-                ),
-                "tokens": (
-                    "وصول", "اتاحة", "إتاحة", "نقل", "مواصلات", "تنقل",
-                    "مسافة", "موقع", "قرب", "بعد",
-                ),
-            },
-            "ATTENDANCE": {
-                "phrases": (
-                    "الانتظام في الحضور", "انتظام الحضور", "خفض الغياب",
-                    "تقليل الغياب", "الحد من الغياب", "المواظبة",
-                    "الالتزام بالحضور", "استمرار الحضور",
-                ),
-                "tokens": (
-                    "انتظام", "حضور", "غياب", "مواظبة", "التزام",
-                ),
-            },
-            "CONTINUITY": {
-                "phrases": (
-                    "استمرارية الاستفادة", "استمرار الاستفادة",
-                    "استمرارية الخدمة", "استمرار الخدمة",
-                    "عدم الانقطاع", "تقليل الانقطاع", "الحد من الانقطاع",
-                    "الاستبقاء", "البقاء في البرنامج",
-                ),
-                "tokens": (
-                    "استمرارية", "استمرار", "انقطاع", "استبقاء", "بقاء",
-                ),
-            },
-            "FAMILY_SUPPORT": {
-                "phrases": (
-                    "دعم الاسر", "دعم الأسر", "العبء المالي",
-                    "تخفيف العبء", "تكاليف الاسرة", "تكاليف الأسرة",
-                    "المساعدات العينية", "الدعم الاجتماعي",
-                    "الاحتياجات الاساسية", "الاحتياجات الأساسية",
-                    "حماية الاسرة", "حماية الأسرة",
-                ),
-                "tokens": (
-                    "اسر", "أسر", "اسرة", "أسرة", "عائلات", "عائلة",
-                    "عبء", "تكاليف", "مصاريف", "مساعدات", "اعانة", "إعانة",
-                    "اجتماعي", "حماية",
-                ),
-            },
-            "SERVICE_QUALITY": {
-                "phrases": (
-                    "جودة الخدمة", "جودة التنفيذ", "تحسين الجودة",
-                    "رضا المستفيدين", "كفاءة التنفيذ", "فعالية الخدمة",
-                    "سلامة الخدمة", "معايير الجودة", "تجربة المستفيد",
-                ),
-                "tokens": (
-                    "جودة", "رضا", "كفاءة", "فعالية", "سلامة",
-                    "معايير", "تجربة",
-                ),
-            },
-            "LEARNING_SUPPORT": {
-                "phrases": (
-                    "الاستمرار في التعليم", "دعم التعلم",
-                    "التحصيل الدراسي", "التحصيل التعليمي",
-                    "صعوبات التعلم", "الدعم التعليمي",
-                    "التسرب الدراسي", "الحد من التسرب",
-                    "المهارات التعليمية",
-                ),
-                "tokens": (
-                    "تعليم", "تعلم", "تحصيل", "دراسي", "دراسة",
-                    "تسرب", "اكاديمي", "أكاديمي", "قراءة", "تعليمي",
-                ),
-            },
-            "COVERAGE": {
-                "phrases": (
-                    "نطاق التغطية", "توسيع التغطية", "زيادة التغطية",
-                    "توسيع النطاق", "مناطق اضافية", "مناطق إضافية",
-                    "الانتشار الجغرافي", "تغطية المستفيدين",
-                    "شمول مناطق", "الوصول الى مناطق", "الوصول إلى مناطق",
-                ),
-                "tokens": (
-                    "تغطية", "نطاق", "انتشار", "توسع", "توسيع",
-                    "مناطق", "جغرافي", "شمول",
-                ),
-            },
-        }
-
-        def _profile_score(text: str, profile: Dict[str, Any]) -> float:
-            normalized = semantic_normalize(text)
-            tokens = semantic_tokenize(text)
-            score = 0.0
-
-            # Explicit phrases are stronger than isolated words.
-            for phrase in profile.get("phrases", ()):
-                p = semantic_normalize(phrase)
-                if p and p in normalized:
-                    score += 3.0
-
-            profile_tokens = semantic_tokenize(
-                " ".join(str(x) for x in profile.get("tokens", ()))
-            )
-            overlap = tokens & profile_tokens
-            score += 1.0 * len(overlap)
-
-            return score
-
-        def semantic_outcome_evidence(
-            anchor: Dict[str, Any],
-            decision: Optional[Dict[str, Any]] = None,
-        ) -> Dict[str, Any]:
-            """
-            Score the seven API outcomes against authoritative anchor facts.
-
-            This is intentionally conservative.  It does not try to replace the
-            Meta Advisor.  It only identifies a strong contradiction when the
-            program facts overwhelmingly support a different outcome.
-            """
-            program = anchor.get("program") or {}
-
-            selected_driver = ""
-            if decision:
-                did = str(decision.get("DRIVER_ID") or "")
-                for candidate in anchor.get("driver_candidates") or []:
-                    if str(candidate.get("id")) == did:
-                        selected_driver = str(candidate.get("text") or "")
-                        break
-
-            # Field weighting reflects evidence reliability for the outcome:
-            # beneficiary value + selected impact driver are strongest.
-            evidence_fields = [
-                (str(program.get("beneficiary_value") or ""), 3.0),
-                (selected_driver, 3.0),
-                (str(program.get("description") or ""), 2.0),
-                (str(anchor.get("label") or ""), 1.5),
-                (str(program.get("target_audience") or ""), 1.0),
-                (str(program.get("delivery_method") or ""), 0.75),
-            ]
-
-            scores: Dict[str, float] = {
-                outcome: 0.0 for outcome in outcome_map
-            }
-
-            for value, weight in evidence_fields:
-                if not value.strip():
-                    continue
-                for outcome, profile in outcome_semantic_profiles.items():
-                    scores[outcome] += weight * _profile_score(value, profile)
-
-            ordered = sorted(
-                scores.items(),
-                key=lambda item: (-item[1], item[0]),
-            )
-
-            best_outcome, best_score = ordered[0]
-            second_score = ordered[1][1] if len(ordered) > 1 else 0.0
-            current_outcome = (
-                str((decision or {}).get("OUTCOME") or "")
-                if decision
-                else ""
-            )
-            current_score = scores.get(current_outcome, 0.0)
-
-            # Strong evidence gate:
-            # - enough direct semantic evidence;
-            # - winner is clearly separated from the second option;
-            # - current Meta outcome has materially weaker support.
-            strong = (
-                best_score >= 7.0
-                and (best_score - second_score) >= 2.5
-                and (
-                    not current_outcome
-                    or best_outcome == current_outcome
-                    or current_score <= max(2.0, best_score * 0.45)
-                )
-            )
-
-            return {
-                "best_outcome": best_outcome,
-                "best_score": round(best_score, 3),
-                "second_score": round(second_score, 3),
-                "current_outcome": current_outcome or None,
-                "current_score": round(current_score, 3),
-                "strong": bool(strong),
-                "scores": {
-                    key: round(value, 3)
-                    for key, value in scores.items()
-                    if value > 0
-                },
-            }
-
-        def semantic_outcome_for_anchor(
-            anchor: Dict[str, Any],
-            decision: Optional[Dict[str, Any]] = None,
-        ) -> Optional[str]:
-            evidence = semantic_outcome_evidence(anchor, decision)
-            if evidence["strong"]:
-                return str(evidence["best_outcome"])
-            return None
-
-        def reconcile_semantic_decision(
-            anchor: Dict[str, Any],
-            decision: Dict[str, Any],
-        ) -> Dict[str, Any]:
-            """
-            Meta remains the primary decision maker.
-
-            Python overrides OUTCOME only when authoritative program facts show a
-            high-confidence contradiction.  Ambiguous cases are left untouched.
-            """
-            decision = dict(decision)
-            evidence = semantic_outcome_evidence(anchor, decision)
-
-            current_outcome = decision.get("OUTCOME")
-            semantic_outcome = (
-                evidence["best_outcome"]
-                if evidence["strong"]
-                else None
-            )
-
-            if (
-                semantic_outcome
-                and current_outcome in outcome_map
-                and semantic_outcome != current_outcome
-            ):
-                self._last_meta_debug.setdefault(
-                    "semantic_overrides", []
-                ).append({
-                    "anchor": anchor.get("label"),
-                    "from_outcome": current_outcome,
-                    "to_outcome": semantic_outcome,
-                    "reason": "strong_authoritative_semantic_contradiction",
-                    "evidence": evidence,
-                })
-
-                decision["OUTCOME"] = semantic_outcome
-
-                # If Python had to correct a high-confidence Meta decision,
-                # reduce the public confidence one level instead of overstating it.
-                if decision.get("CONFIDENCE") == "HIGH":
-                    decision["CONFIDENCE"] = "MEDIUM"
-
-            else:
-                self._last_meta_debug.setdefault(
-                    "semantic_checks", []
-                ).append({
-                    "anchor": anchor.get("label"),
-                    "decision_outcome": current_outcome,
-                    "override": False,
-                    "evidence": evidence,
-                })
-
-            return decision
-
-        def deterministic_decision_fallback(
-            anchor: Dict[str, Any],
-            candidates: List[Dict[str, Any]],
-        ) -> Dict[str, Any]:
-            if not candidates:
-                raise ValueError("Decision fallback requires at least one driver candidate.")
-
-            best_driver_id = str(candidates[0].get("id"))
-            program = anchor.get("program") or {}
-            blob = " ".join(
-                str(x or "")
-                for x in (
-                    anchor.get("label"),
-                    program.get("name"),
-                    program.get("description"),
-                    program.get("target_audience"),
-                    program.get("beneficiary_value"),
-                    program.get("delivery_method"),
-                    imap.get("social_problem"),
-                    goal.get("target_group"),
-                )
-            ).lower()
-
-            semantic_outcome = semantic_outcome_for_anchor(anchor)
-            if semantic_outcome:
-                outcome = semantic_outcome
-            elif any(k in blob for k in ("تعليم", "تعلم", "تحصيل", "دراس", "مدرس")):
-                outcome = "LEARNING_SUPPORT"
-            elif any(k in blob for k in ("تغطية", "نطاق", "قرى", "مناطق", "وصول البرنامج")):
-                outcome = "COVERAGE"
-            elif any(k in blob for k in ("استمرار", "استدام", "استمرارية")):
-                outcome = "CONTINUITY"
-            else:
-                outcome = "SERVICE_QUALITY"
-
-            action = "DEVELOP" if str(anchor.get("kind") or "") == "impact_driver" else "STRENGTHEN"
-
-            opinions_blob = json.dumps(compact_opinions, ensure_ascii=False).lower()
-            funding = (
-                "YES"
-                if any(
-                    k in opinions_blob
-                    for k in (
-                        "تمويل", "استدامة مالية", "تنمية الموارد",
-                        "مانح", "موارد مالية", "شراكات مؤسسية",
-                    )
-                )
-                else "NO"
-            )
-
-            return {
-                "ACTION": action,
-                "DRIVER_ID": best_driver_id,
-                "OUTCOME": outcome,
-                "MEASUREMENT": "YES",
-                "FUNDING": funding,
-                "CONFIDENCE": "MEDIUM",
-            }
-
-        def choose_decision(anchor: Dict[str, Any]) -> Dict[str, Any]:
-            candidates = anchor.get("driver_candidates") or []
-            candidate_ids = {str(x.get("id")) for x in candidates}
-            if not candidates:
-                raise ValueError(f"Anchor «{anchor.get('label')}» has no DRIVER_CANDIDATES.")
-
-            prompt_obj = {
-                "role": "AOS-META-00",
-                "task": "Synthesize all Specialist opinions into ONE decision vector for this Screen-3 anchor.",
-                "anchor": anchor.get("label"),
-                "program": anchor.get("program"),
-                "driver_candidates": [
-                    {"id": x.get("id"), "text": x.get("text")}
-                    for x in candidates
-                ],
-                "social_problem": imap.get("social_problem") or goal.get("social_problem"),
-                "target_group": goal.get("target_group"),
-                "specialist_opinions": compact_opinions,
-                "required_protocol": decision_protocol,
-                "rules": [
-                    "Return exactly six fields and no explanation.",
-                    "Use exactly ONE allowed enum value for every enum field.",
-                    "Never return an option list separated by |, comma, slash, or OR.",
-                    "Choose exactly one DRIVER_ID from DRIVER_CANDIDATES.",
-                    "Base the semantic decision on all useful Specialist opinions.",
-                    "Choose FAMILY_SUPPORT for interventions whose primary value is reducing family financial/material barriers such as school bags, uniforms, supplies, or study costs.",
-                    "Choose ATTENDANCE when the primary intended result is reducing absence or improving regular attendance.",
-                    "Choose ACCESS when the primary intended result is physical/service access such as transport availability, unless attendance is the more specific stated result.",
-                    "Choose LEARNING_SUPPORT when the primary intended result is learning continuity, achievement, or educational support.",
-                    "MEASUREMENT=YES only when measurement materially strengthens the intervention.",
-                    "FUNDING=YES only when sustainability/resource advice materially strengthens the intervention.",
-                ],
-            }
-
+        def generate_plan(task_obj: Dict[str, Any], max_tokens: int) -> Dict[str, Any]:
             raw = self._generate(
                 meta_adapter,
-                meta_system,
-                json.dumps(prompt_obj, ensure_ascii=False, indent=2),
-                min(META_MAX_NEW_TOKENS, 120),
+                meta["prompt"],
+                json.dumps(task_obj, ensure_ascii=False, separators=(",", ":")),
+                max_tokens,
                 deterministic=True,
-                repetition_penalty=1.03,
+                repetition_penalty=1.04,
             )
-            self._last_meta_debug.setdefault("raw_decisions", []).append({
-                "anchor": anchor.get("label"),
-                "attempt": 1,
-                "kind": "meta",
-                "raw": raw,
-            })
+            return parse_plan(raw)
 
-            decision, errors = validate_decision(parse_decision(raw), candidate_ids)
-            if not errors:
-                decision = reconcile_semantic_decision(anchor, decision)
-                self._last_meta_debug["anchor_attempts"].append({
-                    "anchor": anchor.get("label"),
-                    "attempts": 1,
-                    "accepted": True,
-                    "fallback_used": False,
-                })
-                return decision
+        # 2-3 interventions x 12 concise sprint units. 5500 tokens is generous
+        # enough for the mandatory structure while keeping latency bounded.
+        parsed = generate_plan(task, min(max(META_MAX_NEW_TOKENS, 5200), 6200))
+        errors = plan_errors(parsed)
 
-            self._last_meta_debug["retry_used"] = True
-            repair_prompt = {
-                "role": "AOS-META-00",
-                "task": "Repair ONLY the formatting of your previous Screen-3 decision.",
-                "anchor": anchor.get("label"),
-                "candidate_ids": sorted(candidate_ids),
-                "previous_output": raw,
-                "validation_errors": errors,
-                "required_protocol": decision_protocol,
-                "rules": [
-                    "Preserve your intended semantic choices where they are recoverable.",
-                    "Return exactly the six fields.",
-                    "Use one allowed value per field.",
-                    "Return no explanation, JSON, Markdown, or option lists.",
-                ],
-            }
+        # One repair only. A malformed partial plan must never be saved as a
+        # successful 90-day plan.
+        if errors:
+            repair = dict(task)
+            repair["task"] = "Repair the previous protocol output into a complete valid Screen-3 90-day plan."
+            repair["previous_output"] = parsed.get("raw")
+            repair["validation_errors"] = errors[:24]
+            repair["repair_rules"] = [
+                "Preserve valid content where possible.",
+                "Return the COMPLETE protocol again, not only the missing lines.",
+                "Exactly 2 or 3 interventions.",
+                "Exactly SPRINT 1 through 12 in every intervention.",
+                "Every sprint has 1 to 3 TEXT deliverables.",
+                "One REVIEW per involved advisor and one FINAL line.",
+            ]
+            parsed = generate_plan(repair, min(max(META_MAX_NEW_TOKENS, 5400), 6400))
+            errors = plan_errors(parsed)
 
-            repaired_raw = self._generate(
-                meta_adapter,
-                meta_system,
-                json.dumps(repair_prompt, ensure_ascii=False, indent=2),
-                min(META_MAX_NEW_TOKENS, 80),
-                deterministic=True,
-                repetition_penalty=1.01,
+        if errors:
+            raise ValueError(
+                "Meta could not produce the mandatory 90-day Screen-3 plan: "
+                + " | ".join(errors[:20])
             )
-            self._last_meta_debug.setdefault("raw_decisions", []).append({
-                "anchor": anchor.get("label"),
-                "attempt": 2,
-                "kind": "repair",
-                "raw": repaired_raw,
-            })
 
-            decision, errors = validate_decision(parse_decision(repaired_raw), candidate_ids)
-            if not errors:
-                decision = reconcile_semantic_decision(anchor, decision)
-                self._last_meta_debug["anchor_attempts"].append({
-                    "anchor": anchor.get("label"),
-                    "attempts": 2,
-                    "accepted": True,
-                    "fallback_used": False,
-                })
-                return decision
-
-            fallback = deterministic_decision_fallback(anchor, candidates)
-            fallback, fallback_errors = validate_decision(fallback, candidate_ids)
-            if fallback_errors:
-                raise ValueError(
-                    f"Internal fallback failed for anchor «{anchor.get('label')}»: "
-                    + " | ".join(fallback_errors)
-                )
-
-            self._last_meta_debug["anchor_attempts"].append({
-                "anchor": anchor.get("label"),
-                "attempts": 2,
-                "accepted": True,
-                "fallback_used": True,
-                "meta_errors": errors[:8],
-            })
-            fallback = reconcile_semantic_decision(anchor, fallback)
-            self._last_meta_debug.setdefault("decision_fallbacks", []).append({
-                "anchor": anchor.get("label"),
-                "reason": "Meta decision vector remained invalid after one repair.",
-                "decision": dict(fallback),
-            })
-            return fallback
-
-        def driver_for_decision(anchor: Dict[str, Any], decision: Dict[str, Any]) -> str:
-            did = str(decision.get("DRIVER_ID") or "")
-            for row in anchor.get("driver_candidates") or []:
-                if str(row.get("id")) == did:
-                    return str(row.get("text") or "").strip()
-            return ""
-
-        def clean_source_phrase(value: Any) -> str:
-            text = re.sub(r"\s+", " ", str(value or "")).strip()
-            text = text.replace("/", " ")
-            text = re.sub(r"\s+", " ", text).strip(" -–—،,؛;:.")
-            return text
-
-        def render_intervention(anchor: Dict[str, Any], decision: Dict[str, Any]) -> Dict[str, Any]:
-            label = clean_source_phrase(anchor.get("label"))
-            program = anchor.get("program") or {}
-            target = clean_source_phrase(program.get("target_audience") or goal.get("target_group"))
-            delivery = clean_source_phrase(program.get("delivery_method"))
-            beneficiary_value = clean_source_phrase(program.get("beneficiary_value"))
-            driver = clean_source_phrase(driver_for_decision(anchor, decision))
-            action = action_map[decision["ACTION"]]
-            outcome = decision["OUTCOME"]
-            confidence = confidence_map[decision["CONFIDENCE"]]
-
-            title = f"{action} {label}".strip()
-
-            # Grounded, reusable verbalization.  The selected action/driver/outcome
-            # come from Meta; program facts come only from the backend input.
-            impact_parts = [f"يسهم التدخل في {action} {label}"]
-            if driver:
-                impact_parts.append(f"من خلال التركيز على {driver}")
-            if target:
-                impact_parts.append(f"لخدمة {target}")
-            impact_parts.append("بما يدعم معالجة المشكلة الاجتماعية المرتبطة بالحالة")
-            impact_description = "، ".join(impact_parts) + "."
-
-            metric_by_outcome = {
-                "ACCESS": "استمرارية وصول المستفيدين إلى الخدمة",
-                "ATTENDANCE": "انتظام استفادة الفئة المستهدفة من الخدمة",
-                "CONTINUITY": "استمرارية الاستفادة من البرنامج",
-                "FAMILY_SUPPORT": "مدى تخفيف العبء والعوائق عن الأسر المستفيدة",
-                "SERVICE_QUALITY": "جودة تنفيذ الخدمة وتجربة المستفيد",
-                "LEARNING_SUPPORT": "استمرارية المستفيدين في التعليم والاستفادة من الدعم",
-                "COVERAGE": "نطاق وصول البرنامج إلى الفئة المستهدفة",
-            }
-            reportable = metric_by_outcome[outcome]
-
-            result_by_outcome = {
-                "ACCESS": "تحسن وصول الفئة المستهدفة إلى الخدمة المرتبطة بالتدخل.",
-                "ATTENDANCE": "تحسن انتظام الفئة المستهدفة في الاستفادة من الخدمة المرتبطة بالتدخل.",
-                "CONTINUITY": "تحسن استمرارية استفادة الفئة المستهدفة من البرنامج.",
-                "FAMILY_SUPPORT": "تحسن استفادة الأسر المستهدفة من الدعم مع تخفيف الأعباء والعوائق المرتبطة بالحالة.",
-                "SERVICE_QUALITY": "تحسن جودة تنفيذ البرنامج واتساق تقديم الخدمة للمستفيدين.",
-                "LEARNING_SUPPORT": "تحسن استمرارية المستفيدين في التعليم والاستفادة من الدعم المقدم.",
-                "COVERAGE": "تحسن وصول البرنامج إلى الفئة المستهدفة ضمن نطاق عمل الجمعية.",
-            }
-            outputs: List[Dict[str, str]] = []
-            if delivery:
-                outputs.append({
-                    "text": f"مراجعة آلية التنفيذ الحالية للبرنامج، وهي {delivery}، وتحديد التحسينات اللازمة بما يخدم {driver or outcome_map[outcome]}."
-                })
-            elif beneficiary_value:
-                outputs.append({
-                    "text": f"تطوير آلية تنفيذ البرنامج بما يحافظ على القيمة المقدمة للمستفيدين: {beneficiary_value}."
-                })
-            else:
-                outputs.append({
-                    "text": f"تطوير آلية تنفيذ {label} بما يعالج {driver or outcome_map[outcome]} ضمن نطاق عمل الجمعية."
-                })
-
-            if decision.get("MEASUREMENT") == "YES":
-                outputs.append({
-                    "text": f"اعتماد متابعة دورية لمؤشر {reportable} وربطه بنتائج {label}."
-                })
-            if decision.get("FUNDING") == "YES":
-                outputs.append({
-                    "text": f"ربط احتياجات استدامة {label} بخطة تنمية الموارد والشراكات المؤسسية دون تغيير هدف التدخل."
-                })
-            if len(outputs) == 1:
-                outputs.append({
-                    "text": f"مراجعة نتائج {label} بصورة دورية واتخاذ قرارات التحسين بناءً على بيانات التنفيذ والمستفيدين."
-                })
-
-            return {
-                "title": title,
-                "confidence_level": confidence,
-                "impact_description": impact_description,
-                "reportable_value": reportable,
-                "results": [
-                    {
-                        "text": result_by_outcome[outcome],
-                        "outputs": outputs[:3],
-                    }
-                ],
-            }
-
+        # Remove internal sprint helper before returning the confirmed backend schema.
         interventions: List[Dict[str, Any]] = []
-        for anchor in anchors:
-            decision = choose_decision(anchor)
-            row = render_intervention(anchor, decision)
-            self._last_meta_debug["meta_decisions"].append({
-                "anchor": anchor.get("label"),
-                "decision": dict(decision),
-                "driver": driver_for_decision(anchor, decision),
+        for item in parsed["interventions"]:
+            clean_outputs = []
+            for unit in item["outputs"]:
+                clean_outputs.append({
+                    "text": unit["text"],
+                    "results": unit["results"],
+                })
+            interventions.append({
+                "title": item["title"],
+                "confidence_level": item["confidence_level"],
+                "impact_description": item["impact_description"],
+                "reportable_value": item["reportable_value"],
+                "outputs": clean_outputs,
             })
-            interventions.append(row)
+
+        # Transcript pairs every Specialist's public opinion with the Meta
+        # Advisor's explicit evaluation of that opinion, then closes with the
+        # Meta synthesis. This satisfies the requested "Meta opinion under each
+        # advisor opinion" while staying inside the confirmed transcript schema.
+        transcript: List[Dict[str, Any]] = []
+        sequence = 1
+        transcript.append({
+            "sequence": sequence,
+            "from": "meta_advisor",
+            "message": (
+                "سأراجع آراء المجلس بصورة مستقلة، وأعقب على كل رأي قبل بناء خطة "
+                "التدخلات ذات الاثني عشر أسبوعًا."
+            ),
+        })
+        sequence += 1
+        for aid in involved_ids:
+            transcript.append({
+                "sequence": sequence,
+                "from": aid,
+                "message": reasonings_by_id[aid],
+            })
+            sequence += 1
+            transcript.append({
+                "sequence": sequence,
+                "from": "meta_advisor",
+                "message": f"تعقيبي على {aid}: {parsed['reviews'][aid]}",
+            })
+            sequence += 1
+        transcript.append({
+            "sequence": sequence,
+            "from": "meta_advisor",
+            "message": parsed["final"],
+        })
 
         result = {
-            "involved_advisor_ids": list(selected_ids),
+            "involved_advisor_ids": involved_ids,
+            "advisor_reasonings": advisor_reasonings,
+            "transcript": transcript,
             "suggestion": {"interventions": interventions},
         }
+
+        self._last_meta_debug = {
+            "meta_advisor_slug": meta["slug"],
+            "meta_advisor_name": meta["name"],
+            "meta_prompt_path": meta["prompt_path"],
+            "intervention_count": len(interventions),
+            "sprint_units_per_intervention": [len(x["outputs"]) for x in interventions],
+            "advisor_ids": involved_ids,
+        }
+
         self._validate_screen3_public_response(result)
-
-        grounding = self._grounding_violations(
-            {"suggestion": {"interventions": interventions}}, request
-        )
-        impact = self._screen3_impact_quality_violations(
-            {"suggestion": {"interventions": interventions}}, request
-        )
-        hygiene = self._meta_public_hygiene_violations(interventions, request)
-
-        # The deterministic renderer must not leak internal advisor/council terms,
-        # unsupported foreign scripts, or malformed text.
-        anchor_errors: List[str] = []
-        for idx, (row, anchor) in enumerate(zip(interventions, anchors)):
-            title = str(row.get("title") or "")
-            if clean_source_phrase(anchor.get("label")) not in title:
-                anchor_errors.append(
-                    f"interventions[{idx}] title is not anchored to the authoritative program/driver label"
-                )
-            for text_value in self._collect_strings(row):
-                if self._has_foreign_script(str(text_value)):
-                    anchor_errors.append(f"interventions[{idx}] contains foreign-script leakage")
-                    break
-
-        self._last_meta_debug["final_grounding_violations"] = list(grounding)
-        self._last_meta_debug["final_impact_quality_violations"] = list(impact)
-        self._last_meta_debug["final_hygiene_violations"] = list(hygiene)
-        self._last_meta_debug["final_anchor_violations"] = list(anchor_errors)
-
-        all_errors = grounding + impact + hygiene + anchor_errors
-        if all_errors:
-            raise ValueError(
-                "Meta decision projection failed Screen-3 validation: "
-                + " | ".join(all_errors[:12])
-            )
-
         return result
 
     @staticmethod
@@ -3260,17 +2633,94 @@ class AtharCouncilEngine:
 
     @staticmethod
     def _backend_advisor_ids(selected: List[Dict[str, Any]]) -> List[str]:
-        """Return canonical Athar advisor IDs for the backend/public API.
-
-        Backend and AI now share the same authoritative identity, e.g.
-        ``AOS-SP-13``. Numeric catalogue positions are never emitted publicly.
-        """
+        """Return backend advisor slugs exactly as received in payload.advisors."""
         out: List[str] = []
         for advisor in selected:
-            value = str(advisor.get("advisor_id") or "").strip()
-            if re.fullmatch(r"AOS-(?:LD|SP|FG|SE)-\d{2}", value) and value not in out:
+            value = str(advisor.get("backend_id") or advisor.get("advisor_id") or "").strip()
+            if value and value not in out:
                 out.append(value)
         return out
+
+    def _advisor_reasoning_excerpt(
+        self,
+        opinion: Any,
+        request: Dict[str, Any],
+        *,
+        max_chars: int = 850,
+    ) -> str:
+        """Expose a concise, grounded excerpt of the Specialist's own opinion."""
+        raw = self.clean_model_text(str(opinion or ""))
+        if not raw:
+            return ""
+
+        source_text = self._normalize_digits(
+            json.dumps(self._shared_context(request), ensure_ascii=False, sort_keys=True)
+        )
+        source_numbers = self._extract_number_tokens(source_text)
+        preferred: List[str] = []
+        fallback: List[str] = []
+        cue_terms = (
+            "لأن", "بسبب", "يرتبط", "تتمثل", "المشكلة", "الفجوة", "الأولوية",
+            "أوصي", "يوصى", "يتطلب", "يحتاج", "المخاطر", "الأثر", "النتيجة",
+        )
+        for original in raw.splitlines():
+            line = re.sub(r"^\s*(?:#{1,6}|[-*•]+|\d+[\.)])\s*", "", original).strip()
+            line = line.replace("**", "").replace("__", "").replace("`", "")
+            line = re.sub(r"\s+", " ", line).strip(" :-–—")
+            if len(line) < 28:
+                continue
+            if re.search(r"\b(?:AOS|ATHAR)[-_]", line, flags=re.I):
+                continue
+            nums = self._extract_number_tokens(line)
+            if any(n not in source_numbers for n in nums):
+                continue
+            cleaned = self._clean_meta_public_text(line, request)
+            if len(cleaned) < 24:
+                continue
+            fallback.append(cleaned)
+            if any(term in cleaned.lower() for term in cue_terms):
+                preferred.append(cleaned)
+
+        chosen = preferred or fallback
+        if not chosen:
+            # Full fallback still avoids unsupported numbers and internal IDs.
+            compact = re.sub(r"\s+", " ", raw).strip()
+            if re.search(r"\b(?:AOS|ATHAR)[-_]", compact, flags=re.I):
+                compact = re.sub(r"\b(?:AOS|ATHAR)[-_][A-Z0-9-]+\b", "", compact, flags=re.I)
+            if any(n not in source_numbers for n in self._extract_number_tokens(compact)):
+                compact = ""
+            return self._clean_meta_public_text(compact, request)[:max_chars].strip()
+
+        out: List[str] = []
+        total = 0
+        for line in chosen:
+            if line in out:
+                continue
+            if total + len(line) > max_chars and out:
+                break
+            out.append(line)
+            total += len(line)
+            if len(out) >= 2:
+                break
+        return " ".join(out)[:max_chars].strip()
+
+    def _build_advisor_reasonings(
+        self,
+        advisor_outputs: List[Dict[str, Any]],
+        request: Dict[str, Any],
+    ) -> List[Dict[str, str]]:
+        reasonings: List[Dict[str, str]] = []
+        seen = set()
+        for row in advisor_outputs:
+            advisor_id = str(row.get("backend_id") or row.get("advisor_id") or "").strip()
+            if not advisor_id or advisor_id in seen:
+                continue
+            reasoning = self._advisor_reasoning_excerpt(row.get("opinion"), request)
+            if not reasoning:
+                continue
+            seen.add(advisor_id)
+            reasonings.append({"advisor_id": advisor_id, "reasoning": reasoning})
+        return reasonings
 
     def _screen3_public_response(
         self,
@@ -3340,231 +2790,502 @@ class AtharCouncilEngine:
         return public
 
     @staticmethod
-    def _validate_screen3_public_response(result: Dict[str, Any]) -> None:
-        if set(result.keys()) != {"involved_advisor_ids", "suggestion"}:
+    def _validate_advisor_reasonings(
+        involved_ids: List[str],
+        reasonings: Any,
+    ) -> None:
+        if not isinstance(reasonings, list):
+            raise ValueError("advisor_reasonings must be a list.")
+        seen = set()
+        for idx, row in enumerate(reasonings):
+            if not isinstance(row, dict) or set(row.keys()) != {"advisor_id", "reasoning"}:
+                raise ValueError(f"advisor_reasonings[{idx}] fields are invalid.")
+            advisor_id = str(row.get("advisor_id") or "").strip()
+            reasoning = str(row.get("reasoning") or "").strip()
+            if not advisor_id or advisor_id not in involved_ids:
+                raise ValueError(f"advisor_reasonings[{idx}].advisor_id is not involved.")
+            if advisor_id in seen:
+                raise ValueError(f"advisor_reasonings contains duplicate advisor_id: {advisor_id}")
+            if not reasoning:
+                raise ValueError(f"advisor_reasonings[{idx}].reasoning is required.")
+            seen.add(advisor_id)
+        if set(involved_ids) != seen:
+            raise ValueError("Every involved advisor must have exactly one advisor_reasonings entry.")
+
+    @staticmethod
+    def _validate_transcript(
+        involved_ids: List[str],
+        transcript: Any,
+    ) -> None:
+        if not isinstance(transcript, list) or not transcript:
+            raise ValueError("transcript must be a non-empty list.")
+        allowed_from = {"meta_advisor", *involved_ids}
+        expected_sequence = 1
+        for idx, row in enumerate(transcript):
+            if not isinstance(row, dict) or set(row.keys()) != {"sequence", "from", "message"}:
+                raise ValueError(f"transcript[{idx}] fields are invalid.")
+            if row.get("sequence") != expected_sequence:
+                raise ValueError("transcript sequence must be contiguous starting at 1.")
+            sender = str(row.get("from") or "").strip()
+            message = str(row.get("message") or "").strip()
+            if sender not in allowed_from:
+                raise ValueError(f"transcript[{idx}].from is not an involved advisor or meta_advisor.")
+            if not message:
+                raise ValueError(f"transcript[{idx}].message is required.")
+            expected_sequence += 1
+
+    @classmethod
+    def _validate_screen3_public_response(cls, result: Dict[str, Any]) -> None:
+        if set(result.keys()) != {
+            "involved_advisor_ids", "advisor_reasonings", "transcript", "suggestion"
+        }:
             raise ValueError("Screen 3 response has unexpected top-level fields.")
+
         ids = result.get("involved_advisor_ids")
         if (
             not isinstance(ids, list)
             or not ids
-            or any(
-                not isinstance(x, str)
-                or re.fullmatch(r"AOS-(?:LD|SP|FG|SE)-\d{2}", x) is None
-                for x in ids
-            )
+            or any(not isinstance(x, str) or not x.strip() for x in ids)
             or len(ids) != len(set(ids))
         ):
-            raise ValueError(
-                "Screen 3 involved_advisor_ids must be unique canonical AOS-* IDs."
-            )
+            raise ValueError("involved_advisor_ids must be a non-empty list of unique advisor slugs.")
+        cls._validate_advisor_reasonings(ids, result.get("advisor_reasonings"))
+        cls._validate_transcript(ids, result.get("transcript"))
+
         suggestion = result.get("suggestion")
         if not isinstance(suggestion, dict) or set(suggestion.keys()) != {"interventions"}:
-            raise ValueError("Screen 3 suggestion must contain interventions only.")
+            raise ValueError("Generate suggestion must contain interventions only.")
         interventions = suggestion.get("interventions")
-        if not isinstance(interventions, list) or not (1 <= len(interventions) <= 4):
-            raise ValueError("Screen 3 requires 1 to 4 final Meta interventions.")
+        if not isinstance(interventions, list) or not (2 <= len(interventions) <= 3):
+            raise ValueError("Screen 3 generate requires exactly 2 to 3 interventions.")
 
         required = {
             "title", "confidence_level", "impact_description",
-            "reportable_value", "results",
-        }
-        allowed_confidence = {
-            "مرتفعة", "متوسطة", "منخفضة", "high", "medium", "low"
+            "reportable_value", "outputs",
         }
         for i, intervention in enumerate(interventions):
             if not isinstance(intervention, dict) or set(intervention.keys()) != required:
-                raise ValueError(f"Screen 3 interventions[{i}] fields are invalid.")
+                raise ValueError(f"interventions[{i}] fields are invalid.")
             for key in ("title", "impact_description", "reportable_value"):
                 if not isinstance(intervention.get(key), str) or not intervention[key].strip():
-                    raise ValueError(f"Screen 3 interventions[{i}].{key} is required.")
-            if str(intervention.get("confidence_level") or "").lower() not in {
-                x.lower() for x in allowed_confidence
+                    raise ValueError(f"interventions[{i}].{key} is required.")
+            if str(intervention.get("confidence_level") or "").strip().lower() not in {
+                "high", "medium", "low"
             }:
-                raise ValueError(f"Screen 3 interventions[{i}].confidence_level is invalid.")
-            results = intervention.get("results")
-            if not isinstance(results, list) or not results:
-                raise ValueError(f"Screen 3 interventions[{i}].results must be non-empty.")
-            for j, result_item in enumerate(results):
-                if not isinstance(result_item, dict) or set(result_item.keys()) != {"text", "outputs"}:
-                    raise ValueError(f"Screen 3 results[{j}] fields are invalid.")
-                if not isinstance(result_item.get("text"), str) or not result_item["text"].strip():
-                    raise ValueError(f"Screen 3 results[{j}].text is required.")
-                outputs = result_item.get("outputs")
-                if not isinstance(outputs, list) or not outputs:
-                    raise ValueError(f"Screen 3 results[{j}].outputs must be non-empty.")
-                for k, output in enumerate(outputs):
+                raise ValueError(f"interventions[{i}].confidence_level must be high/medium/low.")
+
+            # Product rule: exactly 12 ordered weekly Sprint units per intervention.
+            # Backend shape remains outputs[] -> results[]. Each output is one
+            # Sprint unit; output.text is its Result and results[] are the 1-3
+            # executable deliverables for that 5-working-day sprint.
+            outputs = intervention.get("outputs")
+            if not isinstance(outputs, list) or len(outputs) != 12:
+                raise ValueError(f"interventions[{i}].outputs must contain exactly 12 sprint units.")
+            for j, output in enumerate(outputs):
+                if not isinstance(output, dict) or set(output.keys()) != {"text", "results"}:
+                    raise ValueError(f"interventions[{i}].outputs[{j}] fields are invalid.")
+                if not isinstance(output.get("text"), str) or not output["text"].strip():
+                    raise ValueError(f"interventions[{i}].outputs[{j}].text is required.")
+                results = output.get("results")
+                if not isinstance(results, list) or not (1 <= len(results) <= 3):
+                    raise ValueError(
+                        f"interventions[{i}].outputs[{j}].results must contain 1 to 3 executable texts."
+                    )
+                for k, result_item in enumerate(results):
                     if (
-                        not isinstance(output, dict)
-                        or set(output.keys()) != {"text"}
-                        or not isinstance(output.get("text"), str)
-                        or not output["text"].strip()
+                        not isinstance(result_item, dict)
+                        or set(result_item.keys()) != {"text"}
+                        or not isinstance(result_item.get("text"), str)
+                        or not result_item["text"].strip()
                     ):
-                        raise ValueError(f"Screen 3 outputs[{k}] must contain text only.")
+                        raise ValueError(
+                            f"interventions[{i}].outputs[{j}].results[{k}] must contain text only."
+                        )
 
-    def _regenerate_single_output(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """Screen-3 single-output regeneration using Meta semantics, Python JSON.
+    @classmethod
+    def _validate_screen3_regenerate_response(cls, result: Dict[str, Any]) -> None:
+        if set(result.keys()) != {
+            "involved_advisor_ids", "advisor_reasonings", "transcript", "suggestion"
+        }:
+            raise ValueError("Regenerate response has unexpected top-level fields.")
+        ids = result.get("involved_advisor_ids")
+        if (
+            not isinstance(ids, list)
+            or not ids
+            or any(not isinstance(x, str) or not x.strip() for x in ids)
+            or len(ids) != len(set(ids))
+        ):
+            raise ValueError("involved_advisor_ids must be a non-empty list of unique advisor slugs.")
+        cls._validate_advisor_reasonings(ids, result.get("advisor_reasonings"))
+        cls._validate_transcript(ids, result.get("transcript"))
 
-        The Meta model returns one plain TEXT line; Python constructs the exact
-        regeneration envelope required by the backend contract.
-        """
-        input_obj = request.get("input") or {}
-        existing_text = str(input_obj.get("existing_text") or "").strip()
-        if not existing_text:
-            raise ValueError("is_output_regeneration requires input.existing_text.")
+        suggestion = result.get("suggestion")
+        if not isinstance(suggestion, dict):
+            raise ValueError("Regenerate suggestion must be an object.")
+        if set(suggestion.keys()) - {"text", "results"}:
+            raise ValueError("Regenerate suggestion has unexpected fields.")
+        if "text" in suggestion and (
+            not isinstance(suggestion.get("text"), str) or not suggestion["text"].strip()
+        ):
+            raise ValueError("Regenerated output text must be non-empty when present.")
+        results = suggestion.get("results")
+        if not isinstance(results, list) or not (1 <= len(results) <= 3):
+            raise ValueError("Regenerate suggestion.results must contain 1 to 3 executable texts.")
+        for idx, row in enumerate(results):
+            if (
+                not isinstance(row, dict)
+                or set(row.keys()) != {"text"}
+                or not isinstance(row.get("text"), str)
+                or not row["text"].strip()
+            ):
+                raise ValueError(f"suggestion.results[{idx}] must contain text only.")
 
-        source_context = {
-            "existing_text": existing_text,
-            "impact_description": input_obj.get("impact_description"),
-            "social_problem": input_obj.get("social_problem"),
-            "organization": input_obj.get("organization"),
-            "goal": input_obj.get("goal"),
-            "impact_map": input_obj.get("impact_map"),
-        }
+    def _run_advisor_regeneration_reasoning(
+        self,
+        advisor: Dict[str, Any],
+        request: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Ask one Specialist, with full Expert DNA, how the requested rewrite should change."""
+        prompt = self._load_prompt(ADVISOR_PROMPTS_DIR / advisor["prompt_file"])
+        payload = self._payload(request)
         task = {
             "instruction": (
-                "أعد صياغة مخرج واحد فقط لشاشة خريطة الأثر. لا تنشئ تدخلًا جديدًا ولا تغير المقصود. "
-                "لا تخترع رقمًا أو نسبة أو تاريخًا أو مدة. يجوز الاحتفاظ فقط بما هو موجود في السياق وبنفس الدلالة. "
-                "أخرج سطرًا واحدًا فقط يبدأ حرفيًا بـ TEXT: ثم النص العربي الجديد. لا تكتب JSON أو Markdown."
+                "أنت تشارك في إعادة توليد مخرج واحد فقط من تدخل قائم. "
+                "اقرأ سبب المستخدم والسياق، ثم اكتب رأيك المهني المستقل في جملتين أو ثلاث فقط: "
+                "ما الذي يجب تغييره في المخرج أو نتائجه ولماذا، من داخل نطاق اختصاصك فقط. "
+                "لا تكتب JSON، ولا تنشئ أرقامًا أو نسبًا أو مددًا غير موجودة في السياق، "
+                "ولا تعِد كتابة التدخل الكامل."
             ),
-            "context": source_context,
+            "advisor_id": advisor["advisor_id"],
+            "advisor_name_ar": advisor["advisor_name_ar"],
+            "rewrite_reason": request.get("reason"),
+            "output": payload.get("output"),
+            "intervention": payload.get("intervention"),
+            "impact_map": payload.get("impact_map"),
+        }
+        opinion = self._generate(
+            "specialist",
+            prompt,
+            json.dumps(task, ensure_ascii=False, indent=2),
+            240,
+            deterministic=True,
+            repetition_penalty=1.08,
+            no_repeat_ngram_size=6,
+        )
+        opinion = self.clean_model_text(opinion).strip()
+        if not opinion:
+            raise ValueError(f"Specialist {advisor['advisor_id']} returned an empty regeneration reasoning.")
+        return {
+            "advisor_id": advisor["advisor_id"],
+            "backend_id": advisor.get("backend_id") or advisor["advisor_id"],
+            "advisor_name_ar": advisor["advisor_name_ar"],
+            "opinion": opinion,
         }
 
-        def generate_text(task_obj: Dict[str, Any]) -> str:
-            raw = self._generate(
-                "meta" if COUNCIL_META_MODE == "adapter" else "base",
-                self.meta_prompt,
-                json.dumps(task_obj, ensure_ascii=False, indent=2),
-                350,
-                deterministic=True,
-                repetition_penalty=1.08,
-                no_repeat_ngram_size=7,
-            )
-            clean = self.clean_model_text(raw).replace("```", "").strip()
-            m = re.search(r"(?im)^\s*(?:TEXT|النص)\s*[:=]\s*(.+)$", clean)
-            if m:
-                value = m.group(1).strip()
-            else:
-                lines = [x.strip() for x in clean.splitlines() if x.strip()]
-                value = lines[0] if lines else ""
-            value = self._clean_meta_public_text(value, request)
-            if not value:
-                raise ValueError("Regenerated Screen 3 output is empty.")
-            return value
+    def _regenerate_single_output(
+        self,
+        request: Dict[str, Any],
+        advisor_outputs: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Rewrite one Sprint/output plus its 1-3 executable child texts."""
+        payload = self._payload(request)
+        if str(payload.get("target") or "").strip() != "intervention_output":
+            raise ValueError("regenerate requires payload.target='intervention_output'.")
 
-        generated_text = generate_text(task)
+        reason = str(request.get("reason") or "").strip()
+        if not reason:
+            raise ValueError("regenerate requires a non-empty reason.")
+
+        current_output = payload.get("output")
+        intervention = payload.get("intervention")
+        impact_map = payload.get("impact_map")
+        if not isinstance(current_output, dict):
+            raise ValueError("regenerate requires payload.output.")
+        if not isinstance(intervention, dict):
+            raise ValueError("regenerate requires payload.intervention.")
+        if not isinstance(impact_map, dict):
+            raise ValueError("regenerate requires payload.impact_map.")
+
+        existing_text = str(current_output.get("text") or "").strip()
+        if not existing_text:
+            raise ValueError("payload.output.text is required for regeneration.")
+
+        meta = self._resolve_meta_advisor(request)
+        advisor_reasonings = self._build_advisor_reasonings(advisor_outputs, request)
+        involved_ids = [x["advisor_id"] for x in advisor_reasonings]
+        if not involved_ids:
+            raise ValueError("Regenerate requires at least one usable Specialist reasoning.")
+
+        source_context = {
+            "reason": reason,
+            "output": current_output,
+            "intervention": intervention,
+            "impact_map": impact_map,
+        }
         source_text = self._normalize_digits(
             json.dumps(source_context, ensure_ascii=False, sort_keys=True)
         )
         source_numbers = self._extract_number_tokens(source_text)
-        unsupported = [
-            n for n in self._extract_number_tokens(generated_text)
-            if n not in source_numbers
-        ]
-        if unsupported:
-            retry = dict(task)
-            retry["instruction"] += " احذف أي رقم غير موجود حرفيًا في السياق."
-            generated_text = generate_text(retry)
-            unsupported = [
-                n for n in self._extract_number_tokens(generated_text)
-                if n not in source_numbers
-            ]
-            if unsupported:
-                raise ValueError(
-                    "Regeneration grounding failed; unsupported numbers: "
-                    + ", ".join(unsupported)
-                )
 
-        involved: List[str] = []
-        selected_raw = input_obj.get("selected_advisor_ids") or []
-        if isinstance(selected_raw, list):
-            for raw in selected_raw:
-                canonical = self._canonical_advisor_id(raw)
-                if canonical and canonical not in involved:
-                    involved.append(canonical)
-        if not involved:
-            for advisor in self._incoming_advisors(request):
-                if not isinstance(advisor, dict):
-                    continue
-                canonical = self._canonical_advisor_id(advisor)
-                if canonical and canonical not in involved:
-                    involved.append(canonical)
-
-        return {
-            "involved_advisor_ids": involved,
-            "suggestion": {"text": generated_text},
+        protocol = (
+            "Return plain text only. Do not output JSON or Markdown.\n"
+            "For EVERY advisor return: REVIEW=<advisor_slug>||<Meta assessment>.\n"
+            "Then: TEXT=<rewritten weekly result/output>.\n"
+            "Then 1 to 3 lines: RESULT=<executable text>.\n"
+            "Finally: FINAL=<brief Meta approval/explanation>."
+        )
+        task = {
+            "role": meta["slug"],
+            "meta_advisor_name": meta["name"],
+            "task": "Rewrite exactly one Screen-3 sprint unit according to the user's reason.",
+            "user_reason": reason,
+            "current_output": current_output,
+            "intervention": intervention,
+            "impact_map": impact_map,
+            "specialist_reasonings": advisor_reasonings,
+            "required_protocol": protocol,
+            "rules": [
+                "Follow the user's reason directly.",
+                "Stay consistent with the intervention and impact_map.",
+                "Return exactly 1 to 3 RESULT lines.",
+                "Every RESULT must be realistically executable within 5 working days.",
+                "Do not invent numbers, percentages, dates, budgets, partners or durations absent from the payload.",
+                "Use advisor slugs only, never advisor persona names.",
+                "Return one REVIEW for every involved advisor.",
+            ],
         }
 
-    def consult(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """Screen-3 production flow: Specialists internally -> Meta -> backend JSON.
+        def parse_rewrite(raw: str) -> Dict[str, Any]:
+            clean = self.clean_model_text(raw).replace("```", "").strip()
+            output_text = ""
+            results: List[str] = []
+            reviews: Dict[str, str] = {}
+            final_message = ""
+            for line in clean.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                m = re.match(r"^REVIEW\s*[:=]\s*([^|]+?)\s*\|\|\s*(.+)$", line, flags=re.I)
+                if m:
+                    reviews[m.group(1).strip()] = m.group(2).strip()
+                    continue
+                m = re.match(r"^TEXT\s*[:=]\s*(.+?)\s*$", line, flags=re.I)
+                if m:
+                    output_text = m.group(1).strip()
+                    continue
+                m = re.match(r"^RESULT\s*[:=]\s*(.+?)\s*$", line, flags=re.I)
+                if m:
+                    value = m.group(1).strip()
+                    if value:
+                        results.append(value)
+                    continue
+                m = re.match(r"^FINAL\s*[:=]\s*(.+?)\s*$", line, flags=re.I)
+                if m:
+                    final_message = m.group(1).strip()
 
-        1) Resolve the council selected by the backend.
-        2) Run every selected Specialist independently. Their opinions are internal.
-        3) Pass all opinions plus case context to AOS-META-00.
-        4) Return ONLY the final Meta synthesis in the exact Screen-3 envelope.
-        """
-        input_obj = request.get("input") or {}
-        debug = bool(request.get("debug") or input_obj.get("debug"))
-
-        if bool(input_obj.get("is_output_regeneration")):
-            total_start = time.perf_counter()
-            public = self._regenerate_single_output(request)
-            elapsed = round(time.perf_counter() - total_start, 3)
-            if not debug:
-                return public
+            output_text = self._clean_meta_public_text(output_text, request)
+            clean_results: List[str] = []
+            for value in results:
+                value = self._clean_meta_public_text(value, request)
+                if value and value not in clean_results:
+                    clean_results.append(value)
+            clean_reviews = {
+                aid: self._clean_meta_public_text(msg, request)
+                for aid, msg in reviews.items()
+                if aid and msg
+            }
             return {
-                "debug": True,
-                "mode": "single_output_regeneration",
-                "timings_seconds": {"total": elapsed},
-                "final_result": public,
+                "text": output_text,
+                "results": clean_results[:3],
+                "reviews": clean_reviews,
+                "final": self._clean_meta_public_text(final_message, request),
+                "raw": raw,
             }
 
-        total_start = time.perf_counter()
-        selected = self._resolve_selected_advisors(request)
-        if len(selected) > 16:
-            raise ValueError("A consultation may include at most 16 selected advisors.")
+        def validation_errors(parsed: Dict[str, Any]) -> List[str]:
+            errors: List[str] = []
+            if not parsed.get("text"):
+                errors.append("TEXT missing")
+            if not (1 <= len(parsed.get("results") or []) <= 3):
+                errors.append("RESULT count must be 1-3")
+            for aid in involved_ids:
+                if not str((parsed.get("reviews") or {}).get(aid) or "").strip():
+                    errors.append(f"missing REVIEW for {aid}")
+            if not parsed.get("final"):
+                errors.append("FINAL missing")
 
-        advisor_outputs: List[Dict[str, Any]] = []
-        advisor_timings: Dict[str, float] = {}
-        for item in selected:
-            advisor_id = item["advisor_id"]
-            print(f"[council] Starting Specialist {advisor_id}...", flush=True)
-            started = time.perf_counter()
-            output = self._run_advisor(item, request, selected)
-            elapsed = time.perf_counter() - started
-            advisor_timings[advisor_id] = round(elapsed, 3)
-            advisor_outputs.append(output)
-            print(f"[council] Finished Specialist {advisor_id} in {elapsed:.2f}s", flush=True)
+            values = [parsed.get("text") or ""] + list(parsed.get("results") or [])
+            unsupported: List[str] = []
+            for value in values:
+                for number in self._extract_number_tokens(value):
+                    if number not in source_numbers and number not in unsupported:
+                        unsupported.append(number)
+            if unsupported:
+                errors.append("unsupported numbers: " + ", ".join(unsupported))
+            return errors
 
-        print(
-            f"[council] Starting AOS-META-00 synthesis for {len(advisor_outputs)} opinion(s)...",
-            flush=True,
-        )
-        meta_started = time.perf_counter()
-        public_result = self._run_meta(request, advisor_outputs)
-        meta_elapsed = time.perf_counter() - meta_started
-        total_elapsed = time.perf_counter() - total_start
-        print(
-            f"[council] Finished AOS-META-00 in {meta_elapsed:.2f}s; total {total_elapsed:.2f}s",
-            flush=True,
-        )
+        meta_adapter = "meta" if COUNCIL_META_MODE == "adapter" else "base"
 
-        # Contract source of truth: only these two top-level fields are public.
-        self._validate_screen3_public_response(public_result)
-        timings = {
-            "advisors": advisor_timings,
-            "meta": round(meta_elapsed, 3),
-            "total": round(total_elapsed, 3),
+        def generate_once(task_obj: Dict[str, Any]) -> Dict[str, Any]:
+            raw = self._generate(
+                meta_adapter,
+                meta["prompt"],
+                json.dumps(task_obj, ensure_ascii=False, separators=(",", ":")),
+                650,
+                deterministic=True,
+                repetition_penalty=1.05,
+            )
+            return parse_rewrite(raw)
+
+        parsed = generate_once(task)
+        errors = validation_errors(parsed)
+        if errors:
+            repair = dict(task)
+            repair["previous_output"] = parsed.get("raw")
+            repair["validation_errors"] = errors
+            repair["repair_instruction"] = (
+                "Return the complete protocol again. Fix only the listed errors; "
+                "keep one REVIEW per advisor, TEXT, 1-3 RESULT lines and FINAL."
+            )
+            parsed = generate_once(repair)
+            errors = validation_errors(parsed)
+
+        if errors:
+            raise ValueError(
+                "Regeneration could not produce a valid rewrite: " + " | ".join(errors)
+            )
+
+        reasonings_by_id = {x["advisor_id"]: x["reasoning"] for x in advisor_reasonings}
+        transcript: List[Dict[str, Any]] = []
+        sequence = 1
+        transcript.append({
+            "sequence": sequence,
+            "from": "meta_advisor",
+            "message": f"سأراجع طلب إعادة الصياغة التالي: {reason}",
+        })
+        sequence += 1
+        for aid in involved_ids:
+            transcript.append({
+                "sequence": sequence,
+                "from": aid,
+                "message": reasonings_by_id[aid],
+            })
+            sequence += 1
+            transcript.append({
+                "sequence": sequence,
+                "from": "meta_advisor",
+                "message": f"تعقيبي على {aid}: {parsed['reviews'][aid]}",
+            })
+            sequence += 1
+        transcript.append({
+            "sequence": sequence,
+            "from": "meta_advisor",
+            "message": parsed["final"],
+        })
+
+        public = {
+            "involved_advisor_ids": involved_ids,
+            "advisor_reasonings": advisor_reasonings,
+            "transcript": transcript,
+            "suggestion": {
+                "text": parsed["text"],
+                "results": [{"text": x} for x in parsed["results"]],
+            },
         }
+        self._validate_screen3_regenerate_response(public)
+        return public
 
-        if not debug:
-            return public_result
+    def consult(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Screen-3 v2 production contract: generate or regenerate."""
+        try:
+            if not isinstance(request, dict):
+                raise ValueError("advisory_consultation request must be a JSON object.")
+            if str(request.get("type") or "").strip() != "advisory_consultation":
+                raise ValueError("type must be advisory_consultation.")
+            if str(request.get("topic") or "").strip() != "interventions":
+                raise ValueError("topic must be interventions.")
 
-        return {
-            "debug": True,
-            "mode": "specialists_then_meta",
-            "selected_advisor_ids": self._backend_advisor_ids(selected),
-            "advisor_outputs_internal": advisor_outputs,
-            "meta_debug": getattr(self, "_last_meta_debug", {}),
-            "timings_seconds": timings,
-            "final_result": public_result,
-        }
+            kind = str(request.get("kind") or "generate").strip().lower()
+            debug = bool(request.get("debug") or self._payload(request).get("debug"))
+            total_start = time.perf_counter()
+            selected = self._resolve_selected_advisors(request)
+            advisor_outputs: List[Dict[str, Any]] = []
+            advisor_timings: Dict[str, float] = {}
+
+            if kind == "generate":
+                for item in selected:
+                    advisor_id = item["advisor_id"]
+                    print(f"[council] Starting Specialist {advisor_id}...", flush=True)
+                    started = time.perf_counter()
+                    output = self._run_advisor(item, request, selected)
+                    elapsed = time.perf_counter() - started
+                    advisor_timings[advisor_id] = round(elapsed, 3)
+                    advisor_outputs.append(output)
+                    print(f"[council] Finished Specialist {advisor_id} in {elapsed:.2f}s", flush=True)
+
+                resolved_meta = self._resolve_meta_advisor(request)
+                print(
+                    f"[council] Starting {resolved_meta['slug']} synthesis for {len(advisor_outputs)} opinion(s)...",
+                    flush=True,
+                )
+                meta_started = time.perf_counter()
+                public_result = self._run_meta(request, advisor_outputs)
+                meta_elapsed = time.perf_counter() - meta_started
+                self._validate_screen3_public_response(public_result)
+                mode = "generate"
+
+            elif kind == "regenerate":
+                payload = self._payload(request)
+                if str(payload.get("target") or "").strip() != "intervention_output":
+                    raise ValueError("Only payload.target='intervention_output' is supported for regenerate.")
+
+                for item in selected:
+                    advisor_id = item["advisor_id"]
+                    print(f"[council] Starting regeneration reasoning {advisor_id}...", flush=True)
+                    started = time.perf_counter()
+                    output = self._run_advisor_regeneration_reasoning(item, request)
+                    elapsed = time.perf_counter() - started
+                    advisor_timings[advisor_id] = round(elapsed, 3)
+                    advisor_outputs.append(output)
+                    print(
+                        f"[council] Finished regeneration reasoning {advisor_id} in {elapsed:.2f}s",
+                        flush=True,
+                    )
+
+                meta_started = time.perf_counter()
+                public_result = self._regenerate_single_output(request, advisor_outputs)
+                meta_elapsed = time.perf_counter() - meta_started
+                self._validate_screen3_regenerate_response(public_result)
+                mode = "regenerate"
+
+            else:
+                raise ValueError("kind must be generate or regenerate.")
+
+            total_elapsed = time.perf_counter() - total_start
+            print(f"[council] Finished {mode} in {total_elapsed:.2f}s", flush=True)
+
+            if not debug:
+                return public_result
+
+            return {
+                "debug": True,
+                "mode": mode,
+                "selected_advisor_ids": self._backend_advisor_ids(selected),
+                "advisor_outputs_internal": advisor_outputs,
+                "meta_debug": getattr(self, "_last_meta_debug", {}),
+                "timings_seconds": {
+                    "advisors": advisor_timings,
+                    "meta": round(meta_elapsed, 3),
+                    "total": round(total_elapsed, 3),
+                },
+                "final_result": public_result,
+            }
+
+        except Exception as exc:
+            message = re.sub(r"\s+", " ", str(exc or "Unknown error")).strip()
+            print(f"[council] FAILED: {message}", flush=True)
+            return {
+                "status": "FAILED",
+                "error": message[:1600] or "Screen 3 advisory request failed.",
+            }
+
