@@ -1,0 +1,149 @@
+{
+  "schema_version": "athar_continual_run_v2",
+  "run_id": "screen3-final-generate-001",
+  "created_at": "2026-10-01T10:08:53.065167+00:00",
+  "request": {
+    "consultation_id": 41,
+    "kind": "generate",
+    "meta_advisor": {
+      "name": "المستشار الأعلى",
+      "slug": "AOS-META-01"
+    },
+    "payload": {
+      "advisors": [
+        {
+          "capabilities": [
+            "portfolio_management",
+            "program_prioritization",
+            "project_management"
+          ],
+          "name": "مستشار المحافظ والبرامج والمشاريع",
+          "slug": "AOS-SP-13",
+          "title": "المحافظ والبرامج والمشاريع",
+          "traits": []
+        },
+        {
+          "capabilities": [
+            "education_programs",
+            "education_research",
+            "learning_outcomes"
+          ],
+          "name": "مستشار التعليم والأبحاث",
+          "slug": "AOS-SE-27",
+          "title": "التعليم والأبحاث",
+          "traits": []
+        },
+        {
+          "capabilities": [
+            "strategic_initiative_design",
+            "intervention_design",
+            "beneficiary_value_design"
+          ],
+          "name": "مستشار تصميم المبادرات الاستراتيجية",
+          "slug": "AOS-SP-11",
+          "title": "تصميم المبادرات الاستراتيجية",
+          "traits": []
+        },
+        {
+          "capabilities": [
+            "social_services",
+            "beneficiary_support",
+            "family_support"
+          ],
+          "name": "مستشار الخدمات الاجتماعية",
+          "slug": "AOS-SE-29",
+          "title": "الخدمات الاجتماعية",
+          "traits": []
+        },
+        {
+          "capabilities": [
+            "impact_measurement",
+            "program_evaluation",
+            "meal"
+          ],
+          "name": "مستشار المتابعة والتقييم والتعلم وقياس الأثر",
+          "slug": "AOS-SP-15",
+          "title": "المتابعة والتقييم والتعلم وقياس الأثر",
+          "traits": []
+        },
+        {
+          "capabilities": [
+            "financial_sustainability",
+            "resource_development",
+            "funding_mix"
+          ],
+          "name": "مستشار الاستدامة المالية وتنمية الموارد",
+          "slug": "AOS-FG-18",
+          "title": "الاستدامة المالية وتنمية الموارد",
+          "traits": []
+        }
+      ],
+      "association_scope": "المناطق الريفية في المدينة المنورة وجازان.",
+      "goal": {
+        "bsc_axis": "العملاء والمستفيدين",
+        "clarity_rating": "مكتمل",
+        "social_problem": "ارتفاع التسرب من التعليم الأساسي في القرى النائية.",
+        "statement": "زيادة معدل إتمام التعليم الأساسي في المناطق النائية بنسبة 20% خلال عامين.",
+        "target_group": "الأطفال 6-15 سنة في القرى غير المخدومة.",
+        "vision_alignment": "مستهدفات رؤية 2030 لجودة التعليم."
+      },
+      "impact_drivers": "النقل المدرسي الآمن، دعم الأسر المتعففة.",
+      "impact_map": {
+        "association_scope": "المناطق الريفية في المدينة المنورة وجازان.",
+        "impact_drivers": "النقل المدرسي الآمن، دعم الأسر المتعففة.",
+        "social_problem": "ارتفاع التسرب من التعليم الأساسي في القرى النائية."
+      },
+      "organization": {
+        "activity_fields": [
+          "تعليمي",
+          "اجتماعي"
+        ],
+        "competitive_advantage": "شراكات مع 15 مدرسة حكومية في القرى.",
+        "detailed_description": "نعمل منذ 7 سنوات على برامج الدعم المدرسي والنقل الآمن للطلبة المعوزين.",
+        "important_notes": "60% من التمويل الحالي من تبرعات موسمية.",
+        "name": "جمعية تمكين الأجيال الأهلية",
+        "sector": "غير ربحي",
+        "short_description": "جمعية متخصصة في دعم التعليم الأساسي في القرى النائية.",
+        "type": "جمعية أهلية"
+      },
+      "programs": [
+        {
+          "beneficiary_value": "خفض الغياب المدرسي.",
+          "delivery_method": "حافلات يومية عبر خطين.",
+          "description": "حافلات مستأجرة لنقل 120 طالباً من القرى إلى مدارس المراكز.",
+          "name": "مشروع النقل المدرسي التنموي",
+          "target_audience": "طلبة الابتدائي والمتوسط في القرى غير المخدومة.",
+          "type": "project"
+        },
+        {
+          "beneficiary_value": "تخفيف العبء المالي عن أولياء الأمور.",
+          "delivery_method": "توزيع ميداني بالتعاون مع لجان الأحياء.",
+          "description": "توفير الحقائب والزي والمستلزمات المدرسية للأسر الأشد حاجة.",
+          "name": "برنامج الحقيبة والزي المدرسي",
+          "target_audience": "أبناء الأسر المسجلة في قوائم الدعم الاجتماعي.",
+          "type": "program"
+        }
+      ],
+      "social_problem": "ارتفاع التسرب من التعليم الأساسي في القرى النائية.",
+      "track": {
+        "id": 1,
+        "name": "الأثر الاجتماعي",
+        "slug": "social-impact"
+      },
+      "track_id": 1
+    },
+    "reason": null,
+    "run_id": "screen3-final-generate-001",
+    "topic": "interventions",
+    "type": "advisory_consultation"
+  },
+  "response": {
+    "status": "FAILED",
+    "error": "Meta could not produce the mandatory 90-day Screen-3 plan: intervention 2 must contain sprints 1..12 exactly; got [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12]"
+  },
+  "quality": {
+    "advisor_reports": [],
+    "meta_grounding_violations": [],
+    "has_quality_warning": false
+  }
+}
