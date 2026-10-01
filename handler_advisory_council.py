@@ -2243,20 +2243,28 @@ class AtharCouncilEngine:
         request: Dict[str, Any],
         advisor_outputs: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Final Screen-3 generate contract.
+        """Generate Screen-3 with a split Meta architecture.
 
-        Specialists keep their independent First Pass. The selected Meta persona
-        then reviews every public Specialist reasoning and builds 2-3 strategic
-        interventions for the 90-day challenge.
+        Phase A — Council synthesis:
+            * review every Specialist independently;
+            * approve exactly 2-3 grounded, materially different interventions;
+            * return only the intervention headers and Meta reviews.
 
-        Backend compatibility note:
-        the confirmed API shape is intervention -> outputs[] -> results[].
-        Product architecture requires 12 weekly Result units, each with 1-3
-        executable deliverables. Therefore every returned ``outputs[i]`` is one
-        ordered Sprint unit: ``output.text`` is that sprint's Result statement,
-        and ``output.results`` contains its 1-3 executable 5-day deliverables.
-        Array order maps directly to Sprint 1 ... Sprint 12 without adding
-        unsupported schema fields.
+        Phase B — Weekly execution design:
+            * run one dedicated Meta generation per approved intervention;
+            * generate exactly 12 weekly Result units for that intervention only;
+            * every Result has 1-3 concrete texts executable within 5 working days.
+
+        This deliberately avoids asking Qwen to hold advisor reviews, multiple
+        strategic interventions, and 24-36 weekly units in one very long output.
+        The split keeps the full selected Meta persona/Expert DNA on every call,
+        while Python owns parsing, grounding and quality validation.
+
+        Backend compatibility:
+            the confirmed API remains intervention -> outputs[] -> results[].
+            ``outputs[0:12]`` are the twelve ordered weekly Result units;
+            ``output.text`` is the Result statement and ``output.results`` are
+            its 1-3 mandatory 5-day executable texts.
         """
         payload = self._payload(request)
         meta = self._resolve_meta_advisor(request)
@@ -2268,131 +2276,211 @@ class AtharCouncilEngine:
         reasonings_by_id = {
             row["advisor_id"]: row["reasoning"] for row in advisor_reasonings
         }
-
-        # Send compact public-safe Specialist reasoning into the Meta pass, not
-        # the long internal prose. The full Expert DNA was already applied in the
-        # Specialist First Pass.
         council = [
-            {
-                "advisor_id": row["advisor_id"],
-                "reasoning": row["reasoning"],
-            }
+            {"advisor_id": row["advisor_id"], "reasoning": row["reasoning"]}
             for row in advisor_reasonings
         ]
+        meta_adapter = "meta" if COUNCIL_META_MODE == "adapter" else "base"
 
-        protocol = (
-            "Return ONLY the following plain-text protocol. Do not output JSON or Markdown.\n"
-            "One REVIEW line for EVERY advisor:\n"
-            "REVIEW=<advisor_slug>||<Meta assessment of that advisor reasoning>\n"
-            "Then exactly 2 or 3 intervention blocks:\n"
-            "BEGIN_INTERVENTION\n"
-            "TITLE=<short Arabic title>\n"
-            "CONFIDENCE=<high|medium|low>\n"
-            "IMPACT=<how it addresses the social problem>\n"
-            "REPORTABLE=<measurable reportable value without invented numbers>\n"
-            "SPRINT=1\nRESULT=<weekly result>\nTEXT=<deliverable>\n[TEXT=<deliverable>]\n[TEXT=<deliverable>]\nEND_SPRINT\n"
-            "Repeat SPRINT sequentially through SPRINT=12, exactly once each.\n"
-            "END_INTERVENTION\n"
-            "After all interventions: FINAL=<brief Meta synthesis>.\n"
-            "Never use || except on REVIEW lines."
-        )
-
-        task = {
-            "role": meta["slug"],
-            "meta_advisor_name": meta["name"],
-            "task": (
-                "Lead the Athar OS council for Screen 3 and produce the complete "
-                "90-day Impact Challenge plan from the independent Specialist opinions."
-            ),
+        authoritative_context = {
             "organization": payload.get("organization"),
             "programs": payload.get("programs") or [],
             "track": payload.get("track"),
             "goal": payload.get("goal"),
             "impact_map": payload.get("impact_map"),
+        }
+        authoritative_text = json.dumps(
+            authoritative_context,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        authoritative_tokens: set[str] = set()
+        source_numbers = self._extract_number_tokens(
+            self._normalize_digits(authoritative_text)
+        )
+        # Product-level timeboxes are system facts, not invented NPO targets.
+        allowed_system_numbers = {"5", "12", "90"}
+        allowed_numbers = source_numbers | allowed_system_numbers
+
+        quality_stop = {
+            "مخرج", "المخرج", "مخرجا", "مخرجات", "نتيجة", "النتيجة",
+            "اسبوع", "أسبوع", "الأسبوع", "مرحلة", "المرحلة", "عمل",
+            "تنفيذ", "التنفيذ", "مراجعة", "متابعة", "استكمال", "إجراء",
+            "الاجراء", "الإجراء", "خطوة", "الخطوة", "نشاط", "النشاط",
+            "توصية", "التوصية", "المطلوب", "اعتماد", "إعداد", "اعداد",
+            "تحديد", "تحقيق", "تطبيق", "العمل", "الحالي", "الحالية",
+            "مراجعه", "متابعه", "نتيجه", "النتيجه", "مرحله", "المرحله",
+            "خطوه", "الخطوه", "توصيه", "التوصيه", "اجراء", "الاجراء",
+        }
+
+        def qtokens(value: Any) -> set[str]:
+            # Lightweight Arabic normalization/stemming is used only for quality
+            # matching. It does not alter any text returned to the backend.
+            out: set[str] = set()
+            for raw_token in self._impact_tokens(value):
+                token = str(raw_token).lower()
+                token = re.sub(r"[\u064B-\u065F\u0670\u06D6-\u06ED]", "", token)
+                token = (
+                    token.replace("أ", "ا")
+                    .replace("إ", "ا")
+                    .replace("آ", "ا")
+                    .replace("ى", "ي")
+                    .replace("ؤ", "و")
+                    .replace("ئ", "ي")
+                    .replace("ة", "ه")
+                )
+                if len(token) < 3 or token in quality_stop:
+                    continue
+                out.add(token)
+
+                simplified = token
+                for prefix in ("وال", "بال", "فال", "كال", "لل", "ال"):
+                    if simplified.startswith(prefix) and len(simplified) - len(prefix) >= 3:
+                        simplified = simplified[len(prefix):]
+                        break
+                out.add(simplified)
+
+                stem = simplified
+                for suffix in ("يات", "ات", "ون", "ين", "يه", "يه", "ها", "هم", "هن", "ه"):
+                    if stem.endswith(suffix) and len(stem) - len(suffix) >= 3:
+                        stem = stem[:-len(suffix)]
+                        break
+                if len(stem) >= 3:
+                    out.add(stem)
+
+            return {x for x in out if len(x) >= 3}
+
+        authoritative_tokens = qtokens(authoritative_text)
+
+        def text_similarity(a: Any, b: Any) -> float:
+            ta, tb = qtokens(a), qtokens(b)
+            if not ta or not tb:
+                return 0.0
+            return len(ta & tb) / max(1, len(ta | tb))
+
+        def unsupported_numbers(value: Any) -> List[str]:
+            nums = self._extract_number_tokens(self._normalize_digits(value))
+            return sorted(n for n in nums if n not in allowed_numbers)
+
+        def broken_or_placeholder(value: Any) -> bool:
+            raw = re.sub(r"\s+", " ", str(value or "")).strip()
+            if not raw:
+                return True
+            normalized = raw.strip(" .،؛:-–—")
+            low = normalized.lower()
+            placeholders = (
+                "تحديد مخرج التدخل",
+                "تحديد مخرج",
+                "مخرج التدخل",
+                "تنفيذ التدخل",
+                "استكمال التدخل",
+                "متابعة التدخل",
+                "تحديد النتيجة",
+                "تحديد نتيجة",
+                "النتيجة المطلوبة",
+                "المخرج المطلوب",
+                "استكمال المخرج",
+            )
+            if low in placeholders:
+                return True
+            if len(qtokens(normalized)) < 2:
+                return True
+            if re.search(r"(?:\bبـ|\bلـ|\bمن|\bإلى|\bالى|\bعلى|\bعن|\bمع|\bثم|\bو)\s*$", normalized):
+                return True
+            if normalized.endswith((":", "،", "؛", "-", "–", "—")):
+                return True
+            return False
+
+        # ------------------------------------------------------------------
+        # PHASE A — approve the intervention portfolio + advisor reviews.
+        # ------------------------------------------------------------------
+        strategy_protocol = (
+            "Return ONLY this plain-text protocol; no JSON or Markdown.\n"
+            "For EVERY involved advisor exactly once:\n"
+            "REVIEW=<advisor_slug>||<specific Meta assessment of that advisor's actual point; state what is accepted, limited, or changed and why>\n"
+            "Then exactly 2 or 3 approved intervention headers:\n"
+            "BEGIN_INTERVENTION\n"
+            "TITLE=<specific Arabic intervention title grounded in the case>\n"
+            "CONFIDENCE=<high|medium|low>\n"
+            "IMPACT=<specific link to the social problem / goal / impact driver>\n"
+            "REPORTABLE=<measurable reportable value without invented numbers>\n"
+            "END_INTERVENTION\n"
+            "After the last block: FINAL=<brief synthesis explaining why these interventions together form the 90-day route>\n"
+            "Never use || except on REVIEW lines."
+        )
+
+        strategy_task = {
+            "role": meta["slug"],
+            "meta_advisor_name": meta["name"],
+            "task": (
+                "Lead the Athar OS council. First review the independent Specialist "
+                "opinions, then approve the small portfolio of interventions for the "
+                "90-day Impact Challenge. DO NOT generate weekly sprints in this call."
+            ),
+            **authoritative_context,
             "specialist_reasonings": council,
-            "required_protocol": protocol,
+            "required_protocol": strategy_protocol,
             "mandatory_rules": [
-                "Generate exactly 2 or 3 materially distinct interventions; prefer 2 unless a third adds independent strategic value.",
-                "Every intervention must contain exactly 12 sequential sprint units: 1 through 12, with none missing or duplicated.",
-                "Each sprint unit represents one weekly Result and must contain 1 to 3 executable deliverables using TEXT lines.",
-                "Every deliverable must be realistically completable within one 5-working-day sprint.",
-                "The 12 results must form a coherent progression toward the organization's primary 90-day goal.",
-                "Do not invent facts, percentages, budgets, counts, dates, partners, staffing, or capacity not present in the request.",
-                "Historical numbers in the request are evidence, not automatic future targets.",
-                "When no numeric target is grounded, use measurable completion/quality/status language without fabricating a number.",
-                "Keep each RESULT and TEXT concise, concrete, operational, and non-duplicative.",
-                "For every Specialist advisor, write one REVIEW line that evaluates how that advisor's reasoning affects the final plan.",
-                "Use advisor slugs only; never use advisor persona names inside the protocol.",
-                "Write professional Arabic suitable for Saudi nonprofit organizations.",
+                "Approve exactly 2 interventions by default; approve a third only when it adds an independent strategic path that the first two do not cover.",
+                "Every intervention must directly anchor to the stated 90-day goal, social problem, named impact drivers, target group, organizational notes, or an existing program/project.",
+                "Do not replace the stated challenge with a generic identity, governance, structure, strategy, or analysis project unless the request itself makes that issue material.",
+                "The interventions must be materially different from each other and together converge on the same primary 90-day goal.",
+                "Do not invent percentages, counts, budgets, dates, partners, staffing, resources, or capacity.",
+                "REPORTABLE must describe something the organization can verify or report; if no grounded numeric target exists, use a measurable completion/status/quality statement without fabricating a number.",
+                "For each Specialist, REVIEW must discuss a concrete point from that advisor's reasoning; never reuse the same generic review sentence for multiple advisors.",
+                "A REVIEW should say what the Meta accepts, limits, combines, or excludes from that advisor's view and why it matters to the final interventions.",
+                "Use advisor slugs only; never persona names in the protocol.",
+                "Write concise professional Arabic suitable for Saudi nonprofit organizations.",
             ],
         }
 
-        def parse_plan(raw: str) -> Dict[str, Any]:
-            clean = self.clean_model_text(raw).replace("```", "").strip()
-            clean = self._normalize_digits(clean)
-
-            # Qwen occasionally keeps two protocol fields on one physical line
-            # (for example: "SPRINT=11 RESULT=..."). Split only known protocol
-            # markers so a valid sprint is not lost because of formatting.
+        def parse_strategy(raw: str) -> Dict[str, Any]:
+            clean = self._normalize_digits(
+                self.clean_model_text(raw).replace("```", "").strip()
+            )
             clean = re.sub(
-                r"\s+(?=(?:BEGIN_INTERVENTION|END_INTERVENTION|END_SPRINT|"
-                r"TITLE|CONFIDENCE|IMPACT|REPORTABLE|SPRINT|RESULT|TEXT|FINAL|REVIEW)"
-                r"\s*(?:[:=]|\b))",
+                r"\s+(?=(?:BEGIN_INTERVENTION|END_INTERVENTION|TITLE|CONFIDENCE|IMPACT|REPORTABLE|FINAL|REVIEW)\s*(?:[:=]|\b))",
                 "\n",
                 clean,
                 flags=re.I,
             )
-
             reviews: Dict[str, str] = {}
             interventions: List[Dict[str, Any]] = []
-            final_message = ""
             current: Optional[Dict[str, Any]] = None
-            sprint: Optional[Dict[str, Any]] = None
+            final = ""
 
-            def finish_sprint() -> None:
-                nonlocal sprint, current
-                if sprint is None:
-                    return
-                if current is not None:
-                    current.setdefault("sprints", []).append(sprint)
-                sprint = None
-
-            def finish_intervention() -> None:
+            def finish() -> None:
                 nonlocal current
-                finish_sprint()
                 if current is not None:
                     interventions.append(current)
                 current = None
 
             for raw_line in clean.splitlines():
-                line = raw_line.strip()
+                line = re.sub(r"^[\-*•]+\s*", "", raw_line.strip())
                 if not line:
                     continue
-                line = re.sub(r"^[\-*•]+\s*", "", line)
 
                 m = re.match(r"^REVIEW\s*[:=]\s*([^|]+?)\s*\|\|\s*(.+)$", line, flags=re.I)
                 if m:
                     aid = m.group(1).strip()
-                    msg = m.group(2).strip()
+                    msg = self._clean_meta_public_text(m.group(2).strip(), request)
                     if aid and msg:
                         reviews[aid] = msg
                     continue
 
                 if re.fullmatch(r"BEGIN_INTERVENTION", line, flags=re.I):
                     if current is not None:
-                        finish_intervention()
-                    current = {"sprints": []}
-                    sprint = None
+                        finish()
+                    current = {}
                     continue
-
                 if re.fullmatch(r"END_INTERVENTION", line, flags=re.I):
-                    finish_intervention()
+                    finish()
                     continue
 
                 if current is None:
                     m = re.match(r"^FINAL\s*[:=]\s*(.+)$", line, flags=re.I)
                     if m:
-                        final_message = m.group(1).strip()
+                        final = self._clean_meta_public_text(m.group(1), request)
                     continue
 
                 for key, public_key in (
@@ -2403,164 +2491,160 @@ class AtharCouncilEngine:
                 ):
                     m = re.match(rf"^{key}\s*[:=]\s*(.+)$", line, flags=re.I)
                     if m:
-                        current[public_key] = m.group(1).strip()
-                        break
-                else:
-                    # Accept SPRINT=11, SPRINT:11, SPRINT 11 and SPRINT-11.
-                    m = re.match(
-                        r"^SPRINT\s*(?:[:=\-–—]\s*|\s+)(\d{1,2})\s*[:\-–—]?\s*$",
-                        line,
-                        flags=re.I,
-                    )
-                    if m:
-                        finish_sprint()
-                        sprint = {
-                            "number": int(m.group(1)),
-                            "result": "",
-                            "deliverables": [],
-                        }
-                        continue
-
-                    if re.fullmatch(r"END_SPRINT", line, flags=re.I):
-                        finish_sprint()
-                        continue
-
-                    m = re.match(r"^RESULT\s*[:=]\s*(.+)$", line, flags=re.I)
-                    if m and sprint is not None:
-                        sprint["result"] = m.group(1).strip()
-                        continue
-
-                    m = re.match(r"^TEXT\s*[:=]\s*(.+)$", line, flags=re.I)
-                    if m and sprint is not None:
                         value = m.group(1).strip()
-                        if value:
-                            sprint["deliverables"].append(value)
-                        continue
+                        current[public_key] = (
+                            value.lower()
+                            if public_key == "confidence_level"
+                            else self._clean_meta_public_text(value, request)
+                        )
+                        break
 
             if current is not None:
-                finish_intervention()
+                finish()
 
-            # Deterministic public cleanup and exact backend projection.
-            projected: List[Dict[str, Any]] = []
-            for item in interventions:
-                title = self._clean_meta_public_text(item.get("title"), request)
-                confidence = str(item.get("confidence_level") or "medium").strip().lower()
-                impact = self._clean_meta_public_text(item.get("impact_description"), request)
-                reportable = self._clean_meta_public_text(item.get("reportable_value"), request)
-
-                # Normalize by sprint number. If the model duplicates a sprint,
-                # keep the first structurally useful version instead of failing
-                # the whole 10-15 minute job.
-                units_by_number: Dict[int, Dict[str, Any]] = {}
-                for unit in item.get("sprints") or []:
-                    number = int(unit.get("number") or 0)
-                    if not (1 <= number <= SPRINT_COUNT):
-                        continue
-
-                    result_text = self._clean_meta_public_text(unit.get("result"), request)
-                    deliverables: List[Dict[str, str]] = []
-                    for value in unit.get("deliverables") or []:
-                        cleaned = self._clean_meta_public_text(value, request)
-                        if cleaned and cleaned not in [x["text"] for x in deliverables]:
-                            deliverables.append({"text": cleaned})
-
-                    candidate = {
-                        "_sprint": number,
-                        "text": result_text,
-                        "results": deliverables[:3],
-                    }
-
-                    existing = units_by_number.get(number)
-                    if existing is None:
-                        units_by_number[number] = candidate
-                    else:
-                        # Prefer the duplicate that has a result and at least one
-                        # executable deliverable.
-                        old_quality = int(bool(existing.get("text"))) + int(bool(existing.get("results")))
-                        new_quality = int(bool(candidate.get("text"))) + int(bool(candidate.get("results")))
-                        if new_quality > old_quality:
-                            units_by_number[number] = candidate
-
-                outputs = [
-                    units_by_number[n]
-                    for n in sorted(units_by_number)
-                ]
-
-                projected.append({
-                    "title": title,
-                    "confidence_level": confidence,
-                    "impact_description": impact,
-                    "reportable_value": reportable,
-                    "outputs": outputs,
-                })
-
-            clean_reviews = {
-                aid: self._clean_meta_public_text(msg, request)
-                for aid, msg in reviews.items()
-                if aid and msg
-            }
-            final_clean = self._clean_meta_public_text(final_message, request)
             return {
-                "reviews": clean_reviews,
-                "interventions": projected,
-                "final": final_clean,
+                "reviews": reviews,
+                "interventions": interventions[:3],
+                "final": final,
                 "raw": raw,
             }
 
-        def plan_errors(parsed: Dict[str, Any]) -> List[str]:
+        def strategy_errors(parsed: Dict[str, Any]) -> List[str]:
             errors: List[str] = []
             reviews = parsed.get("reviews") or {}
+
+            review_texts: List[tuple[str, str]] = []
             for aid in involved_ids:
-                if not str(reviews.get(aid) or "").strip():
-                    errors.append(f"missing REVIEW for {aid}")
+                review = str(reviews.get(aid) or "").strip()
+                if not review:
+                    errors.append(f"missing specific REVIEW for {aid}")
+                    continue
+                if len(review) < 35:
+                    errors.append(f"REVIEW for {aid} is too short/generic")
+                own_tokens = qtokens(reasonings_by_id.get(aid))
+                review_tokens = qtokens(review)
+                # A good Meta review may paraphrase the Specialist rather than
+                # reuse the same nouns. Treat zero lexical overlap as an error
+                # only when the review is also substantively thin. Pairwise
+                # similarity checks below still reject copied generic reviews.
+                if own_tokens and not (own_tokens & review_tokens) and len(review_tokens) < 3:
+                    errors.append(f"REVIEW for {aid} is too generic to ground in that advisor reasoning")
+                nums = unsupported_numbers(review)
+                if nums:
+                    errors.append(f"REVIEW for {aid} contains unsupported numbers {nums}")
+                review_texts.append((aid, review))
+
+            for x in range(len(review_texts)):
+                for y in range(x + 1, len(review_texts)):
+                    aid_a, a = review_texts[x]
+                    aid_b, b = review_texts[y]
+                    if text_similarity(a, b) >= 0.72:
+                        errors.append(
+                            f"Meta REVIEWs for {aid_a} and {aid_b} are too similar/generic"
+                        )
 
             interventions = parsed.get("interventions") or []
             if not (2 <= len(interventions) <= 3):
-                errors.append(f"expected 2-3 interventions, got {len(interventions)}")
+                errors.append(f"strategy must approve exactly 2-3 interventions, got {len(interventions)}")
 
-            for i, item in enumerate(interventions):
+            strategy_texts: List[str] = []
+            for idx, item in enumerate(interventions, start=1):
                 for key in ("title", "impact_description", "reportable_value"):
-                    if not str(item.get(key) or "").strip():
-                        errors.append(f"intervention {i+1} missing {key}")
-                if str(item.get("confidence_level") or "").lower() not in {"high", "medium", "low"}:
-                    errors.append(f"intervention {i+1} invalid confidence")
-
-                outputs = item.get("outputs") or []
-                numbers = [int(x.get("_sprint") or 0) for x in outputs if isinstance(x, dict)]
-                if numbers != list(range(1, 13)):
-                    errors.append(
-                        f"intervention {i+1} must contain sprints 1..12 exactly; got {numbers}"
-                    )
-                    continue
-                for j, unit in enumerate(outputs, start=1):
-                    if not str(unit.get("text") or "").strip():
-                        errors.append(f"intervention {i+1} sprint {j} missing result text")
-                    deliverables = unit.get("results") or []
-                    if not (1 <= len(deliverables) <= 3):
+                    value = str(item.get(key) or "").strip()
+                    if not value:
+                        errors.append(f"intervention {idx} missing {key}")
+                    elif broken_or_placeholder(value):
+                        errors.append(f"intervention {idx} {key} is generic/broken")
+                    nums = unsupported_numbers(value)
+                    if nums:
                         errors.append(
-                            f"intervention {i+1} sprint {j} requires 1-3 executable texts"
+                            f"intervention {idx} {key} contains unsupported numbers {nums}"
                         )
-                    for d in deliverables:
-                        if not isinstance(d, dict) or not str(d.get("text") or "").strip():
-                            errors.append(
-                                f"intervention {i+1} sprint {j} contains empty executable text"
-                            )
 
-            if not str(parsed.get("final") or "").strip():
+                confidence = str(item.get("confidence_level") or "").lower()
+                if confidence not in {"high", "medium", "low"}:
+                    errors.append(f"intervention {idx} invalid confidence")
+
+                combined = " ".join([
+                    str(item.get("title") or ""),
+                    str(item.get("impact_description") or ""),
+                    str(item.get("reportable_value") or ""),
+                ])
+                overlap = qtokens(combined) & authoritative_tokens
+                if len(overlap) < 2:
+                    errors.append(
+                        f"intervention {idx} is weakly grounded in authoritative goal/impact/program context"
+                    )
+                strategy_texts.append(combined)
+
+            for x in range(len(strategy_texts)):
+                for y in range(x + 1, len(strategy_texts)):
+                    if text_similarity(strategy_texts[x], strategy_texts[y]) >= 0.62:
+                        errors.append(
+                            f"interventions {x+1} and {y+1} are not materially distinct"
+                        )
+
+            final_text = str(parsed.get("final") or "").strip()
+            if not final_text:
                 errors.append("missing FINAL Meta synthesis")
-            return errors
+            else:
+                nums = unsupported_numbers(final_text)
+                if nums:
+                    errors.append(f"FINAL Meta synthesis contains unsupported numbers {nums}")
+            return list(dict.fromkeys(errors))
 
-        meta_adapter = "meta" if COUNCIL_META_MODE == "adapter" else "base"
+        def generate_strategy(task_obj: Dict[str, Any]) -> Dict[str, Any]:
+            raw = self._generate(
+                meta_adapter,
+                meta["prompt"],
+                json.dumps(task_obj, ensure_ascii=False, separators=(",", ":")),
+                min(max(META_MAX_NEW_TOKENS, 1800), 2400),
+                deterministic=True,
+                repetition_penalty=1.05,
+            )
+            return parse_strategy(raw)
 
-        def _missing_sprint_numbers(item: Dict[str, Any]) -> List[int]:
-            present = {
-                int(x.get("_sprint") or 0)
-                for x in (item.get("outputs") or [])
-                if isinstance(x, dict)
-            }
-            return [n for n in range(1, SPRINT_COUNT + 1) if n not in present]
+        strategy = generate_strategy(strategy_task)
+        s_errors = strategy_errors(strategy)
+        if s_errors:
+            repair_task = dict(strategy_task)
+            repair_task["task"] = (
+                "Repair only the council synthesis. Return the COMPLETE strategy protocol "
+                "again. Do not generate any weekly sprints."
+            )
+            repair_task["previous_output"] = strategy.get("raw")
+            repair_task["validation_errors"] = s_errors[:24]
+            repair_task["repair_rules"] = [
+                "Every REVIEW must be advisor-specific and tied to that advisor's actual reasoning.",
+                "Replace generic or unrelated interventions with interventions directly grounded in the supplied goal, social problem, impact drivers, organization facts, or programs.",
+                "Keep exactly 2-3 materially distinct interventions.",
+                "Do not invent any unsupported number or target.",
+            ]
+            strategy = generate_strategy(repair_task)
+            s_errors = strategy_errors(strategy)
 
-        def _parse_sprint_patch(raw: str) -> Dict[int, Dict[str, Any]]:
+        if s_errors:
+            raise ValueError(
+                "Meta council synthesis failed Screen-3 quality gate: "
+                + " | ".join(s_errors[:20])
+            )
+
+        # ------------------------------------------------------------------
+        # PHASE B — generate the 12-week route separately for each approved
+        # intervention. One long plan can no longer degrade the other plans.
+        # ------------------------------------------------------------------
+        sprint_protocol = (
+            "Return ONLY this protocol for ONE approved intervention; no JSON or Markdown.\n"
+            "SPRINT=1\n"
+            "RESULT=<distinct achieved state/milestone by the end of this 5-day sprint>\n"
+            "TEXT=<mandatory concrete deliverable/action executable within 5 working days>\n"
+            "[TEXT=<optional second 5-day deliverable>]\n"
+            "[TEXT=<optional third 5-day deliverable>]\n"
+            "END_SPRINT\n"
+            "Repeat sequentially through SPRINT=12 exactly once each."
+        )
+
+        def parse_sprints(raw: str) -> Dict[str, Any]:
             clean = self._normalize_digits(
                 self.clean_model_text(raw).replace("```", "").strip()
             )
@@ -2570,36 +2654,19 @@ class AtharCouncilEngine:
                 clean,
                 flags=re.I,
             )
-
-            patches: Dict[int, Dict[str, Any]] = {}
-            current_number: Optional[int] = None
-            current_result = ""
-            current_texts: List[str] = []
+            units: List[Dict[str, Any]] = []
+            current: Optional[Dict[str, Any]] = None
 
             def finish() -> None:
-                nonlocal current_number, current_result, current_texts
-                if current_number is not None:
-                    cleaned_result = self._clean_meta_public_text(current_result, request)
-                    deliverables = []
-                    for value in current_texts:
-                        cleaned = self._clean_meta_public_text(value, request)
-                        if cleaned and cleaned not in [x["text"] for x in deliverables]:
-                            deliverables.append({"text": cleaned})
-                    if cleaned_result and deliverables:
-                        patches[current_number] = {
-                            "_sprint": current_number,
-                            "text": cleaned_result,
-                            "results": deliverables[:3],
-                        }
-                current_number = None
-                current_result = ""
-                current_texts = []
+                nonlocal current
+                if current is not None:
+                    units.append(current)
+                current = None
 
             for raw_line in clean.splitlines():
-                line = raw_line.strip()
+                line = re.sub(r"^[\-*•]+\s*", "", raw_line.strip())
                 if not line:
                     continue
-                line = re.sub(r"^[\-*•]+\s*", "", line)
 
                 m = re.match(
                     r"^SPRINT\s*(?:[:=\-–—]\s*|\s+)(\d{1,2})\s*[:\-–—]?\s*$",
@@ -2608,7 +2675,11 @@ class AtharCouncilEngine:
                 )
                 if m:
                     finish()
-                    current_number = int(m.group(1))
+                    current = {
+                        "number": int(m.group(1)),
+                        "result": "",
+                        "deliverables": [],
+                    }
                     continue
 
                 if re.fullmatch(r"END_SPRINT", line, flags=re.I):
@@ -2616,240 +2687,391 @@ class AtharCouncilEngine:
                     continue
 
                 m = re.match(r"^RESULT\s*[:=]\s*(.+)$", line, flags=re.I)
-                if m and current_number is not None:
-                    current_result = m.group(1).strip()
+                if m and current is not None:
+                    current["result"] = m.group(1).strip()
                     continue
 
                 m = re.match(r"^TEXT\s*[:=]\s*(.+)$", line, flags=re.I)
-                if m and current_number is not None:
+                if m and current is not None:
                     value = m.group(1).strip()
                     if value:
-                        current_texts.append(value)
+                        current["deliverables"].append(value)
 
             finish()
-            return patches
 
-        def _targeted_repair_missing_sprints(parsed: Dict[str, Any]) -> Dict[str, Any]:
-            """Ask Meta only for missing weekly units, never regenerate the whole plan."""
-            interventions = parsed.get("interventions") or []
-            repair_requests: List[Dict[str, Any]] = []
-
-            for idx, item in enumerate(interventions, start=1):
-                missing = _missing_sprint_numbers(item)
-                if not missing:
+            by_number: Dict[int, Dict[str, Any]] = {}
+            for unit in units:
+                n = int(unit.get("number") or 0)
+                if not (1 <= n <= SPRINT_COUNT):
                     continue
+                result_text = self._clean_meta_public_text(unit.get("result"), request)
+                deliverables: List[Dict[str, str]] = []
+                for value in unit.get("deliverables") or []:
+                    cleaned = self._clean_meta_public_text(value, request)
+                    if cleaned and cleaned not in [x["text"] for x in deliverables]:
+                        deliverables.append({"text": cleaned})
 
-                existing = {
-                    int(x.get("_sprint") or 0): {
-                        "result": x.get("text"),
-                        "deliverables": [
-                            d.get("text")
-                            for d in (x.get("results") or [])
-                            if isinstance(d, dict) and d.get("text")
-                        ],
-                    }
-                    for x in (item.get("outputs") or [])
-                    if isinstance(x, dict)
+                candidate = {
+                    "_sprint": n,
+                    "text": result_text,
+                    "results": deliverables[:3],
                 }
+                existing = by_number.get(n)
+                if existing is None:
+                    by_number[n] = candidate
+                else:
+                    old_q = int(bool(existing.get("text"))) + int(bool(existing.get("results")))
+                    new_q = int(bool(candidate.get("text"))) + int(bool(candidate.get("results")))
+                    if new_q > old_q:
+                        by_number[n] = candidate
 
-                repair_requests.append({
-                    "intervention_index": idx,
-                    "title": item.get("title"),
-                    "impact_description": item.get("impact_description"),
-                    "reportable_value": item.get("reportable_value"),
-                    "missing_sprints": missing,
-                    "existing_sprints": existing,
-                })
+            return {
+                "outputs": [by_number[n] for n in sorted(by_number)],
+                "raw": raw,
+            }
 
-            if not repair_requests:
-                return parsed
+        def sprint_quality_errors(
+            plan: Dict[str, Any],
+            intervention: Dict[str, Any],
+        ) -> tuple[List[str], set[int]]:
+            errors: List[str] = []
+            bad: set[int] = set()
+            outputs = plan.get("outputs") or []
+            numbers = [
+                int(x.get("_sprint") or 0)
+                for x in outputs
+                if isinstance(x, dict)
+            ]
+            expected = list(range(1, SPRINT_COUNT + 1))
+            if numbers != expected:
+                missing = [n for n in expected if n not in numbers]
+                errors.append(f"sprints must be 1..12 exactly; got {numbers}; missing={missing}")
+                bad.update(missing)
 
-            for req in repair_requests:
-                missing = req["missing_sprints"]
-                # Keep the patch request intentionally tiny. Usually this is one
-                # lost sprint caused by formatting/token pressure.
-                patch_task = {
-                    "role": meta["slug"],
-                    "task": "Complete only the missing sprint units for one already-approved intervention.",
-                    "organization": payload.get("organization"),
-                    "goal": payload.get("goal"),
-                    "impact_map": payload.get("impact_map"),
-                    "intervention": {
-                        "title": req["title"],
-                        "impact_description": req["impact_description"],
-                        "reportable_value": req["reportable_value"],
-                    },
-                    "missing_sprints": missing,
-                    "existing_sprints": req["existing_sprints"],
-                    "rules": [
-                        "Return ONLY the requested missing sprint numbers.",
-                        "For every requested sprint: one RESULT and 1 to 3 TEXT lines.",
-                        "Each TEXT must be executable within 5 working days.",
-                        "Do not invent numbers, budgets, dates, partners, staffing, or capacity.",
-                        "Do not repeat an existing sprint.",
-                    ],
-                    "protocol": (
-                        "SPRINT=<missing number>\n"
-                        "RESULT=<concise weekly result>\n"
-                        "TEXT=<5-day executable deliverable>\n"
-                        "[TEXT=<optional second deliverable>]\n"
-                        "[TEXT=<optional third deliverable>]\n"
-                        "END_SPRINT"
-                    ),
-                }
+            approved_intervention_text = " ".join([
+                str(intervention.get("title") or ""),
+                str(intervention.get("impact_description") or ""),
+                str(intervention.get("reportable_value") or ""),
+            ])
+            approved_tokens = qtokens(approved_intervention_text)
+            case_tokens = authoritative_tokens
 
-                raw_patch = self._generate(
-                    meta_adapter,
-                    meta["prompt"],
-                    json.dumps(patch_task, ensure_ascii=False, separators=(",", ":")),
-                    900 if len(missing) <= 2 else 1400,
-                    deterministic=True,
-                    repetition_penalty=1.02,
-                )
-                patches = _parse_sprint_patch(raw_patch)
+            def is_anchored(value: Any) -> bool:
+                tokens = qtokens(value)
+                if not tokens:
+                    return False
+                # Prefer direct connection to the approved intervention. A line
+                # may also be accepted when it is strongly tied (2+ meaningful
+                # tokens) to authoritative case facts.
+                return bool(tokens & approved_tokens) or len(tokens & case_tokens) >= 2
 
-                item = interventions[req["intervention_index"] - 1]
-                outputs = list(item.get("outputs") or [])
-                for n in missing:
-                    patch = patches.get(n)
-                    if patch:
-                        outputs.append(patch)
+            seen_results: Dict[str, int] = {}
+            seen_deliverables: Dict[str, int] = {}
+            first_word_counts: Dict[str, List[int]] = {}
+            result_rows: List[tuple[int, str]] = []
 
-                outputs.sort(key=lambda x: int(x.get("_sprint") or 0))
-                item["outputs"] = outputs
-
-            parsed["interventions"] = interventions
-            return parsed
-
-        def _deterministic_bridge_missing_sprints(parsed: Dict[str, Any]) -> Dict[str, Any]:
-            """Last-resort structural safety net for at most two missing weekly units.
-
-            This never invents a numeric target or a new program fact. It inserts
-            an operational review/transition unit anchored only to the already
-            approved intervention title. The purpose is to avoid discarding a
-            complete 10-15 minute council run because one protocol line vanished.
-            """
-            interventions = parsed.get("interventions") or []
-
-            for item in interventions:
-                missing = _missing_sprint_numbers(item)
-                if not missing:
+            for unit in outputs:
+                n = int(unit.get("_sprint") or 0)
+                if not (1 <= n <= SPRINT_COUNT):
                     continue
-                if len(missing) > 2:
-                    continue
+                result = str(unit.get("text") or "").strip()
+                deliverables = unit.get("results") or []
 
-                title = self._clean_meta_public_text(item.get("title"), request) or "التدخل المعتمد"
-                outputs = list(item.get("outputs") or [])
+                if len(result) < 18 or broken_or_placeholder(result):
+                    errors.append(f"sprint {n} result is generic, broken, or too short")
+                    bad.add(n)
+                if unsupported_numbers(result):
+                    errors.append(
+                        f"sprint {n} result contains unsupported numbers {unsupported_numbers(result)}"
+                    )
+                    bad.add(n)
+                if qtokens(result) and not is_anchored(result):
+                    errors.append(f"sprint {n} result is not anchored to this intervention/case")
+                    bad.add(n)
 
-                for n in missing:
-                    if n == 1:
-                        result = f"تثبيت نطاق التنفيذ ومتطلبات البداية للتدخل: {title}."
-                        deliverable = "مراجعة نطاق التدخل وتوثيق متطلبات البدء والمسؤوليات التشغيلية اللازمة للأسبوع الأول."
-                    elif n == SPRINT_COUNT:
-                        result = f"استكمال إغلاق دورة التنفيذ للتدخل: {title}."
-                        deliverable = "مراجعة ما تم إنجازه وتوثيق المخرجات والفجوات المتبقية والاستعداد للمراجعة الختامية."
+                norm_result = re.sub(r"\s+", " ", result.lower()).strip(" .،؛:-–—")
+                if norm_result:
+                    if norm_result in seen_results:
+                        prev = seen_results[norm_result]
+                        errors.append(f"sprints {prev} and {n} repeat the same result")
+                        bad.update({prev, n})
                     else:
-                        result = f"استكمال متطلبات التنفيذ والتحقق من جاهزية الانتقال للمرحلة التالية في {title}."
-                        deliverable = "مراجعة إنجازات المرحلة السابقة وتوثيق الفجوات والإجراءات التصحيحية اللازمة قبل بدء المرحلة التالية."
+                        seen_results[norm_result] = n
+                    result_rows.append((n, result))
 
-                    outputs.append({
-                        "_sprint": n,
-                        "text": self._clean_meta_public_text(result, request),
-                        "results": [{
-                            "text": self._clean_meta_public_text(deliverable, request),
-                        }],
-                    })
+                words = re.findall(r"[\u0600-\u06FFA-Za-z]+", result)
+                if words:
+                    first = words[0].lower()
+                    first_word_counts.setdefault(first, []).append(n)
 
-                outputs.sort(key=lambda x: int(x.get("_sprint") or 0))
-                item["outputs"] = outputs
+                if not (1 <= len(deliverables) <= 3):
+                    errors.append(f"sprint {n} requires 1-3 executable texts")
+                    bad.add(n)
 
-            parsed["interventions"] = interventions
-            return parsed
+                for d in deliverables:
+                    text_value = str(d.get("text") or "").strip() if isinstance(d, dict) else ""
+                    if len(text_value) < 18 or broken_or_placeholder(text_value):
+                        errors.append(f"sprint {n} contains generic/broken executable text")
+                        bad.add(n)
+                    if unsupported_numbers(text_value):
+                        errors.append(
+                            f"sprint {n} executable text contains unsupported numbers {unsupported_numbers(text_value)}"
+                        )
+                        bad.add(n)
+                    if qtokens(text_value) and not is_anchored(text_value):
+                        errors.append(f"sprint {n} executable text is not anchored to this intervention/case")
+                        bad.add(n)
 
-        def generate_plan(task_obj: Dict[str, Any], max_tokens: int) -> Dict[str, Any]:
+                    norm_d = re.sub(r"\s+", " ", text_value.lower()).strip(" .،؛:-–—")
+                    if norm_d:
+                        if norm_d in seen_deliverables:
+                            prev = seen_deliverables[norm_d]
+                            errors.append(
+                                f"sprints {prev} and {n} repeat the same executable text"
+                            )
+                            bad.update({prev, n})
+                        else:
+                            seen_deliverables[norm_d] = n
+
+            # Near-duplicate weekly results are also low-quality, even when one
+            # token changes. Keep this threshold high to allow legitimate thematic
+            # continuity while rejecting template collapse.
+            for x in range(len(result_rows)):
+                for y in range(x + 1, len(result_rows)):
+                    nx, tx = result_rows[x]
+                    ny, ty = result_rows[y]
+                    if text_similarity(tx, ty) >= 0.84:
+                        errors.append(f"sprints {nx} and {ny} are near-duplicate results")
+                        bad.update({nx, ny})
+
+            # If the same generic leading action dominates most of the roadmap,
+            # the model has collapsed into a template rather than a progression.
+            for first, nums in first_word_counts.items():
+                if len(nums) >= 5 and first in {
+                    "تحديد", "إعداد", "اعداد", "مراجعة", "تنفيذ", "متابعة",
+                    "استكمال", "تطوير", "تصميم", "تحليل", "بناء", "إنشاء", "انشاء",
+                }:
+                    errors.append(
+                        f"roadmap overuses the same leading action '{first}' in sprints {nums}"
+                    )
+                    bad.update(nums)
+
+            return list(dict.fromkeys(errors)), bad
+
+        def sprint_task(
+            intervention: Dict[str, Any],
+            *,
+            repair_errors: Optional[List[str]] = None,
+            previous_output: Optional[str] = None,
+        ) -> Dict[str, Any]:
+            task_obj = {
+                "role": meta["slug"],
+                "task": (
+                    "Design the twelve-week execution route for ONE already-approved "
+                    "Screen-3 intervention. Do not redesign or replace the intervention."
+                ),
+                **authoritative_context,
+                "approved_intervention": {
+                    "title": intervention.get("title"),
+                    "confidence_level": intervention.get("confidence_level"),
+                    "impact_description": intervention.get("impact_description"),
+                    "reportable_value": intervention.get("reportable_value"),
+                },
+                "specialist_reasonings": council,
+                "required_protocol": sprint_protocol,
+                "progression_guidance": [
+                    "Sprints 1-2: establish intervention-specific evidence, scope, readiness, or baseline needed to act.",
+                    "Sprints 3-4: complete the intervention-specific design/preparation and ownership needed for execution.",
+                    "Sprints 5-8: execute/test the concrete intervention work and produce tangible outputs; do not remain in analysis mode.",
+                    "Sprints 9-10: review evidence from execution, fix gaps, and improve the intervention.",
+                    "Sprint 11: institutionalize, hand over, or secure continuity of the working approach.",
+                    "Sprint 12: verify the achieved 90-day result and document the next decision/action.",
+                ],
+                "mandatory_rules": [
+                    "Return exactly SPRINT 1 through SPRINT 12, once each and in order.",
+                    "RESULT is a distinct weekly achieved state or milestone, not a placeholder task label.",
+                    "Every sprint must have 1 to 3 TEXT lines; each TEXT is a concrete mandatory deliverable/action fully executable within 5 working days.",
+                    "Tailor every RESULT and TEXT to THIS intervention and the supplied organization/program/goal/impact context.",
+                    "The twelve results must progress logically; later weeks must build on evidence or outputs from earlier weeks.",
+                    "Do not repeat the same RESULT, TEXT, or generic phrase across weeks.",
+                    "Never output placeholders such as 'تحديد مخرج التدخل', 'تنفيذ التدخل', 'استكمال التدخل', or similar generic filler.",
+                    "Do not invent percentages, counts, budgets, dates, partners, staffing, resources, or capacity not present in the authoritative context.",
+                    "Historical numbers are evidence, not automatic future targets.",
+                    "Keep each RESULT and TEXT concise enough to be operational, but specific enough that a team can tell what must be completed by Friday.",
+                    "Do not introduce a new strategic objective, identity project, governance project, or organizational redesign unless it is part of the approved intervention/context.",
+                ],
+            }
+            if repair_errors:
+                task_obj["task"] = (
+                    "Repair the complete twelve-week route for the SAME approved intervention. "
+                    "Return the COMPLETE SPRINT 1..12 protocol again."
+                )
+                task_obj["validation_errors"] = repair_errors[:30]
+                task_obj["previous_output"] = previous_output
+                task_obj["repair_rules"] = [
+                    "Replace generic/repeated weeks with intervention-specific milestones.",
+                    "Keep valid grounded content where possible.",
+                    "Do not change the approved intervention header.",
+                    "Return all twelve sprints, not only the faulty ones.",
+                ]
+            return task_obj
+
+        def generate_sprint_plan(
+            intervention: Dict[str, Any],
+            *,
+            repair_errors: Optional[List[str]] = None,
+            previous_output: Optional[str] = None,
+        ) -> Dict[str, Any]:
             raw = self._generate(
                 meta_adapter,
                 meta["prompt"],
-                json.dumps(task_obj, ensure_ascii=False, separators=(",", ":")),
-                max_tokens,
+                json.dumps(
+                    sprint_task(
+                        intervention,
+                        repair_errors=repair_errors,
+                        previous_output=previous_output,
+                    ),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                min(max(META_MAX_NEW_TOKENS, 3000), 3800),
                 deterministic=True,
-                repetition_penalty=1.04,
+                repetition_penalty=1.08,
             )
-            return parse_plan(raw)
+            return parse_sprints(raw)
 
-        # 2-3 interventions x 12 concise sprint units. 5500 tokens is generous
-        # enough for the mandatory structure while keeping latency bounded.
-        parsed = generate_plan(task, min(max(META_MAX_NEW_TOKENS, 5200), 6200))
+        def patch_sprints(
+            intervention: Dict[str, Any],
+            plan: Dict[str, Any],
+            bad_numbers: set[int],
+            errors: List[str],
+        ) -> Dict[str, Any]:
+            if not bad_numbers or len(bad_numbers) > 4:
+                return plan
 
-        # First repair only missing weekly units. This avoids throwing away a
-        # nearly complete plan or asking Meta to regenerate 24-36 units again.
-        parsed = _targeted_repair_missing_sprints(parsed)
-        errors = plan_errors(parsed)
-
-        # If there are still semantic/contract errors, allow one complete repair.
-        if errors:
-            repair = dict(task)
-            repair["task"] = "Repair the previous protocol output into a complete valid Screen-3 90-day plan."
-            repair["previous_output"] = parsed.get("raw")
-            repair["validation_errors"] = errors[:24]
-            repair["repair_rules"] = [
-                "Preserve valid content where possible.",
-                "Return the COMPLETE protocol again, not only the missing lines.",
-                "Exactly 2 or 3 interventions.",
-                "Exactly SPRINT 1 through 12 in every intervention.",
-                "Every sprint has 1 to 3 TEXT deliverables.",
-                "One REVIEW per involved advisor and one FINAL line.",
-            ]
-            parsed = generate_plan(repair, min(max(META_MAX_NEW_TOKENS, 5400), 6400))
-
-            # A full repair can itself lose one protocol block. Patch only that
-            # gap rather than failing after another long generation.
-            parsed = _targeted_repair_missing_sprints(parsed)
-            errors = plan_errors(parsed)
-
-        # Last-resort structural fallback: if only one or two weekly protocol
-        # units were lost, insert a grounded transition/review unit. Then run the
-        # exact same strict validator again.
-        if errors:
-            parsed = _deterministic_bridge_missing_sprints(parsed)
-            errors = plan_errors(parsed)
-
-        if errors:
-            raise ValueError(
-                "Meta could not produce the mandatory 90-day Screen-3 plan after "
-                "targeted structural repair: "
-                + " | ".join(errors[:20])
+            existing_by_number = {
+                int(x.get("_sprint") or 0): x
+                for x in (plan.get("outputs") or [])
+                if isinstance(x, dict) and int(x.get("_sprint") or 0) not in bad_numbers
+            }
+            neighborhood = {
+                n: existing_by_number.get(n)
+                for n in range(1, SPRINT_COUNT + 1)
+                if n not in bad_numbers
+            }
+            patch_task = {
+                "role": meta["slug"],
+                "task": "Rewrite ONLY the listed faulty/missing sprint units for the same approved intervention.",
+                **authoritative_context,
+                "approved_intervention": {
+                    "title": intervention.get("title"),
+                    "impact_description": intervention.get("impact_description"),
+                    "reportable_value": intervention.get("reportable_value"),
+                },
+                "faulty_or_missing_sprints": sorted(bad_numbers),
+                "valid_neighboring_sprints": neighborhood,
+                "validation_errors": errors[:20],
+                "rules": [
+                    "Return only the requested sprint numbers.",
+                    "Each requested sprint must have one specific RESULT and 1-3 specific TEXT lines.",
+                    "The replacement must fit logically between the valid neighboring weeks.",
+                    "Every TEXT must be executable in 5 working days.",
+                    "No placeholders, no repeated content, and no unsupported numbers/facts.",
+                ],
+                "protocol": sprint_protocol,
+            }
+            raw = self._generate(
+                meta_adapter,
+                meta["prompt"],
+                json.dumps(patch_task, ensure_ascii=False, separators=(",", ":")),
+                1400 if len(bad_numbers) <= 2 else 2200,
+                deterministic=True,
+                repetition_penalty=1.08,
             )
+            patched = parse_sprints(raw)
+            patch_by_number = {
+                int(x.get("_sprint") or 0): x
+                for x in (patched.get("outputs") or [])
+                if isinstance(x, dict)
+            }
+            merged = dict(existing_by_number)
+            for n in bad_numbers:
+                if n in patch_by_number:
+                    merged[n] = patch_by_number[n]
 
-        # Remove internal sprint helper before returning the confirmed backend schema.
+            return {
+                "outputs": [merged[n] for n in sorted(merged)],
+                "raw": raw,
+            }
+
+        approved = strategy["interventions"]
         interventions: List[Dict[str, Any]] = []
-        for item in parsed["interventions"]:
-            clean_outputs = []
-            for unit in item["outputs"]:
-                clean_outputs.append({
+        plan_debug: List[Dict[str, Any]] = []
+
+        for idx, intervention in enumerate(approved, start=1):
+            print(
+                f"[council] {meta['slug']} planning intervention {idx}/{len(approved)}: "
+                f"{intervention.get('title')}",
+                flush=True,
+            )
+            plan = generate_sprint_plan(intervention)
+            errors, bad = sprint_quality_errors(plan, intervention)
+
+            # Small local defects are cheaper to patch than to regenerate all 12.
+            if errors and bad and len(bad) <= 4:
+                plan = patch_sprints(intervention, plan, bad, errors)
+                errors, bad = sprint_quality_errors(plan, intervention)
+
+            # Broad template collapse or semantic drift gets one full intervention
+            # regeneration, never a regeneration of the whole council portfolio.
+            if errors:
+                plan = generate_sprint_plan(
+                    intervention,
+                    repair_errors=errors,
+                    previous_output=plan.get("raw"),
+                )
+                errors, bad = sprint_quality_errors(plan, intervention)
+                if errors and bad and len(bad) <= 4:
+                    plan = patch_sprints(intervention, plan, bad, errors)
+                    errors, bad = sprint_quality_errors(plan, intervention)
+
+            if errors:
+                raise ValueError(
+                    f"Meta 12-week plan failed quality gate for intervention {idx} "
+                    f"({intervention.get('title')}): " + " | ".join(errors[:20])
+                )
+
+            clean_outputs = [
+                {
                     "text": unit["text"],
                     "results": unit["results"],
-                })
+                }
+                for unit in plan["outputs"]
+            ]
             interventions.append({
-                "title": item["title"],
-                "confidence_level": item["confidence_level"],
-                "impact_description": item["impact_description"],
-                "reportable_value": item["reportable_value"],
+                "title": intervention["title"],
+                "confidence_level": intervention["confidence_level"],
+                "impact_description": intervention["impact_description"],
+                "reportable_value": intervention["reportable_value"],
                 "outputs": clean_outputs,
             })
+            plan_debug.append({
+                "intervention_index": idx,
+                "title": intervention.get("title"),
+                "sprint_count": len(clean_outputs),
+                "quality_errors": [],
+            })
 
-        # Transcript pairs every Specialist's public opinion with the Meta
-        # Advisor's explicit evaluation of that opinion, then closes with the
-        # Meta synthesis. This satisfies the requested "Meta opinion under each
-        # advisor opinion" while staying inside the confirmed transcript schema.
+        # Pair every Specialist opinion with a genuinely advisor-specific Meta
+        # review produced in Phase A, then close with the portfolio synthesis.
         transcript: List[Dict[str, Any]] = []
         sequence = 1
         transcript.append({
             "sequence": sequence,
             "from": "meta_advisor",
             "message": (
-                "سأراجع آراء المجلس بصورة مستقلة، وأعقب على كل رأي قبل بناء خطة "
-                "التدخلات ذات الاثني عشر أسبوعًا."
+                "سأراجع رأي كل مستشار على حدة، ثم أعتمد التدخلات المشتركة قبل "
+                "بناء المسار التنفيذي ذي الاثني عشر أسبوعًا لكل تدخل."
             ),
         })
         sequence += 1
@@ -2863,13 +3085,13 @@ class AtharCouncilEngine:
             transcript.append({
                 "sequence": sequence,
                 "from": "meta_advisor",
-                "message": f"تعقيبي على {aid}: {parsed['reviews'][aid]}",
+                "message": f"تعقيبي على {aid}: {strategy['reviews'][aid]}",
             })
             sequence += 1
         transcript.append({
             "sequence": sequence,
             "from": "meta_advisor",
-            "message": parsed["final"],
+            "message": strategy["final"],
         })
 
         result = {
@@ -2880,16 +3102,15 @@ class AtharCouncilEngine:
         }
 
         self._last_meta_debug = {
+            "architecture": "split_meta_strategy_then_per_intervention_12_sprints",
             "meta_advisor_slug": meta["slug"],
             "meta_advisor_name": meta["name"],
             "meta_prompt_path": meta["prompt_path"],
             "intervention_count": len(interventions),
             "sprint_units_per_intervention": [len(x["outputs"]) for x in interventions],
-            "sprint_sequence_valid": [
-                len(x["outputs"]) == SPRINT_COUNT
-                for x in interventions
-            ],
             "advisor_ids": involved_ids,
+            "plan_quality": plan_debug,
+            "meta_generation_calls_expected": 1 + len(interventions),
         }
 
         self._validate_screen3_public_response(result)
