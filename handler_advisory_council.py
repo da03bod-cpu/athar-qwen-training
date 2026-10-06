@@ -2393,6 +2393,35 @@ class AtharCouncilEngine:
                 return True
             if normalized.endswith((":", "،", "؛", "-", "–", "—")):
                 return True
+
+            if "\\" in raw or "[" in raw or "]" in raw:
+                return True
+
+            corruption_patterns = (
+                r"\bتثبي\b",
+                r"\bخريدة\b",
+                r"\bجو\s+هر\w*\b",
+                r"\bالأهداب\b",
+                r"\bالاهداب\b",
+                r"\bالمشتراك\b",
+                r"\bالتدخلي\b",
+                r"\bمساهمت\b",
+                r"\bمؤشريين\b",
+                r"\bالتنففيذي\b",
+                r"\bالتنفيذيي\b",
+                r"\bتغتية\b",
+                r"\bأهدافة\b",
+                r"\bالتحاليل السابق\b",
+                r"\bتقييّم\b",
+                r"\bالتقييـم\b",
+                r"\bالمؤش\s+ّر\b",
+            )
+            if any(re.search(p, normalized, flags=re.I) for p in corruption_patterns):
+                return True
+
+            if re.search(r'(?:\\\\|["“”«»])\s*$', raw):
+                return True
+
             return False
 
         # ------------------------------------------------------------------
@@ -2617,6 +2646,33 @@ class AtharCouncilEngine:
                     ).strip()
                     if segment:
                         put(aid, segment)
+
+            # Ordered-line recovery: some generations follow the requested
+            # one-review-per-advisor order but omit the literal advisor slug.
+            # When the number of substantial lines exactly matches the number of
+            # still-missing advisors, map them by the authoritative supplied order.
+            missing_ordered = [aid for aid in involved_ids if aid not in reviews]
+            if missing_ordered:
+                candidate_lines: List[str] = []
+                for raw_line in clean.splitlines():
+                    line = re.sub(r"^[\s\-*•#>\d.)]+", "", raw_line.strip())
+                    if not line:
+                        continue
+                    if re.search(r"\bAOS-[A-Z]+-\d+\b", line, flags=re.I):
+                        continue
+                    line = re.sub(
+                        r"^(?:REVIEW|ASSESSMENT|META(?:_REVIEW)?|تعقيب|رأي\s+الميتا)\s*[:=|-]*\s*",
+                        "",
+                        line,
+                        flags=re.I,
+                    ).strip()
+                    cleaned_line = self._clean_meta_public_text(line, request)
+                    if len(cleaned_line) >= 28 and len(qtokens(cleaned_line)) >= 3:
+                        candidate_lines.append(cleaned_line)
+
+                if len(candidate_lines) == len(missing_ordered):
+                    for aid, msg in zip(missing_ordered, candidate_lines):
+                        put(aid, msg)
 
             return {
                 "reviews": reviews,
@@ -3357,7 +3413,7 @@ class AtharCouncilEngine:
 
             return list(dict.fromkeys(errors)), bad
 
-        SPRINT_FALLBACK_VERSION = "forced-approved-anchor-v2"
+        SPRINT_FALLBACK_VERSION = "precision-repair-before-fallback-v3"
 
         SPRINT_CHUNKS: List[List[int]] = [
             [1, 2, 3, 4],
@@ -3631,6 +3687,8 @@ class AtharCouncilEngine:
                     "Do not invent percentages, counts, budgets, dates, partners, staffing, resources, or capacity not present in the authoritative context.",
                     "Historical numbers are evidence, not automatic future targets.",
                     "Do not introduce a new strategic objective, identity project, governance project, or organizational redesign outside the approved intervention.",
+                    "Write natural, complete Modern Standard Arabic. Never output truncated words, malformed brackets, stray backslashes, broken quotation marks, or pseudo-placeholders.",
+                    "Name the actual artifact or decision produced that week instead of repeating generic words such as تنفيذ or مراجعة.",
                 ],
             }
 
@@ -3646,6 +3704,8 @@ class AtharCouncilEngine:
                     "Replace repeated/generic/unanchored text with concrete intervention-specific language.",
                     "Do not repeat wording from accepted_previous_sprints.",
                     "Do not change the approved intervention header.",
+                    "Rewrite corrupted or unnatural Arabic from scratch; do not copy malformed wording from previous_output.",
+                    "For each repaired sprint, use a concrete named artifact/result specific to this intervention, not a generic implementation template.",
                 ]
 
             return task_obj
@@ -3680,6 +3740,106 @@ class AtharCouncilEngine:
             )
             return parse_sprints(raw)
 
+        def precision_repair_single_sprint(
+            intervention: Dict[str, Any],
+            sprint_number: int,
+            *,
+            prior_outputs: List[Dict[str, Any]],
+            faulty_unit: Optional[Dict[str, Any]],
+            validation_errors: List[str],
+            attempt: int = 1,
+        ) -> Dict[str, Any]:
+            """Repair exactly ONE failed sprint before deterministic fallback."""
+            prior_compact: List[Dict[str, Any]] = []
+            for unit in prior_outputs[-6:]:
+                if not isinstance(unit, dict):
+                    continue
+                prior_compact.append({
+                    "sprint": unit.get("_sprint"),
+                    "result": unit.get("text"),
+                    "deliverables": [
+                        x.get("text")
+                        for x in (unit.get("results") or [])
+                        if isinstance(x, dict)
+                    ],
+                })
+
+            previous_row = None
+            if isinstance(faulty_unit, dict):
+                previous_row = {
+                    "sprint": faulty_unit.get("_sprint"),
+                    "result": faulty_unit.get("text"),
+                    "deliverables": [
+                        x.get("text")
+                        for x in (faulty_unit.get("results") or [])
+                        if isinstance(x, dict)
+                    ],
+                }
+
+            task_obj = {
+                "role": meta["slug"],
+                "task": (
+                    "Precision-repair exactly ONE weekly sprint for an already-approved "
+                    "Screen-3 intervention. Rewrite the sprint from scratch. "
+                    "Do not redesign the intervention."
+                ),
+                **authoritative_context,
+                "approved_intervention": {
+                    "title": intervention.get("title"),
+                    "confidence_level": intervention.get("confidence_level"),
+                    "impact_description": intervention.get("impact_description"),
+                    "reportable_value": intervention.get("reportable_value"),
+                },
+                "requested_sprint": sprint_number,
+                "sprint_purpose": SPRINT_PURPOSES[sprint_number],
+                "accepted_previous_sprints": prior_compact,
+                "faulty_previous_sprint": previous_row,
+                "validation_errors": validation_errors[:12],
+                "specialist_reasonings": council,
+                "attempt": attempt,
+                "required_protocol": (
+                    f"SPRINT={sprint_number}\n"
+                    "RESULT=<one specific achieved state by end of this week>\n"
+                    "TEXT=<one concrete mandatory deliverable executable within 5 working days>\n"
+                    "[TEXT=<optional second concrete deliverable>]\n"
+                    "[TEXT=<optional third concrete deliverable>]\n"
+                    "END_SPRINT"
+                ),
+                "mandatory_rules": [
+                    f"Return ONLY Sprint {sprint_number}; no other sprint number.",
+                    "Write complete, natural Modern Standard Arabic with no truncated or corrupted words.",
+                    "No square brackets, stray backslashes, pseudo-placeholders, or malformed quotation marks.",
+                    "RESULT must name a specific achieved state tied directly to the approved intervention.",
+                    "Each TEXT must name a concrete artifact, decision, dataset definition, measurement instrument, workflow, evidence record, or verified output that can be completed within 5 working days.",
+                    "Do not use generic filler such as تنفيذ التدخل, متابعة التدخل, مراجعة التدخل, استكمال المخرج, or equivalent.",
+                    "Do not copy wording from faulty_previous_sprint.",
+                    "Do not repeat accepted_previous_sprints.",
+                    "Use only facts and numbers grounded in the authoritative case or approved intervention.",
+                    "Do not invent a new program, partner, percentage, count, budget, staffing assumption, date, or strategic objective.",
+                ],
+            }
+
+            raw = self._generate(
+                meta_adapter,
+                meta["prompt"],
+                json.dumps(
+                    task_obj,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                520,
+                deterministic=True,
+                repetition_penalty=1.16 if attempt == 1 else 1.20,
+                no_repeat_ngram_size=7,
+            )
+            parsed = parse_sprints(raw)
+            parsed["outputs"] = [
+                x for x in (parsed.get("outputs") or [])
+                if isinstance(x, dict)
+                and int(x.get("_sprint") or 0) == sprint_number
+            ]
+            return parsed
+
         def merge_sprint_units(
             existing: List[Dict[str, Any]],
             incoming: List[Dict[str, Any]],
@@ -3698,14 +3858,14 @@ class AtharCouncilEngine:
             sprint_numbers: List[int],
             chunk: Dict[str, Any],
             prior_outputs: List[Dict[str, Any]],
-        ) -> tuple[Dict[str, Any], List[int], List[str]]:
+        ) -> tuple[Dict[str, Any], List[int], List[str], List[int]]:
             errors, bad = sprint_quality_errors(
                 chunk,
                 intervention,
                 expected_numbers=sprint_numbers,
             )
             if not errors:
-                return chunk, [], []
+                return chunk, [], [], []
 
             repaired = generate_sprint_chunk(
                 intervention,
@@ -3720,53 +3880,104 @@ class AtharCouncilEngine:
                 expected_numbers=sprint_numbers,
             )
             if not errors2:
-                return repaired, [], []
+                return repaired, [], [], []
 
-            # Preserve any valid repaired units and replace only the still-bad
-            # sprint rows with a deterministic intervention-grounded fallback.
             repaired_by_number = {
                 int(x.get("_sprint") or 0): x
                 for x in (repaired.get("outputs") or [])
                 if isinstance(x, dict)
             }
-            final_units: List[Dict[str, Any]] = []
-            fallback_numbers: List[int] = []
+
+            valid_fixed: List[Dict[str, Any]] = []
             for n in sprint_numbers:
                 candidate = repaired_by_number.get(n)
-                if candidate is None or n in bad2:
-                    candidate = deterministic_sprint_fallback(intervention, n)
+                if candidate is not None and n not in bad2:
+                    valid_fixed.append(candidate)
+
+            working_context = merge_sprint_units(prior_outputs, valid_fixed)
+            individual_repairs: List[int] = []
+            fallback_numbers: List[int] = []
+            final_units: List[Dict[str, Any]] = []
+
+            for n in sprint_numbers:
+                candidate = repaired_by_number.get(n)
+
+                if candidate is not None and n not in bad2:
+                    final_units.append(candidate)
+                    continue
+
+                single = precision_repair_single_sprint(
+                    intervention,
+                    n,
+                    prior_outputs=working_context,
+                    faulty_unit=candidate,
+                    validation_errors=errors2,
+                    attempt=1,
+                )
+                single_errors, _ = sprint_quality_errors(
+                    single,
+                    intervention,
+                    expected_numbers=[n],
+                )
+
+                if single_errors:
+                    faulty_single = (
+                        single["outputs"][0]
+                        if single.get("outputs")
+                        else candidate
+                    )
+                    single = precision_repair_single_sprint(
+                        intervention,
+                        n,
+                        prior_outputs=working_context,
+                        faulty_unit=faulty_single,
+                        validation_errors=single_errors,
+                        attempt=2,
+                    )
+                    single_errors, _ = sprint_quality_errors(
+                        single,
+                        intervention,
+                        expected_numbers=[n],
+                    )
+
+                if not single_errors and single.get("outputs"):
+                    chosen = single["outputs"][0]
+                    individual_repairs.append(n)
+                else:
+                    chosen = deterministic_sprint_fallback(intervention, n)
                     fallback_numbers.append(n)
-                final_units.append(candidate)
+
+                final_units.append(chosen)
+                working_context = merge_sprint_units(
+                    working_context,
+                    [chosen],
+                )
 
             final_plan = {
-                "outputs": final_units,
+                "outputs": sorted(
+                    final_units,
+                    key=lambda x: int(x.get("_sprint") or 0),
+                ),
                 "raw": repaired.get("raw"),
             }
+
             final_errors, final_bad = sprint_quality_errors(
                 final_plan,
                 intervention,
                 expected_numbers=sprint_numbers,
             )
 
-            # One deterministic self-heal pass for fallback rows only.
-            # Validation remains strict; we just rebuild our own fallback rows
-            # using the forced approved-intervention anchor above.
             if final_errors and final_bad:
                 fallback_set = set(fallback_numbers)
                 rebuildable = set(final_bad) & fallback_set
-
                 if rebuildable:
-                    rebuilt_units: List[Dict[str, Any]] = []
+                    rebuilt: List[Dict[str, Any]] = []
                     for unit in final_plan.get("outputs") or []:
                         n = int(unit.get("_sprint") or 0)
                         if n in rebuildable:
                             unit = deterministic_sprint_fallback(intervention, n)
-                        rebuilt_units.append(unit)
-
-                    final_plan = {
-                        "outputs": rebuilt_units,
-                        "raw": final_plan.get("raw"),
-                    }
+                        rebuilt.append(unit)
+                    final_plan["outputs"] = rebuilt
                     final_errors, final_bad = sprint_quality_errors(
                         final_plan,
                         intervention,
@@ -3775,12 +3986,12 @@ class AtharCouncilEngine:
 
             if final_errors:
                 raise ValueError(
-                    "Internal sprint fallback failed quality validation for "
-                    f"sprints {sorted(final_bad)}: "
+                    "Internal precision sprint planner could not produce a valid "
+                    f"chunk {sprint_numbers}; faulty={sorted(final_bad)}: "
                     + " | ".join(final_errors[:12])
                 )
 
-            return final_plan, fallback_numbers, errors2
+            return final_plan, fallback_numbers, errors2, individual_repairs
 
         def generate_chunked_sprint_plan(
             intervention: Dict[str, Any],
@@ -3789,6 +4000,7 @@ class AtharCouncilEngine:
             raw_chunks: List[str] = []
             fallback_sprints: List[int] = []
             repaired_chunks: List[List[int]] = []
+            individually_repaired_sprints: List[int] = []
 
             for sprint_numbers in SPRINT_CHUNKS:
                 chunk = generate_sprint_chunk(
@@ -3804,13 +4016,14 @@ class AtharCouncilEngine:
                 if initial_errors:
                     repaired_chunks.append(list(sprint_numbers))
 
-                chunk, chunk_fallbacks, _ = repair_chunk_or_fallback(
+                chunk, chunk_fallbacks, _, chunk_individual_repairs = repair_chunk_or_fallback(
                     intervention,
                     sprint_numbers,
                     chunk,
                     accepted,
                 )
                 fallback_sprints.extend(chunk_fallbacks)
+                individually_repaired_sprints.extend(chunk_individual_repairs)
                 accepted = merge_sprint_units(
                     accepted,
                     chunk.get("outputs") or [],
@@ -3826,46 +4039,75 @@ class AtharCouncilEngine:
             global_errors, global_bad = sprint_quality_errors(plan, intervention)
 
             if global_errors:
-                # Repair only the globally faulty rows, grouped into chunks of up
-                # to four. Never regenerate the whole 12-week plan.
-                bad_numbers = sorted(n for n in global_bad if 1 <= n <= SPRINT_COUNT)
-                for offset in range(0, len(bad_numbers), 4):
-                    subset = bad_numbers[offset:offset + 4]
-                    if not subset:
-                        continue
+                # Repair globally faulty rows one-by-one. Cross-chunk duplicate
+                # failures are exactly where multi-row repair tends to collapse again.
+                bad_numbers = sorted(
+                    n for n in global_bad
+                    if 1 <= n <= SPRINT_COUNT
+                )
 
+                for n in bad_numbers:
                     existing_good = [
                         unit for unit in accepted
-                        if int(unit.get("_sprint") or 0) not in subset
+                        if int(unit.get("_sprint") or 0) != n
                     ]
-                    repair = generate_sprint_chunk(
-                        intervention,
-                        subset,
-                        prior_outputs=existing_good,
-                        repair_errors=global_errors,
-                        previous_output=None,
+                    current = next(
+                        (
+                            unit for unit in accepted
+                            if int(unit.get("_sprint") or 0) == n
+                        ),
+                        None,
                     )
-                    repair_errors, repair_bad = sprint_quality_errors(
+
+                    repair = precision_repair_single_sprint(
+                        intervention,
+                        n,
+                        prior_outputs=existing_good,
+                        faulty_unit=current,
+                        validation_errors=global_errors,
+                        attempt=1,
+                    )
+                    repair_errors, _ = sprint_quality_errors(
                         repair,
                         intervention,
-                        expected_numbers=subset,
+                        expected_numbers=[n],
                     )
 
-                    repair_by_number = {
-                        int(x.get("_sprint") or 0): x
-                        for x in (repair.get("outputs") or [])
-                        if isinstance(x, dict)
-                    }
-                    replacements: List[Dict[str, Any]] = []
-                    for n in subset:
-                        candidate = repair_by_number.get(n)
-                        if candidate is None or n in repair_bad:
-                            candidate = deterministic_sprint_fallback(intervention, n)
-                            if n not in fallback_sprints:
-                                fallback_sprints.append(n)
-                        replacements.append(candidate)
+                    if repair_errors:
+                        repair = precision_repair_single_sprint(
+                            intervention,
+                            n,
+                            prior_outputs=existing_good,
+                            faulty_unit=(
+                                repair["outputs"][0]
+                                if repair.get("outputs")
+                                else current
+                            ),
+                            validation_errors=repair_errors,
+                            attempt=2,
+                        )
+                        repair_errors, _ = sprint_quality_errors(
+                            repair,
+                            intervention,
+                            expected_numbers=[n],
+                        )
 
-                    accepted = merge_sprint_units(existing_good, replacements)
+                    if not repair_errors and repair.get("outputs"):
+                        replacement = repair["outputs"][0]
+                        if n not in individually_repaired_sprints:
+                            individually_repaired_sprints.append(n)
+                    else:
+                        replacement = deterministic_sprint_fallback(
+                            intervention,
+                            n,
+                        )
+                        if n not in fallback_sprints:
+                            fallback_sprints.append(n)
+
+                    accepted = merge_sprint_units(
+                        existing_good,
+                        [replacement],
+                    )
 
                 plan = {
                     "outputs": accepted,
@@ -3884,7 +4126,9 @@ class AtharCouncilEngine:
             return plan, {
                 "architecture": "three_chunks_of_four",
                 "repaired_chunks": repaired_chunks,
+                "individually_repaired_sprints": sorted(set(individually_repaired_sprints)),
                 "fallback_sprints": sorted(set(fallback_sprints)),
+                "fallback_count": len(set(fallback_sprints)),
             }
 
         approved = strategy["interventions"]
@@ -3920,7 +4164,9 @@ class AtharCouncilEngine:
                 "quality_errors": [],
                 "planning_architecture": chunk_debug.get("architecture"),
                 "repaired_chunks": chunk_debug.get("repaired_chunks"),
+                "individually_repaired_sprints": chunk_debug.get("individually_repaired_sprints"),
                 "fallback_sprints": chunk_debug.get("fallback_sprints"),
+                "fallback_count": chunk_debug.get("fallback_count"),
             })
 
         # Pair every Specialist opinion with a genuinely advisor-specific Meta
@@ -3949,10 +4195,28 @@ class AtharCouncilEngine:
                 "message": f"تعقيبي على {aid}: {meta_reviews[aid]}",
             })
             sequence += 1
+        final_strategy_message = str(strategy.get("final") or "").strip()
+        if (
+            len(final_strategy_message) < 36
+            or broken_or_placeholder(final_strategy_message)
+            or "يبدأ بـ ثم" in final_strategy_message
+            or "ثم يعتمد على بقية المستشارين فقط" in final_strategy_message
+        ):
+            approved_titles = [
+                str(x.get("title") or "").strip()
+                for x in strategy.get("interventions") or []
+                if str(x.get("title") or "").strip()
+            ]
+            final_strategy_message = (
+                "اعتمد المجلس التدخلات التالية لخدمة هدف التحدي ضمن المعطيات المتاحة: "
+                + "؛ ".join(approved_titles)
+                + ". وسيُبنى التنفيذ الأسبوعي لكل تدخل على مخرجات قابلة للتحقق دون إضافة افتراضات غير مدعومة."
+            )
+
         transcript.append({
             "sequence": sequence,
             "from": "meta_advisor",
-            "message": strategy["final"],
+            "message": final_strategy_message,
         })
 
         result = {
@@ -3963,7 +4227,7 @@ class AtharCouncilEngine:
         }
 
         self._last_meta_debug = {
-            "architecture": "split_meta_reviews_then_strategy_then_per_intervention_12_sprints",
+            "architecture": "meta_reviews_strategy_then_chunked_sprints_with_precision_repair_v3",
             "meta_advisor_slug": meta["slug"],
             "meta_advisor_name": meta["name"],
             "meta_prompt_path": meta["prompt_path"],
@@ -4023,6 +4287,32 @@ class AtharCouncilEngine:
             json.dumps(self._shared_context(request), ensure_ascii=False, sort_keys=True)
         )
         source_numbers = self._extract_number_tokens(source_text)
+
+        arabic_ordinals = (
+            "الأول|الاول|الثاني|الثانى|الثالث|الرابع|الخامس|السادس|"
+            "السابع|الثامن|التاسع|العاشر|الحادي عشر|الحادى عشر|"
+            "الثاني عشر|الثانى عشر|الثالث عشر|الرابع عشر|الخامس عشر|"
+            "السادس عشر|السابع عشر|الثامن عشر|التاسع عشر|العشرون"
+        )
+
+        def strip_other_advisor_reference(value: str) -> str:
+            cleaned = str(value or "")
+            cleaned = re.sub(
+                r"\b(?:AOS|ATHAR)[-_][A-Z0-9-]+\b",
+                "",
+                cleaned,
+                flags=re.I,
+            )
+            referral = re.search(
+                rf"(?:^|[.!؟؛]\s*|\s)(?:المستشار|مستشار)\s+"
+                rf"(?:\d+|{arabic_ordinals})\b",
+                cleaned,
+                flags=re.I,
+            )
+            if referral:
+                cleaned = cleaned[:referral.start()].strip()
+            return re.sub(r"\s+", " ", cleaned).strip(" ،؛:.-–—")
+
         preferred: List[str] = []
         fallback: List[str] = []
         cue_terms = (
@@ -4040,6 +4330,9 @@ class AtharCouncilEngine:
             nums = self._extract_number_tokens(line)
             if any(n not in source_numbers for n in nums):
                 continue
+            line = strip_other_advisor_reference(line)
+            if len(line) < 24:
+                continue
             cleaned = self._clean_meta_public_text(line, request)
             if len(cleaned) < 24:
                 continue
@@ -4055,6 +4348,7 @@ class AtharCouncilEngine:
                 compact = re.sub(r"\b(?:AOS|ATHAR)[-_][A-Z0-9-]+\b", "", compact, flags=re.I)
             if any(n not in source_numbers for n in self._extract_number_tokens(compact)):
                 compact = ""
+            compact = strip_other_advisor_reference(compact)
             return self._clean_meta_public_text(compact, request)[:max_chars].strip()
 
         out: List[str] = []
