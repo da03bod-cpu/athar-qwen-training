@@ -2952,6 +2952,86 @@ class AtharCouncilEngine:
                 "raw": raw,
             }
 
+        def _strip_unsupported_strategy_numbers(
+            value: Any,
+        ) -> tuple[str, List[str]]:
+            """Remove unsupported numeric claims from Meta strategy headers."""
+            original = str(value or "").strip()
+            if not original:
+                return "", []
+
+            normalized = self._normalize_digits(original)
+            found = self._extract_number_tokens(normalized)
+            unsupported = sorted({n for n in found if n not in allowed_numbers})
+            if not unsupported:
+                return original, []
+
+            cleaned = normalized
+            for number in unsupported:
+                n = re.escape(str(number))
+
+                cleaned = re.sub(
+                    rf"(?:بنسبة|نسبة|بمعدل|معدل)\s*{n}\s*%?\s*",
+                    "",
+                    cleaned,
+                    flags=re.I,
+                )
+                cleaned = re.sub(
+                    rf"(?:خلال|لمدة|في غضون)\s*{n}\s*"
+                    r"(?:يوم(?:اً|ا)?|أيام|اسبوع|أسبوع|أسابيع|شهر|أشهر|سنة|سنوات)\b",
+                    "",
+                    cleaned,
+                    flags=re.I,
+                )
+                cleaned = re.sub(
+                    rf"(?<![\d.]){n}(?![\d.])\s*",
+                    "",
+                    cleaned,
+                )
+
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
+            cleaned = re.sub(r"\s+([،؛,.])", r"\1", cleaned)
+            cleaned = re.sub(r"([،؛]){2,}", r"\1", cleaned)
+            cleaned = cleaned.strip(" ،؛:.-–—")
+
+            if len(cleaned) < 8:
+                cleaned = "مخرج قابل للتحقق والتوثيق ضمن نطاق التدخل"
+
+            return cleaned, unsupported
+
+        def sanitize_strategy_headers(
+            parsed: Dict[str, Any],
+        ) -> Dict[str, Any]:
+            """
+            Remove unsupported numbers only from the intervention strategy
+            headers before quality validation. Grounded request numbers remain.
+            """
+            interventions = parsed.get("interventions") or []
+            sanitizations: List[Dict[str, Any]] = []
+
+            for i, intervention in enumerate(interventions, start=1):
+                if not isinstance(intervention, dict):
+                    continue
+
+                for field in ("title", "impact_description", "reportable_value"):
+                    if field not in intervention:
+                        continue
+
+                    before = str(intervention.get(field) or "")
+                    after, removed = _strip_unsupported_strategy_numbers(before)
+                    if removed:
+                        intervention[field] = after
+                        sanitizations.append({
+                            "intervention": i,
+                            "field": field,
+                            "removed_numbers": removed,
+                            "before": before,
+                            "after": after,
+                        })
+
+            parsed["_numeric_sanitizations"] = sanitizations
+            return parsed
+
         def strategy_errors(parsed: Dict[str, Any]) -> List[str]:
             errors: List[str] = []
 
@@ -3017,6 +3097,7 @@ class AtharCouncilEngine:
             return parse_strategy(raw)
 
         strategy = generate_strategy(strategy_task)
+        strategy = sanitize_strategy_headers(strategy)
         s_errors = strategy_errors(strategy)
         if s_errors:
             repair_task = dict(strategy_task)
@@ -3033,6 +3114,7 @@ class AtharCouncilEngine:
                 "Do not invent any unsupported number or target.",
             ]
             strategy = generate_strategy(repair_task)
+            strategy = sanitize_strategy_headers(strategy)
             s_errors = strategy_errors(strategy)
 
         if s_errors:
@@ -3530,6 +3612,7 @@ class AtharCouncilEngine:
                 "fallback_advisor_ids": fallback_review_ids,
                 "fallback_used": bool(fallback_review_ids),
             },
+            "strategy_numeric_sanitizations": strategy.get("_numeric_sanitizations", []),
         }
 
         self._validate_screen3_public_response(result)
