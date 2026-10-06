@@ -3141,6 +3141,287 @@ class AtharCouncilEngine:
                     errors.append(f"FINAL Meta synthesis contains unsupported numbers {nums}")
             return list(dict.fromkeys(errors))
 
+        def _single_intervention_errors(
+            item: Dict[str, Any],
+            *,
+            existing: Optional[List[Dict[str, Any]]] = None,
+        ) -> List[str]:
+            """Validate one intervention without requiring a full 2-3 portfolio."""
+            errors: List[str] = []
+
+            for key in ("title", "impact_description", "reportable_value"):
+                value = str(item.get(key) or "").strip()
+                if not value:
+                    errors.append(f"missing {key}")
+                    continue
+                if broken_or_placeholder(value):
+                    errors.append(f"{key} is generic/broken")
+                nums = unsupported_numbers(value)
+                if nums:
+                    errors.append(f"{key} contains unsupported numbers {nums}")
+
+            confidence = str(item.get("confidence_level") or "").lower()
+            if confidence not in {"high", "medium", "low"}:
+                errors.append("invalid confidence")
+
+            combined = " ".join([
+                str(item.get("title") or ""),
+                str(item.get("impact_description") or ""),
+                str(item.get("reportable_value") or ""),
+            ])
+            overlap = qtokens(combined) & authoritative_tokens
+            if len(overlap) < 2:
+                errors.append(
+                    "weakly grounded in authoritative goal/impact/program context"
+                )
+
+            for other in existing or []:
+                other_text = " ".join([
+                    str(other.get("title") or ""),
+                    str(other.get("impact_description") or ""),
+                    str(other.get("reportable_value") or ""),
+                ])
+                if text_similarity(combined, other_text) >= 0.62:
+                    errors.append(
+                        "not materially distinct from another approved intervention"
+                    )
+                    break
+
+            return list(dict.fromkeys(errors))
+
+        def _deterministic_strategy_final(
+            interventions: List[Dict[str, Any]],
+        ) -> str:
+            """Build a safe portfolio synthesis from approved titles only."""
+            titles = [
+                str(x.get("title") or "").strip()
+                for x in interventions
+                if str(x.get("title") or "").strip()
+            ]
+            return self._clean_meta_public_text(
+                (
+                    "اعتمد المجلس التدخلات التالية لخدمة هدف التحدي ضمن المعطيات "
+                    "المتاحة: "
+                    + "؛ ".join(titles)
+                    + ". وتتقاطع هذه التدخلات مع الهدف والبرامج القائمة دون إضافة "
+                    "افتراضات أو مستهدفات غير مدعومة."
+                ),
+                request,
+            )
+
+        def _generate_single_intervention_repair(
+            bad_item: Dict[str, Any],
+            valid_interventions: List[Dict[str, Any]],
+            validation_errors: List[str],
+            *,
+            attempt: int = 1,
+        ) -> Optional[Dict[str, Any]]:
+            """
+            Repair exactly ONE intervention header.
+
+            This is intentionally much cheaper and more focused than regenerating
+            the entire council synthesis after a single weak portfolio item.
+            """
+            task_obj = {
+                "role": meta["slug"],
+                "meta_advisor_name": meta["name"],
+                "task": (
+                    "Repair exactly ONE rejected Screen-3 intervention header. "
+                    "Do not regenerate the other approved interventions. "
+                    "Do not generate REVIEW lines or weekly sprints."
+                ),
+                **authoritative_context,
+                "specialist_reasonings": council,
+                "meta_reviews": meta_reviews,
+                "already_approved_interventions": valid_interventions,
+                "rejected_intervention": bad_item,
+                "validation_errors": validation_errors[:12],
+                "attempt": attempt,
+                "required_protocol": (
+                    "BEGIN_INTERVENTION\n"
+                    "TITLE=<specific Arabic intervention title grounded directly in the case>\n"
+                    "CONFIDENCE=<high|medium|low>\n"
+                    "IMPACT=<specific link to the supplied goal/social problem/impact driver/program>\n"
+                    "REPORTABLE=<verifiable reportable value without invented numbers>\n"
+                    "END_INTERVENTION"
+                ),
+                "mandatory_rules": [
+                    "Return exactly ONE intervention block and nothing else.",
+                    "Anchor the intervention directly to at least one supplied goal/impact/program concept and make that link explicit in TITLE, IMPACT, or REPORTABLE.",
+                    "Prefer named existing programs/projects or stated impact drivers when useful.",
+                    "Do not invent a new strategic objective, partner, percentage, count, budget, date, resource, or capacity.",
+                    "The repaired intervention must be materially distinct from already_approved_interventions.",
+                    "Write complete professional Arabic with no placeholders, broken words, brackets, or stray backslashes.",
+                ],
+            }
+
+            raw = self._generate(
+                meta_adapter,
+                meta["prompt"],
+                json.dumps(task_obj, ensure_ascii=False, separators=(",", ":")),
+                900,
+                deterministic=True,
+                repetition_penalty=1.10 if attempt == 1 else 1.14,
+                no_repeat_ngram_size=6,
+            )
+            parsed = sanitize_strategy_headers(parse_strategy(raw))
+            candidates = parsed.get("interventions") or []
+            if not candidates:
+                return None
+            return candidates[0]
+
+        def _recover_strategy_portfolio(
+            strategy_obj: Dict[str, Any],
+        ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+            """
+            Targeted recovery for a nearly-valid 2-3 intervention portfolio.
+
+            Priority:
+              1) If 3 were proposed and one local item is invalid, drop that item
+                 and continue with the two valid interventions.
+              2) If fewer than two valid interventions remain, repair only the
+                 rejected item(s), one at a time.
+              3) If 3 remain and two are duplicates, drop the later duplicate.
+              4) Rebuild FINAL deterministically from the approved titles.
+
+            No weak intervention is ever allowed through the quality gate.
+            """
+            interventions = [
+                dict(x)
+                for x in (strategy_obj.get("interventions") or [])
+                if isinstance(x, dict)
+            ]
+            debug = {
+                "targeted_recovery_used": False,
+                "dropped_intervention_indices": [],
+                "single_intervention_repairs": [],
+                "duplicate_pruned_indices": [],
+            }
+
+            # Identify locally invalid items independent of portfolio cardinality.
+            local_errors: Dict[int, List[str]] = {
+                i: _single_intervention_errors(item)
+                for i, item in enumerate(interventions)
+            }
+            bad_indices = [i for i, errs in local_errors.items() if errs]
+
+            # Best case: Meta gave 3 and only one is bad. Product allows 2-3, so
+            # removing the weak third is safer than inventing a replacement.
+            if len(interventions) == 3 and len(bad_indices) == 1:
+                bad_i = bad_indices[0]
+                candidate_remaining = [
+                    item for i, item in enumerate(interventions) if i != bad_i
+                ]
+                remaining_errors = [
+                    _single_intervention_errors(
+                        item,
+                        existing=[
+                            other
+                            for j, other in enumerate(candidate_remaining)
+                            if j != i
+                        ],
+                    )
+                    for i, item in enumerate(candidate_remaining)
+                ]
+                if all(not errs for errs in remaining_errors):
+                    interventions = candidate_remaining
+                    debug["targeted_recovery_used"] = True
+                    debug["dropped_intervention_indices"].append(bad_i + 1)
+
+            # Recompute local quality after optional safe pruning.
+            local_errors = {
+                i: _single_intervention_errors(
+                    item,
+                    existing=[
+                        other
+                        for j, other in enumerate(interventions)
+                        if j != i
+                    ],
+                )
+                for i, item in enumerate(interventions)
+            }
+            bad_indices = [i for i, errs in local_errors.items() if errs]
+
+            # Repair only rejected items if we do not already have two valid ones.
+            # Also repair when the portfolio has exactly 2 and one is invalid.
+            for bad_i in list(bad_indices):
+                valid_others = [
+                    item
+                    for i, item in enumerate(interventions)
+                    if i != bad_i and not local_errors.get(i)
+                ]
+
+                # With 3 items and two valid ones, we can safely drop an extra bad
+                # item rather than paying for another generation.
+                if len(interventions) > 2 and len(valid_others) >= 2:
+                    interventions.pop(bad_i)
+                    debug["targeted_recovery_used"] = True
+                    debug["dropped_intervention_indices"].append(bad_i + 1)
+                    break
+
+                original = interventions[bad_i]
+                repaired = None
+                repair_errors = local_errors[bad_i]
+
+                for attempt in (1, 2):
+                    proposal = _generate_single_intervention_repair(
+                        original,
+                        valid_others,
+                        repair_errors,
+                        attempt=attempt,
+                    )
+                    if proposal is None:
+                        continue
+
+                    proposal_errors = _single_intervention_errors(
+                        proposal,
+                        existing=valid_others,
+                    )
+                    if not proposal_errors:
+                        repaired = proposal
+                        break
+                    repair_errors = proposal_errors
+
+                if repaired is not None:
+                    interventions[bad_i] = repaired
+                    debug["targeted_recovery_used"] = True
+                    debug["single_intervention_repairs"].append(bad_i + 1)
+
+            # If a 3-item portfolio still has one duplicate pair, keep the earlier
+            # item and drop the later duplicate. Two interventions remain valid.
+            if len(interventions) == 3:
+                duplicate_to_drop: Optional[int] = None
+                for x in range(len(interventions)):
+                    for y in range(x + 1, len(interventions)):
+                        a = " ".join([
+                            str(interventions[x].get("title") or ""),
+                            str(interventions[x].get("impact_description") or ""),
+                            str(interventions[x].get("reportable_value") or ""),
+                        ])
+                        b = " ".join([
+                            str(interventions[y].get("title") or ""),
+                            str(interventions[y].get("impact_description") or ""),
+                            str(interventions[y].get("reportable_value") or ""),
+                        ])
+                        if text_similarity(a, b) >= 0.62:
+                            duplicate_to_drop = y
+                            break
+                    if duplicate_to_drop is not None:
+                        break
+
+                if duplicate_to_drop is not None:
+                    interventions.pop(duplicate_to_drop)
+                    debug["targeted_recovery_used"] = True
+                    debug["duplicate_pruned_indices"].append(
+                        duplicate_to_drop + 1
+                    )
+
+            recovered = dict(strategy_obj)
+            recovered["interventions"] = interventions
+            recovered["final"] = _deterministic_strategy_final(interventions)
+            recovered["_targeted_recovery"] = debug
+            return recovered, debug
+
         def generate_strategy(task_obj: Dict[str, Any]) -> Dict[str, Any]:
             raw = self._generate(
                 meta_adapter,
@@ -3173,9 +3454,24 @@ class AtharCouncilEngine:
             strategy = sanitize_strategy_headers(strategy)
             s_errors = strategy_errors(strategy)
 
+        strategy_recovery_debug = {
+            "targeted_recovery_used": False,
+            "dropped_intervention_indices": [],
+            "single_intervention_repairs": [],
+            "duplicate_pruned_indices": [],
+        }
+
+        if s_errors:
+            strategy, strategy_recovery_debug = _recover_strategy_portfolio(
+                strategy
+            )
+            strategy = sanitize_strategy_headers(strategy)
+            s_errors = strategy_errors(strategy)
+
         if s_errors:
             raise ValueError(
-                "Meta council synthesis failed Screen-3 quality gate: "
+                "Meta council synthesis failed Screen-3 quality gate after "
+                "targeted intervention recovery: "
                 + " | ".join(s_errors[:20])
             )
 
@@ -4227,7 +4523,7 @@ class AtharCouncilEngine:
         }
 
         self._last_meta_debug = {
-            "architecture": "meta_reviews_strategy_then_chunked_sprints_with_precision_repair_v3",
+            "architecture": "meta_reviews_strategy_targeted_recovery_then_precision_sprints_v4",
             "meta_advisor_slug": meta["slug"],
             "meta_advisor_name": meta["name"],
             "meta_prompt_path": meta["prompt_path"],
@@ -4244,6 +4540,7 @@ class AtharCouncilEngine:
                 "fallback_used": bool(fallback_review_ids),
             },
             "strategy_numeric_sanitizations": strategy.get("_numeric_sanitizations", []),
+            "strategy_targeted_recovery": strategy_recovery_debug,
         }
 
         self._validate_screen3_public_response(result)
