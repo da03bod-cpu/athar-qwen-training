@@ -20,6 +20,7 @@ It also exposes a zero-model preflight:
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -86,7 +87,7 @@ _ENGINE_LOCK = threading.RLock()
 _BASE_MODEL = None
 _TOKENIZER = None
 
-BOOT_VERSION = "athar-runpod-safe-entry-v3-lfs-autodiscovery"
+BOOT_VERSION = "athar-runpod-safe-entry-v3.1-lfs-autodiscovery"
 
 
 # ---------------------------------------------------------------------------
