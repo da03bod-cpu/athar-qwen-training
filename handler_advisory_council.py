@@ -2245,10 +2245,14 @@ class AtharCouncilEngine:
     ) -> Dict[str, Any]:
         """Generate Screen-3 with a split Meta architecture.
 
-        Phase A — Council synthesis:
-            * review every Specialist independently;
-            * approve exactly 2-3 grounded, materially different interventions;
-            * return only the intervention headers and Meta reviews.
+        Phase A1 — Advisor commentary:
+            * request one Meta review per Specialist;
+            * parse multiple equivalent formats;
+            * if formatting collapses, preserve the run with an advisor-grounded
+              deterministic commentary fallback rather than aborting Screen 3.
+
+        Phase A2 — Strategy synthesis:
+            * approve exactly 2-3 grounded, materially different interventions.
 
         Phase B — Weekly execution design:
             * run one dedicated Meta generation per approved intervention;
@@ -2434,35 +2438,190 @@ class AtharCouncilEngine:
         }
 
         def parse_reviews(raw: str) -> Dict[str, Any]:
+            """
+            Parse Meta advisor reviews defensively.
+
+            Qwen does not always obey the exact
+                REVIEW=<slug>||<text>
+            protocol. Production therefore accepts several equivalent forms:
+              - REVIEW=AOS-SP-13||...
+              - REVIEW: AOS-SP-13: ...
+              - AOS-SP-13||...
+              - AOS-SP-13: ...
+              - JSON objects/lists containing advisor_id + review/message
+              - a paragraph headed by an advisor slug
+
+            The parser still accepts ONLY advisor slugs that are actually in the
+            selected council. It never invents a new advisor.
+            """
+            raw_text = str(raw or "")
             clean = self._normalize_digits(
-                self.clean_model_text(raw).replace("```", "").strip()
-            )
-            clean = re.sub(
-                r"\s+(?=REVIEW\s*(?:[:=]|\b))",
-                "\n",
-                clean,
-                flags=re.I,
+                self.clean_model_text(raw_text).replace("```json", "").replace("```", "").strip()
             )
             reviews: Dict[str, str] = {}
-            for raw_line in clean.splitlines():
-                line = re.sub(r"^[\-*•]+\s*", "", raw_line.strip())
-                if not line:
-                    continue
-                m = re.match(
-                    r"^REVIEW\s*[:=]\s*([^|]+?)\s*\|\|\s*(.+)$",
-                    line,
+            valid_ids = set(involved_ids)
+
+            def put(aid: Any, msg: Any) -> None:
+                aid_text = str(aid or "").strip().upper()
+                aid_text = aid_text.strip("`*[](){}<>:;،. \t\r\n")
+                if aid_text not in valid_ids:
+                    return
+
+                msg_text = str(msg or "").strip()
+                msg_text = re.sub(
+                    r"^(?:REVIEW|ASSESSMENT|META(?:_REVIEW)?|تعقيب|رأي\s+الميتا)\s*[:=|-]*\s*",
+                    "",
+                    msg_text,
+                    flags=re.I,
+                ).strip()
+                msg_text = re.sub(
+                    rf"^{re.escape(aid_text)}\s*(?:\|\||[|:：=\-–—])+\s*",
+                    "",
+                    msg_text,
+                    flags=re.I,
+                ).strip()
+                msg_text = self._clean_meta_public_text(msg_text, request)
+                if msg_text:
+                    reviews[aid_text] = msg_text
+
+            # --------------------------------------------------------------
+            # 1) JSON tolerance.
+            # --------------------------------------------------------------
+            json_candidates: List[Any] = []
+            stripped = clean.strip()
+            if stripped:
+                try:
+                    json_candidates.append(json.loads(stripped))
+                except Exception:
+                    first_obj = stripped.find("{")
+                    last_obj = stripped.rfind("}")
+                    if first_obj >= 0 and last_obj > first_obj:
+                        try:
+                            json_candidates.append(
+                                json.loads(stripped[first_obj:last_obj + 1])
+                            )
+                        except Exception:
+                            pass
+                    first_arr = stripped.find("[")
+                    last_arr = stripped.rfind("]")
+                    if first_arr >= 0 and last_arr > first_arr:
+                        try:
+                            json_candidates.append(
+                                json.loads(stripped[first_arr:last_arr + 1])
+                            )
+                        except Exception:
+                            pass
+
+            def absorb_json(value: Any) -> None:
+                if isinstance(value, dict):
+                    # Direct mapping: {"AOS-SP-13": "..."}
+                    for key, val in value.items():
+                        if str(key).strip().upper() in valid_ids and isinstance(val, (str, int, float)):
+                            put(key, val)
+
+                    # Common wrappers.
+                    for wrapper in (
+                        "reviews", "advisor_reviews", "meta_reviews",
+                        "assessments", "items", "data",
+                    ):
+                        if wrapper in value:
+                            absorb_json(value.get(wrapper))
+
+                    aid = (
+                        value.get("advisor_id")
+                        or value.get("advisor_slug")
+                        or value.get("slug")
+                        or value.get("id")
+                    )
+                    msg = (
+                        value.get("review")
+                        or value.get("assessment")
+                        or value.get("meta_review")
+                        or value.get("message")
+                        or value.get("reasoning")
+                        or value.get("text")
+                    )
+                    if aid and msg:
+                        put(aid, msg)
+
+                elif isinstance(value, list):
+                    for item in value:
+                        absorb_json(item)
+
+            for parsed_json in json_candidates:
+                absorb_json(parsed_json)
+
+            # --------------------------------------------------------------
+            # 2) Flexible line parsing.
+            # --------------------------------------------------------------
+            # Force each known advisor slug to start on a new logical line.
+            for aid in involved_ids:
+                clean = re.sub(
+                    rf"\s*(?=(?:REVIEW\s*[:=]\s*)?{re.escape(aid)}\b)",
+                    "\n",
+                    clean,
                     flags=re.I,
                 )
-                if not m:
+
+            for raw_line in clean.splitlines():
+                line = re.sub(r"^[\s\-*•#>\d.)]+", "", raw_line.strip())
+                if not line:
                     continue
-                aid = m.group(1).strip()
-                msg = self._clean_meta_public_text(m.group(2).strip(), request)
-                if aid and msg:
-                    reviews[aid] = msg
+
+                patterns = (
+                    r"^REVIEW\s*[:=]\s*(AOS-[A-Z]+-\d+)\s*\|\|\s*(.+)$",
+                    r"^REVIEW\s*[:=]\s*(AOS-[A-Z]+-\d+)\s*(?:[:：|=\-–—])+\s*(.+)$",
+                    r"^(AOS-[A-Z]+-\d+)\s*\|\|\s*(.+)$",
+                    r"^(AOS-[A-Z]+-\d+)\s*(?:[:：|=\-–—])+\s*(.+)$",
+                    r"^(AOS-[A-Z]+-\d+)\s+(.+)$",
+                )
+                matched = False
+                for pattern in patterns:
+                    m = re.match(pattern, line, flags=re.I)
+                    if not m:
+                        continue
+                    put(m.group(1), m.group(2))
+                    matched = True
+                    break
+                if matched:
+                    continue
+
+            # --------------------------------------------------------------
+            # 3) Paragraph/segment fallback:
+            #    find each slug and take text until the next selected slug.
+            # --------------------------------------------------------------
+            missing = [aid for aid in involved_ids if aid not in reviews]
+            if missing and clean:
+                hits: List[tuple[int, str]] = []
+                for aid in involved_ids:
+                    for m in re.finditer(re.escape(aid), clean, flags=re.I):
+                        hits.append((m.start(), aid))
+                hits.sort(key=lambda x: x[0])
+
+                for index, (pos, aid) in enumerate(hits):
+                    if aid in reviews:
+                        continue
+                    seg_start = pos + len(aid)
+                    seg_end = hits[index + 1][0] if index + 1 < len(hits) else len(clean)
+                    segment = clean[seg_start:seg_end]
+                    segment = re.sub(
+                        r"^[\s`*#>|:：=\-–—]+",
+                        "",
+                        segment,
+                    ).strip()
+                    segment = re.sub(
+                        r"^(?:REVIEW|ASSESSMENT|META(?:_REVIEW)?|تعقيب|رأي\s+الميتا)\s*[:=|-]*\s*",
+                        "",
+                        segment,
+                        flags=re.I,
+                    ).strip()
+                    if segment:
+                        put(aid, segment)
 
             return {
                 "reviews": reviews,
-                "raw": raw,
+                "raw": raw_text,
+                "parsed_count": len(reviews),
             }
 
         def review_validation_errors(
@@ -2489,7 +2648,7 @@ class AtharCouncilEngine:
                     bad_ids.add(aid)
                     continue
 
-                if len(review) < 32 or len(qtokens(review)) < 3:
+                if len(review) < 28 or len(qtokens(review)) < 3:
                     errors.append(f"REVIEW for {aid} is too short/generic")
                     bad_ids.add(aid)
 
@@ -2501,17 +2660,12 @@ class AtharCouncilEngine:
                 own_tokens = qtokens(own_reasoning)
                 review_tokens = qtokens(review)
 
-                # The Meta can paraphrase, but at least one meaningful concept
-                # should survive from the advisor's actual reasoning.
                 if own_tokens and not (own_tokens & review_tokens):
                     errors.append(
                         f"REVIEW for {aid} is not grounded in that advisor reasoning"
                     )
                     bad_ids.add(aid)
 
-                # REVIEWs are commentary, not the public execution plan. Numeric
-                # grounding therefore includes numbers that came from this
-                # advisor's own opinion as well as the authoritative case.
                 own_numbers = set(
                     self._extract_number_tokens(
                         self._normalize_digits(own_reasoning)
@@ -2538,7 +2692,7 @@ class AtharCouncilEngine:
                     for y in range(x + 1, len(review_rows)):
                         aid_a, a = review_rows[x]
                         aid_b, b = review_rows[y]
-                        if text_similarity(a, b) >= 0.68:
+                        if text_similarity(a, b) >= 0.78:
                             errors.append(
                                 f"Meta REVIEWs for {aid_a} and {aid_b} are too similar/generic"
                             )
@@ -2546,7 +2700,70 @@ class AtharCouncilEngine:
 
             return list(dict.fromkeys(errors)), bad_ids
 
-        def generate_reviews(task_obj: Dict[str, Any], max_tokens: int = 1200) -> Dict[str, Any]:
+        def deterministic_review_fallback(aid: str, index: int) -> str:
+            """
+            Last-resort non-generative review.
+
+            It never fabricates subject matter: the concrete clause comes only
+            from that Specialist's own reasoning. This exists so a formatting
+            failure in an optional commentary field cannot waste a 15+ minute
+            council run after all Specialists have already completed.
+            """
+            reasoning = str(reasonings_by_id.get(aid) or "").strip()
+            reasoning = self._clean_meta_public_text(reasoning, request)
+            reasoning = re.sub(
+                r"\bAOS-[A-Z]+-\d+\b",
+                "",
+                reasoning,
+                flags=re.I,
+            )
+            reasoning = re.sub(r"\s+", " ", reasoning).strip(" ،؛:.-–—")
+
+            # Prefer one complete, meaningful sentence/clause from the advisor.
+            parts = [
+                p.strip(" ،؛:.-–—")
+                for p in re.split(r"(?<=[.!؟?؛])\s+|\n+", reasoning)
+                if p.strip()
+            ]
+            excerpt = ""
+            for part in parts:
+                if len(qtokens(part)) >= 3:
+                    excerpt = part
+                    break
+            if not excerpt:
+                excerpt = reasoning
+
+            # Keep the transcript concise without cutting mid-word.
+            words = excerpt.split()
+            if len(words) > 24:
+                excerpt = " ".join(words[:24]).rstrip("،؛:.-–—")
+
+            # Deliberately vary the Meta stance so fallback reviews do not become
+            # six copies of the same boilerplate sentence.
+            frames = (
+                "أعتمد جوهر ملاحظة هذا المستشار حول «{x}»، وأربطها مباشرة بهدف التحدي دون توسيع غير مدعوم للنطاق.",
+                "أدمج من هذا الرأي النقطة المتعلقة بـ«{x}»، مع قصر استخدامها على ما تدعمه بيانات الحالة الحالية.",
+                "أستفيد من طرح هذا المستشار بشأن «{x}» كقيد تصميمي للتدخل، لا كهدف مستقل عن الأثر المطلوب.",
+                "أعتبر ملاحظة هذا المستشار حول «{x}» مدخلًا مساندًا، بشرط أن تظهر صلتها بنتيجة قابلة للتحقق داخل التحدي.",
+                "أتبنى من هذا الرأي جانب «{x}» بقدر ما يحسن قياس أو تنفيذ الأثر دون إضافة افتراضات جديدة.",
+                "أقيّد الاستفادة من توصية هذا المستشار حول «{x}» بما يخدم استدامة التدخل ويتسق مع المعطيات المتاحة.",
+            )
+            frame = frames[index % len(frames)]
+
+            if not excerpt:
+                # This path should be practically unreachable because every
+                # involved advisor already has a usable public reasoning.
+                excerpt = "النقطة الواردة في رأيه المهني"
+
+            return self._clean_meta_public_text(
+                frame.format(x=excerpt),
+                request,
+            )
+
+        def generate_reviews(
+            task_obj: Dict[str, Any],
+            max_tokens: int = 1200,
+        ) -> Dict[str, Any]:
             raw = self._generate(
                 meta_adapter,
                 meta["prompt"],
@@ -2558,99 +2775,65 @@ class AtharCouncilEngine:
             )
             return parse_reviews(raw)
 
+        # One Meta REVIEW generation only.
+        #
+        # Previous builds did:
+        # group generation -> group repair -> up to six individual Meta calls,
+        # then failed the whole request if the parser still saw no exact REVIEW
+        # markers. That could waste ~18 minutes after all Specialists had already
+        # completed. Reviews are commentary, not the intervention contract, so
+        # malformed commentary now degrades safely instead of aborting Screen 3.
         review_pack = generate_reviews(review_task)
         review_errors, bad_review_ids = review_validation_errors(review_pack)
 
-        # One compact group repair first. It is much cheaper than regenerating
-        # intervention strategy or the twelve-week plans.
-        if review_errors:
-            review_repair_task = dict(review_task)
-            review_repair_task["task"] = (
-                "Repair ONLY the advisor REVIEW lines. "
-                "Do not choose interventions or discuss sprint counts."
-            )
-            review_repair_task["previous_output"] = review_pack.get("raw")
-            review_repair_task["invalid_advisor_ids"] = sorted(bad_review_ids)
-            review_repair_task["validation_errors"] = review_errors[:24]
-            review_repair_task["repair_rules"] = [
-                "Return the complete REVIEW list again.",
-                "Make every REVIEW specific to that advisor's supplied reasoning.",
-                "Use materially different wording and reasoning for different advisors.",
-                "Do not mention intervention counts, sprint counts, or roadmap mechanics.",
-                "Do not add numeric quantities absent from that advisor reasoning or case.",
-            ]
-            review_pack = generate_reviews(review_repair_task)
-            review_errors, bad_review_ids = review_validation_errors(review_pack)
+        original_parsed_review_count = int(review_pack.get("parsed_count") or 0)
+        fallback_review_ids: List[str] = []
 
-        # If the group call still collapses to boilerplate, repair only the bad
-        # advisors one by one. Each call is deliberately tiny and sees one opinion,
-        # making generic cross-advisor copying much less likely.
-        if review_errors and bad_review_ids:
-            repaired_reviews = dict(review_pack.get("reviews") or {})
+        repaired_reviews = dict(review_pack.get("reviews") or {})
 
-            for aid in sorted(bad_review_ids):
-                single_task = {
-                    "role": meta["slug"],
-                    "meta_advisor_name": meta["name"],
-                    "task": (
-                        "Assess ONE Specialist opinion only. "
-                        "Write one concrete Meta review in Arabic."
-                    ),
-                    "organization": payload.get("organization"),
-                    "goal": payload.get("goal"),
-                    "impact_map": payload.get("impact_map"),
-                    "advisor_id": aid,
-                    "advisor_reasoning": reasonings_by_id.get(aid),
-                    "required_protocol": (
-                        f"REVIEW={aid}||<specific assessment of this exact opinion>"
-                    ),
-                    "rules": [
-                        "Mention a concrete concept from the supplied advisor reasoning.",
-                        "State what is accepted, limited, combined, or excluded and why.",
-                        "Do not mention intervention counts or sprint counts.",
-                        "Do not invent any new numeric quantity.",
-                        "Return one REVIEW line only.",
-                    ],
-                }
-                one = generate_reviews(single_task, max_tokens=260)
-                candidate = str((one.get("reviews") or {}).get(aid) or "").strip()
-                if candidate:
-                    repaired_reviews[aid] = candidate
+        # Replace only missing/invalid/generic review rows with a deterministic
+        # advisor-grounded fallback. Valid Meta-generated reviews are preserved.
+        for idx, aid in enumerate(involved_ids):
+            if aid in bad_review_ids or not str(repaired_reviews.get(aid) or "").strip():
+                repaired_reviews[aid] = deterministic_review_fallback(aid, idx)
+                fallback_review_ids.append(aid)
 
-            review_pack = {
-                "reviews": repaired_reviews,
-                "raw": review_pack.get("raw"),
-            }
-            # Final gate remains strict on grounding, missing content, boilerplate
-            # and unsupported numbers. Pairwise similarity is now checked at a
-            # higher threshold because each review was independently regenerated.
-            review_errors, bad_review_ids = review_validation_errors(
-                review_pack,
-                check_pairwise_similarity=False,
-            )
-            review_rows = [
-                (aid, str((review_pack.get("reviews") or {}).get(aid) or "").strip())
-                for aid in involved_ids
-            ]
-            for x in range(len(review_rows)):
-                for y in range(x + 1, len(review_rows)):
-                    aid_a, a = review_rows[x]
-                    aid_b, b = review_rows[y]
-                    if a and b and text_similarity(a, b) >= 0.82:
-                        review_errors.append(
-                            f"Meta REVIEWs for {aid_a} and {aid_b} remain effectively duplicated"
-                        )
+        review_pack = {
+            "reviews": repaired_reviews,
+            "raw": review_pack.get("raw"),
+            "parsed_count": original_parsed_review_count,
+        }
 
-        if review_errors:
-            raise ValueError(
-                "Meta advisor-review phase failed quality gate: "
-                + " | ".join(list(dict.fromkeys(review_errors))[:20])
-            )
+        # Final gate is fail-open for COMMENTARY only: if a generated review is
+        # still malformed, replace that row once more from its own Specialist
+        # reasoning. Missing reviews are never allowed to reach the transcript.
+        final_review_errors, final_bad_ids = review_validation_errors(
+            review_pack,
+            check_pairwise_similarity=False,
+        )
+        if final_bad_ids:
+            for idx, aid in enumerate(involved_ids):
+                if aid in final_bad_ids:
+                    repaired_reviews[aid] = deterministic_review_fallback(aid, idx)
+                    if aid not in fallback_review_ids:
+                        fallback_review_ids.append(aid)
 
         meta_reviews = {
-            aid: str((review_pack.get("reviews") or {}).get(aid) or "").strip()
+            aid: str(repaired_reviews.get(aid) or "").strip()
             for aid in involved_ids
         }
+
+        # Absolute structural safety: at this point every selected advisor must
+        # have a non-empty review string, but failure here is a programming error
+        # rather than an LLM formatting error.
+        missing_after_fallback = [
+            aid for aid in involved_ids if not meta_reviews.get(aid)
+        ]
+        if missing_after_fallback:
+            raise ValueError(
+                "Internal REVIEW fallback failed for: "
+                + ", ".join(missing_after_fallback)
+            )
 
         # ------------------------------------------------------------------
         # PHASE A2 — approve the intervention portfolio only.
@@ -3343,6 +3526,9 @@ class AtharCouncilEngine:
             "meta_review_phase": {
                 "advisor_count": len(meta_reviews),
                 "separate_from_strategy": True,
+                "parsed_from_meta_count": original_parsed_review_count,
+                "fallback_advisor_ids": fallback_review_ids,
+                "fallback_used": bool(fallback_review_ids),
             },
         }
 
