@@ -2392,33 +2392,295 @@ class AtharCouncilEngine:
             return False
 
         # ------------------------------------------------------------------
-        # PHASE A — approve the intervention portfolio + advisor reviews.
+        # PHASE A1 — Meta reviews each Specialist independently.
+        #
+        # This is intentionally a separate generation from intervention selection.
+        # Earlier builds asked Meta to review advisors AND choose "2-3 interventions"
+        # in one output. Qwen leaked those strategy numbers into every REVIEW and
+        # collapsed into the same generic sentence. Keeping REVIEW synthesis isolated
+        # removes that cross-task contamination.
+        # ------------------------------------------------------------------
+        review_protocol = (
+            "Return ONLY REVIEW lines; no JSON, Markdown, intervention count, sprint count, or FINAL line.\n"
+            "Return exactly one line for every supplied advisor:\n"
+            "REVIEW=<advisor_slug>||<one concise, advisor-specific Meta assessment in Arabic>\n"
+            "The assessment must identify a concrete point from THAT advisor, then state what the Meta accepts, limits, combines, or excludes and why.\n"
+            "Do not copy the same sentence structure across advisors.\n"
+            "Do not introduce any numeric quantity unless that exact quantity exists in that advisor reasoning or the authoritative case."
+        )
+
+        review_task = {
+            "role": meta["slug"],
+            "meta_advisor_name": meta["name"],
+            "task": (
+                "Review each independent Specialist opinion separately. "
+                "This call is ONLY for advisor-by-advisor Meta assessments. "
+                "Do not choose interventions and do not design weekly sprints."
+            ),
+            **authoritative_context,
+            "specialist_reasonings": council,
+            "required_protocol": review_protocol,
+            "mandatory_rules": [
+                "Return one REVIEW for every advisor_id supplied, exactly once.",
+                "Use the advisor slug exactly as supplied.",
+                "Each REVIEW must be tied to a concrete concept in that advisor's own reasoning.",
+                "State what is accepted, limited, combined, or excluded and why.",
+                "Do not use a generic sentence that could apply to another advisor.",
+                "Do not mention how many interventions will be generated.",
+                "Do not mention sprint counts or roadmap mechanics.",
+                "Do not invent numbers, percentages, budgets, dates, partners, staffing, resources, or capacity.",
+                "Keep each REVIEW concise and professionally written in Arabic.",
+            ],
+        }
+
+        def parse_reviews(raw: str) -> Dict[str, Any]:
+            clean = self._normalize_digits(
+                self.clean_model_text(raw).replace("```", "").strip()
+            )
+            clean = re.sub(
+                r"\s+(?=REVIEW\s*(?:[:=]|\b))",
+                "\n",
+                clean,
+                flags=re.I,
+            )
+            reviews: Dict[str, str] = {}
+            for raw_line in clean.splitlines():
+                line = re.sub(r"^[\-*•]+\s*", "", raw_line.strip())
+                if not line:
+                    continue
+                m = re.match(
+                    r"^REVIEW\s*[:=]\s*([^|]+?)\s*\|\|\s*(.+)$",
+                    line,
+                    flags=re.I,
+                )
+                if not m:
+                    continue
+                aid = m.group(1).strip()
+                msg = self._clean_meta_public_text(m.group(2).strip(), request)
+                if aid and msg:
+                    reviews[aid] = msg
+
+            return {
+                "reviews": reviews,
+                "raw": raw,
+            }
+
+        def review_validation_errors(
+            parsed: Dict[str, Any],
+            *,
+            check_pairwise_similarity: bool = True,
+        ) -> tuple[List[str], set[str]]:
+            errors: List[str] = []
+            bad_ids: set[str] = set()
+            reviews = parsed.get("reviews") or {}
+            review_rows: List[tuple[str, str]] = []
+
+            generic_phrases = (
+                "تغطي التوصية الأساسية جوهر التوصيات الاستشارية",
+                "مع إضافة منطق التوافق الداخلي والاعتماديات المؤثرة",
+                "يتوافق هذا الرأي مع التوجه العام",
+                "الرأي مناسب ويمكن الاستفادة منه",
+            )
+
+            for aid in involved_ids:
+                review = str(reviews.get(aid) or "").strip()
+                if not review:
+                    errors.append(f"missing REVIEW for {aid}")
+                    bad_ids.add(aid)
+                    continue
+
+                if len(review) < 32 or len(qtokens(review)) < 3:
+                    errors.append(f"REVIEW for {aid} is too short/generic")
+                    bad_ids.add(aid)
+
+                if any(phrase in review for phrase in generic_phrases):
+                    errors.append(f"REVIEW for {aid} uses known generic boilerplate")
+                    bad_ids.add(aid)
+
+                own_reasoning = reasonings_by_id.get(aid) or ""
+                own_tokens = qtokens(own_reasoning)
+                review_tokens = qtokens(review)
+
+                # The Meta can paraphrase, but at least one meaningful concept
+                # should survive from the advisor's actual reasoning.
+                if own_tokens and not (own_tokens & review_tokens):
+                    errors.append(
+                        f"REVIEW for {aid} is not grounded in that advisor reasoning"
+                    )
+                    bad_ids.add(aid)
+
+                # REVIEWs are commentary, not the public execution plan. Numeric
+                # grounding therefore includes numbers that came from this
+                # advisor's own opinion as well as the authoritative case.
+                own_numbers = set(
+                    self._extract_number_tokens(
+                        self._normalize_digits(own_reasoning)
+                    )
+                )
+                review_allowed_numbers = allowed_numbers | own_numbers
+                nums = sorted(
+                    n
+                    for n in self._extract_number_tokens(
+                        self._normalize_digits(review)
+                    )
+                    if n not in review_allowed_numbers
+                )
+                if nums:
+                    errors.append(
+                        f"REVIEW for {aid} contains unsupported numbers {nums}"
+                    )
+                    bad_ids.add(aid)
+
+                review_rows.append((aid, review))
+
+            if check_pairwise_similarity:
+                for x in range(len(review_rows)):
+                    for y in range(x + 1, len(review_rows)):
+                        aid_a, a = review_rows[x]
+                        aid_b, b = review_rows[y]
+                        if text_similarity(a, b) >= 0.68:
+                            errors.append(
+                                f"Meta REVIEWs for {aid_a} and {aid_b} are too similar/generic"
+                            )
+                            bad_ids.update({aid_a, aid_b})
+
+            return list(dict.fromkeys(errors)), bad_ids
+
+        def generate_reviews(task_obj: Dict[str, Any], max_tokens: int = 1200) -> Dict[str, Any]:
+            raw = self._generate(
+                meta_adapter,
+                meta["prompt"],
+                json.dumps(task_obj, ensure_ascii=False, separators=(",", ":")),
+                max_tokens,
+                deterministic=True,
+                repetition_penalty=1.10,
+                no_repeat_ngram_size=5,
+            )
+            return parse_reviews(raw)
+
+        review_pack = generate_reviews(review_task)
+        review_errors, bad_review_ids = review_validation_errors(review_pack)
+
+        # One compact group repair first. It is much cheaper than regenerating
+        # intervention strategy or the twelve-week plans.
+        if review_errors:
+            review_repair_task = dict(review_task)
+            review_repair_task["task"] = (
+                "Repair ONLY the advisor REVIEW lines. "
+                "Do not choose interventions or discuss sprint counts."
+            )
+            review_repair_task["previous_output"] = review_pack.get("raw")
+            review_repair_task["invalid_advisor_ids"] = sorted(bad_review_ids)
+            review_repair_task["validation_errors"] = review_errors[:24]
+            review_repair_task["repair_rules"] = [
+                "Return the complete REVIEW list again.",
+                "Make every REVIEW specific to that advisor's supplied reasoning.",
+                "Use materially different wording and reasoning for different advisors.",
+                "Do not mention intervention counts, sprint counts, or roadmap mechanics.",
+                "Do not add numeric quantities absent from that advisor reasoning or case.",
+            ]
+            review_pack = generate_reviews(review_repair_task)
+            review_errors, bad_review_ids = review_validation_errors(review_pack)
+
+        # If the group call still collapses to boilerplate, repair only the bad
+        # advisors one by one. Each call is deliberately tiny and sees one opinion,
+        # making generic cross-advisor copying much less likely.
+        if review_errors and bad_review_ids:
+            repaired_reviews = dict(review_pack.get("reviews") or {})
+
+            for aid in sorted(bad_review_ids):
+                single_task = {
+                    "role": meta["slug"],
+                    "meta_advisor_name": meta["name"],
+                    "task": (
+                        "Assess ONE Specialist opinion only. "
+                        "Write one concrete Meta review in Arabic."
+                    ),
+                    "organization": payload.get("organization"),
+                    "goal": payload.get("goal"),
+                    "impact_map": payload.get("impact_map"),
+                    "advisor_id": aid,
+                    "advisor_reasoning": reasonings_by_id.get(aid),
+                    "required_protocol": (
+                        f"REVIEW={aid}||<specific assessment of this exact opinion>"
+                    ),
+                    "rules": [
+                        "Mention a concrete concept from the supplied advisor reasoning.",
+                        "State what is accepted, limited, combined, or excluded and why.",
+                        "Do not mention intervention counts or sprint counts.",
+                        "Do not invent any new numeric quantity.",
+                        "Return one REVIEW line only.",
+                    ],
+                }
+                one = generate_reviews(single_task, max_tokens=260)
+                candidate = str((one.get("reviews") or {}).get(aid) or "").strip()
+                if candidate:
+                    repaired_reviews[aid] = candidate
+
+            review_pack = {
+                "reviews": repaired_reviews,
+                "raw": review_pack.get("raw"),
+            }
+            # Final gate remains strict on grounding, missing content, boilerplate
+            # and unsupported numbers. Pairwise similarity is now checked at a
+            # higher threshold because each review was independently regenerated.
+            review_errors, bad_review_ids = review_validation_errors(
+                review_pack,
+                check_pairwise_similarity=False,
+            )
+            review_rows = [
+                (aid, str((review_pack.get("reviews") or {}).get(aid) or "").strip())
+                for aid in involved_ids
+            ]
+            for x in range(len(review_rows)):
+                for y in range(x + 1, len(review_rows)):
+                    aid_a, a = review_rows[x]
+                    aid_b, b = review_rows[y]
+                    if a and b and text_similarity(a, b) >= 0.82:
+                        review_errors.append(
+                            f"Meta REVIEWs for {aid_a} and {aid_b} remain effectively duplicated"
+                        )
+
+        if review_errors:
+            raise ValueError(
+                "Meta advisor-review phase failed quality gate: "
+                + " | ".join(list(dict.fromkeys(review_errors))[:20])
+            )
+
+        meta_reviews = {
+            aid: str((review_pack.get("reviews") or {}).get(aid) or "").strip()
+            for aid in involved_ids
+        }
+
+        # ------------------------------------------------------------------
+        # PHASE A2 — approve the intervention portfolio only.
+        #
+        # Advisor reviews are already finished above, so numbers such as "2-3"
+        # used by the intervention-selection protocol cannot contaminate REVIEWs.
         # ------------------------------------------------------------------
         strategy_protocol = (
             "Return ONLY this plain-text protocol; no JSON or Markdown.\n"
-            "For EVERY involved advisor exactly once:\n"
-            "REVIEW=<advisor_slug>||<specific Meta assessment of that advisor's actual point; state what is accepted, limited, or changed and why>\n"
-            "Then exactly 2 or 3 approved intervention headers:\n"
+            "Return exactly 2 or 3 approved intervention headers:\n"
             "BEGIN_INTERVENTION\n"
             "TITLE=<specific Arabic intervention title grounded in the case>\n"
             "CONFIDENCE=<high|medium|low>\n"
             "IMPACT=<specific link to the social problem / goal / impact driver>\n"
             "REPORTABLE=<measurable reportable value without invented numbers>\n"
             "END_INTERVENTION\n"
-            "After the last block: FINAL=<brief synthesis explaining why these interventions together form the 90-day route>\n"
-            "Never use || except on REVIEW lines."
+            "After the last block: FINAL=<brief synthesis explaining why these interventions together form the 90-day route>"
         )
 
         strategy_task = {
             "role": meta["slug"],
             "meta_advisor_name": meta["name"],
             "task": (
-                "Lead the Athar OS council. First review the independent Specialist "
-                "opinions, then approve the small portfolio of interventions for the "
-                "90-day Impact Challenge. DO NOT generate weekly sprints in this call."
+                "Approve the small portfolio of interventions for the 90-day "
+                "Impact Challenge. Advisor-by-advisor reviews are already complete. "
+                "DO NOT output REVIEW lines and DO NOT generate weekly sprints."
             ),
             **authoritative_context,
             "specialist_reasonings": council,
+            "meta_reviews": meta_reviews,
             "required_protocol": strategy_protocol,
             "mandatory_rules": [
                 "Approve exactly 2 interventions by default; approve a third only when it adds an independent strategic path that the first two do not cover.",
@@ -2427,9 +2689,7 @@ class AtharCouncilEngine:
                 "The interventions must be materially different from each other and together converge on the same primary 90-day goal.",
                 "Do not invent percentages, counts, budgets, dates, partners, staffing, resources, or capacity.",
                 "REPORTABLE must describe something the organization can verify or report; if no grounded numeric target exists, use a measurable completion/status/quality statement without fabricating a number.",
-                "For each Specialist, REVIEW must discuss a concrete point from that advisor's reasoning; never reuse the same generic review sentence for multiple advisors.",
-                "A REVIEW should say what the Meta accepts, limits, combines, or excludes from that advisor's view and why it matters to the final interventions.",
-                "Use advisor slugs only; never persona names in the protocol.",
+                "Do not output REVIEW lines; those were generated in the previous phase.",
                 "Write concise professional Arabic suitable for Saudi nonprofit organizations.",
             ],
         }
@@ -2511,37 +2771,6 @@ class AtharCouncilEngine:
 
         def strategy_errors(parsed: Dict[str, Any]) -> List[str]:
             errors: List[str] = []
-            reviews = parsed.get("reviews") or {}
-
-            review_texts: List[tuple[str, str]] = []
-            for aid in involved_ids:
-                review = str(reviews.get(aid) or "").strip()
-                if not review:
-                    errors.append(f"missing specific REVIEW for {aid}")
-                    continue
-                if len(review) < 35:
-                    errors.append(f"REVIEW for {aid} is too short/generic")
-                own_tokens = qtokens(reasonings_by_id.get(aid))
-                review_tokens = qtokens(review)
-                # A good Meta review may paraphrase the Specialist rather than
-                # reuse the same nouns. Treat zero lexical overlap as an error
-                # only when the review is also substantively thin. Pairwise
-                # similarity checks below still reject copied generic reviews.
-                if own_tokens and not (own_tokens & review_tokens) and len(review_tokens) < 3:
-                    errors.append(f"REVIEW for {aid} is too generic to ground in that advisor reasoning")
-                nums = unsupported_numbers(review)
-                if nums:
-                    errors.append(f"REVIEW for {aid} contains unsupported numbers {nums}")
-                review_texts.append((aid, review))
-
-            for x in range(len(review_texts)):
-                for y in range(x + 1, len(review_texts)):
-                    aid_a, a = review_texts[x]
-                    aid_b, b = review_texts[y]
-                    if text_similarity(a, b) >= 0.72:
-                        errors.append(
-                            f"Meta REVIEWs for {aid_a} and {aid_b} are too similar/generic"
-                        )
 
             interventions = parsed.get("interventions") or []
             if not (2 <= len(interventions) <= 3):
@@ -2615,9 +2844,9 @@ class AtharCouncilEngine:
             repair_task["previous_output"] = strategy.get("raw")
             repair_task["validation_errors"] = s_errors[:24]
             repair_task["repair_rules"] = [
-                "Every REVIEW must be advisor-specific and tied to that advisor's actual reasoning.",
                 "Replace generic or unrelated interventions with interventions directly grounded in the supplied goal, social problem, impact drivers, organization facts, or programs.",
                 "Keep exactly 2-3 materially distinct interventions.",
+                "Do not output REVIEW lines.",
                 "Do not invent any unsupported number or target.",
             ]
             strategy = generate_strategy(repair_task)
@@ -3085,7 +3314,7 @@ class AtharCouncilEngine:
             transcript.append({
                 "sequence": sequence,
                 "from": "meta_advisor",
-                "message": f"تعقيبي على {aid}: {strategy['reviews'][aid]}",
+                "message": f"تعقيبي على {aid}: {meta_reviews[aid]}",
             })
             sequence += 1
         transcript.append({
@@ -3102,7 +3331,7 @@ class AtharCouncilEngine:
         }
 
         self._last_meta_debug = {
-            "architecture": "split_meta_strategy_then_per_intervention_12_sprints",
+            "architecture": "split_meta_reviews_then_strategy_then_per_intervention_12_sprints",
             "meta_advisor_slug": meta["slug"],
             "meta_advisor_name": meta["name"],
             "meta_prompt_path": meta["prompt_path"],
@@ -3110,7 +3339,11 @@ class AtharCouncilEngine:
             "sprint_units_per_intervention": [len(x["outputs"]) for x in interventions],
             "advisor_ids": involved_ids,
             "plan_quality": plan_debug,
-            "meta_generation_calls_expected": 1 + len(interventions),
+            "meta_generation_calls_expected": 2 + len(interventions),
+            "meta_review_phase": {
+                "advisor_count": len(meta_reviews),
+                "separate_from_strategy": True,
+            },
         }
 
         self._validate_screen3_public_response(result)
