@@ -3227,6 +3227,7 @@ class AtharCouncilEngine:
         def sprint_quality_errors(
             plan: Dict[str, Any],
             intervention: Dict[str, Any],
+            expected_numbers: Optional[List[int]] = None,
         ) -> tuple[List[str], set[int]]:
             errors: List[str] = []
             bad: set[int] = set()
@@ -3236,7 +3237,11 @@ class AtharCouncilEngine:
                 for x in outputs
                 if isinstance(x, dict)
             ]
-            expected = list(range(1, SPRINT_COUNT + 1))
+            expected = (
+                list(expected_numbers)
+                if expected_numbers is not None
+                else list(range(1, SPRINT_COUNT + 1))
+            )
             if numbers != expected:
                 missing = [n for n in expected if n not in numbers]
                 errors.append(f"sprints must be 1..12 exactly; got {numbers}; missing={missing}")
@@ -3352,17 +3357,201 @@ class AtharCouncilEngine:
 
             return list(dict.fromkeys(errors)), bad
 
-        def sprint_task(
+        SPRINT_CHUNKS: List[List[int]] = [
+            [1, 2, 3, 4],
+            [5, 6, 7, 8],
+            [9, 10, 11, 12],
+        ]
+
+        SPRINT_PURPOSES: Dict[int, str] = {
+            1: "تثبيت خط الأساس أو صورة الوضع الحالي الخاصة بهذا التدخل فقط.",
+            2: "اعتماد نطاق العمل ومصادر التحقق والمسؤوليات اللازمة لهذا التدخل.",
+            3: "استكمال تصميم آلية التنفيذ أو القياس والأدوات اللازمة لهذا التدخل.",
+            4: "إثبات الجاهزية للتنفيذ من خلال أدوات ومسار عمل قابلين للاستخدام.",
+            5: "بدء التطبيق الفعلي للتدخل على النطاق المتاح دون اختراع موارد جديدة.",
+            6: "توثيق أدلة التنفيذ الأولية وقراءة ما نجح وما تعثر داخل التدخل.",
+            7: "معالجة فجوات التنفيذ الظاهرة وتحسين طريقة العمل بناءً على الدليل.",
+            8: "تثبيت نسخة محسنة من التنفيذ وإنتاج مخرج عملي قابل للاستخدام.",
+            9: "مراجعة جودة التنفيذ والأثر المبكر وربط الأدلة بهدف التحدي.",
+            10: "تطبيق تحسينات نهائية على التدخل بناءً على نتائج المراجعة.",
+            11: "ترتيب الاستمرارية أو التسليم أو الملكية الداخلية لما تم بناؤه.",
+            12: "التحقق من النتيجة النهائية للتحدي وتوثيق القرار أو الخطوة التالية.",
+        }
+
+        def _short_anchor(value: Any, max_words: int = 14) -> str:
+            cleaned = self._clean_meta_public_text(value, request)
+            cleaned = re.sub(r"\s+", " ", str(cleaned or "")).strip(" ،؛:.-–—")
+            words = cleaned.split()
+            if len(words) > max_words:
+                cleaned = " ".join(words[:max_words]).rstrip(" ،؛:.-–—")
+            return cleaned
+
+        def deterministic_sprint_fallback(
             intervention: Dict[str, Any],
+            sprint_number: int,
+        ) -> Dict[str, Any]:
+            """
+            Last-resort fallback for a single malformed sprint.
+
+            It is intentionally built only from the already-approved intervention
+            header, so it cannot introduce a new strategic direction or numeric
+            claim. Chunked Meta generation remains the primary source; this exists
+            only to prevent one formatting/template-collapse defect from wasting
+            a long council run.
+            """
+            title = _short_anchor(intervention.get("title"), 12) or "التدخل المعتمد"
+            impact = _short_anchor(intervention.get("impact_description"), 12)
+            reportable = _short_anchor(intervention.get("reportable_value"), 10)
+
+            purpose = SPRINT_PURPOSES.get(
+                sprint_number,
+                "إحراز تقدم تشغيلي موثق داخل التدخل المعتمد.",
+            )
+
+            result_templates = {
+                1: f"اكتملت صورة الوضع الحالي اللازمة لبدء «{title}» وربطها بهدف التحدي.",
+                2: f"اعتمد نطاق العمل ومصادر التحقق والمسؤوليات اللازمة لتنفيذ «{title}».",
+                3: f"اكتملت آلية التنفيذ والأدوات الأساسية المطلوبة لتطبيق «{title}».",
+                4: f"أصبحت متطلبات الجاهزية ومسار العمل الخاص بـ«{title}» قابلة للاستخدام.",
+                5: f"بدأ التطبيق الفعلي لـ«{title}» على النطاق المتاح وفق ما تم اعتماده.",
+                6: f"توثقت أدلة التنفيذ الأولية لـ«{title}» وظهرت نقاط النجاح والتعثر.",
+                7: f"عولجت فجوات التنفيذ الأهم في «{title}» بناءً على الأدلة المتاحة.",
+                8: f"استقرت نسخة محسنة من تنفيذ «{title}» وأصبح مخرجها العملي قابلًا للاستخدام.",
+                9: f"اكتملت مراجعة جودة تنفيذ «{title}» وربط الأدلة بالنتيجة المستهدفة.",
+                10: f"طُبقت التحسينات النهائية على «{title}» وفق نتائج المراجعة.",
+                11: f"اكتملت ترتيبات الملكية والاستمرارية لما تم بناؤه ضمن «{title}».",
+                12: f"اكتمل التحقق الختامي من نتيجة «{title}» وتوثقت الخطوة التالية.",
+            }
+
+            result = result_templates.get(
+                sprint_number,
+                f"اكتمل تقدم موثق ومحدد داخل «{title}» بما يخدم الهدف المعتمد.",
+            )
+
+            deliverable_templates = {
+                1: [
+                    f"توثيق الوضع الحالي والبيانات المتاحة المرتبطة مباشرة بـ«{title}».",
+                    f"تسجيل الفجوات التي يجب معالجتها قبل بدء تنفيذ «{title}» دون إضافة افتراضات جديدة.",
+                ],
+                2: [
+                    f"اعتماد نطاق التنفيذ ومصادر التحقق الخاصة بـ«{title}».",
+                    f"تحديد مسؤولية متابعة المخرجات الفعلية لـ«{title}» داخل النطاق المتاح.",
+                ],
+                3: [
+                    f"إعداد أداة أو مسار عمل عملي يخدم تنفيذ «{title}» ويمكن استخدامه في الأسبوع التالي.",
+                    f"مراجعة الأداة مع البيانات الحالية والتأكد من ارتباطها بهدف «{title}».",
+                ],
+                4: [
+                    f"اختبار جاهزية أداة ومسار العمل الخاصين بـ«{title}» على حالة واقعية متاحة.",
+                    f"إغلاق ملاحظات الجاهزية التي تمنع بدء التطبيق الفعلي لـ«{title}».",
+                ],
+                5: [
+                    f"تنفيذ أول دورة عمل فعلية ضمن «{title}» باستخدام الأدوات المعتمدة.",
+                    f"حفظ دليل تنفيذي يوضح ما تم تطبيقه فعليًا في «{title}».",
+                ],
+                6: [
+                    f"تجميع أدلة التنفيذ الناتجة عن «{title}» ومراجعتها مقابل الهدف المعتمد.",
+                    f"توثيق نقاط النجاح والتعثر التي ظهرت أثناء تنفيذ «{title}».",
+                ],
+                7: [
+                    f"تعديل طريقة تنفيذ «{title}» لمعالجة الفجوات التي أثبتتها الأدلة.",
+                    f"توثيق سبب كل تعديل وربطه بالمشكلة التي ظهرت أثناء التنفيذ.",
+                ],
+                8: [
+                    f"تشغيل النسخة المحسنة من «{title}» وتوثيق المخرج العملي الناتج عنها.",
+                    f"التحقق من أن المخرج الناتج عن «{title}» قابل للاستخدام والمتابعة.",
+                ],
+                9: [
+                    f"مراجعة جودة تنفيذ «{title}» باستخدام الأدلة المتراكمة من الأسابيع السابقة.",
+                    f"ربط الملاحظات النهائية بأثر «{title}» على المشكلة أو الهدف المحدد.",
+                ],
+                10: [
+                    f"تطبيق التحسينات النهائية المتفق عليها داخل «{title}».",
+                    f"توثيق النسخة المحسنة وآلية استخدامها أو متابعتها بعد التعديل.",
+                ],
+                11: [
+                    f"تثبيت مسؤولية الاستمرار في تشغيل أو متابعة «{title}» داخل الجهة.",
+                    f"تسليم الأدوات والمخرجات اللازمة لاستمرار «{title}» دون اعتماد على معرفة فردية.",
+                ],
+                12: [
+                    f"تجميع أدلة «{title}» والتحقق من النتيجة القابلة للتقرير عند نهاية التحدي.",
+                    f"توثيق القرار أو الخطوة التالية بناءً على ما أثبته تنفيذ «{title}».",
+                ],
+            }
+
+            deliverables = deliverable_templates.get(
+                sprint_number,
+                [f"تنفيذ مخرج عملي ومحدد داخل «{title}» وربطه بالهدف المعتمد."],
+            )
+
+            # Add approved impact/reportable context only when it is concise.
+            # This makes the fallback more case-specific without inventing facts.
+            if impact and sprint_number in {1, 6, 9, 12}:
+                deliverables[-1] = (
+                    deliverables[-1].rstrip(" .")
+                    + f"، مع مراعاة «{impact}»."
+                )
+            elif reportable and sprint_number in {8, 12}:
+                deliverables[-1] = (
+                    deliverables[-1].rstrip(" .")
+                    + f"، بما يتيح التحقق من «{reportable}»."
+                )
+
+            return {
+                "_sprint": sprint_number,
+                "text": self._clean_meta_public_text(result, request),
+                "results": [
+                    {"text": self._clean_meta_public_text(x, request)}
+                    for x in deliverables[:2]
+                ],
+                "_fallback": True,
+                "_purpose": purpose,
+            }
+
+        def sprint_chunk_task(
+            intervention: Dict[str, Any],
+            sprint_numbers: List[int],
             *,
+            prior_outputs: Optional[List[Dict[str, Any]]] = None,
             repair_errors: Optional[List[str]] = None,
             previous_output: Optional[str] = None,
         ) -> Dict[str, Any]:
+            sprint_numbers = sorted(int(n) for n in sprint_numbers)
+            chunk_protocol = (
+                "Return ONLY the requested sprint units; no JSON or Markdown.\n"
+                + "\n".join(
+                    [
+                        f"SPRINT={n}\n"
+                        "RESULT=<specific achieved state/milestone for this intervention>\n"
+                        "TEXT=<specific mandatory deliverable executable within 5 working days>\n"
+                        "[TEXT=<optional second deliverable>]\n"
+                        "[TEXT=<optional third deliverable>]\n"
+                        "END_SPRINT"
+                        for n in sprint_numbers
+                    ]
+                )
+            )
+
+            prior_compact: List[Dict[str, Any]] = []
+            for unit in (prior_outputs or [])[-4:]:
+                if not isinstance(unit, dict):
+                    continue
+                prior_compact.append({
+                    "sprint": unit.get("_sprint"),
+                    "result": unit.get("text"),
+                    "deliverables": [
+                        x.get("text")
+                        for x in (unit.get("results") or [])
+                        if isinstance(x, dict)
+                    ],
+                })
+
             task_obj = {
                 "role": meta["slug"],
                 "task": (
-                    "Design the twelve-week execution route for ONE already-approved "
-                    "Screen-3 intervention. Do not redesign or replace the intervention."
+                    "Design ONLY the requested weekly sprints for ONE already-approved "
+                    "Screen-3 intervention. The intervention header is fixed and must not "
+                    "be redesigned."
                 ),
                 **authoritative_context,
                 "approved_intervention": {
@@ -3371,131 +3560,259 @@ class AtharCouncilEngine:
                     "impact_description": intervention.get("impact_description"),
                     "reportable_value": intervention.get("reportable_value"),
                 },
+                "requested_sprints": sprint_numbers,
+                "sprint_purposes": {
+                    str(n): SPRINT_PURPOSES[n]
+                    for n in sprint_numbers
+                },
+                "accepted_previous_sprints": prior_compact,
                 "specialist_reasonings": council,
-                "required_protocol": sprint_protocol,
-                "progression_guidance": [
-                    "Sprints 1-2: establish intervention-specific evidence, scope, readiness, or baseline needed to act.",
-                    "Sprints 3-4: complete the intervention-specific design/preparation and ownership needed for execution.",
-                    "Sprints 5-8: execute/test the concrete intervention work and produce tangible outputs; do not remain in analysis mode.",
-                    "Sprints 9-10: review evidence from execution, fix gaps, and improve the intervention.",
-                    "Sprint 11: institutionalize, hand over, or secure continuity of the working approach.",
-                    "Sprint 12: verify the achieved 90-day result and document the next decision/action.",
-                ],
+                "required_protocol": chunk_protocol,
                 "mandatory_rules": [
-                    "Return exactly SPRINT 1 through SPRINT 12, once each and in order.",
-                    "RESULT is a distinct weekly achieved state or milestone, not a placeholder task label.",
-                    "Every sprint must have 1 to 3 TEXT lines; each TEXT is a concrete mandatory deliverable/action fully executable within 5 working days.",
-                    "Tailor every RESULT and TEXT to THIS intervention and the supplied organization/program/goal/impact context.",
-                    "The twelve results must progress logically; later weeks must build on evidence or outputs from earlier weeks.",
-                    "Do not repeat the same RESULT, TEXT, or generic phrase across weeks.",
-                    "Never output placeholders such as 'تحديد مخرج التدخل', 'تنفيذ التدخل', 'استكمال التدخل', or similar generic filler.",
+                    "Return ONLY the requested sprint numbers, once each and in ascending order.",
+                    "Every RESULT and every TEXT must explicitly contain a concrete concept from the approved intervention title/impact/reportable value OR a named concept/program/goal from the authoritative case.",
+                    "Do not use bare generic labels such as intervention, output, action, follow-up, implementation, review, or plan without naming what is being implemented/reviewed.",
+                    "RESULT must describe an achieved state by the end of that week, not an activity label.",
+                    "Each sprint must have 1-3 concrete TEXT deliverables executable within 5 working days.",
+                    "Each requested sprint must be materially different from the others in this chunk and from accepted_previous_sprints.",
+                    "Later sprints must build on accepted_previous_sprints rather than restart analysis.",
+                    "Never copy the same TEXT into two sprints.",
+                    "Never use placeholders such as 'تحديد مخرج التدخل', 'تنفيذ التدخل', 'استكمال التدخل', or similar filler.",
                     "Do not invent percentages, counts, budgets, dates, partners, staffing, resources, or capacity not present in the authoritative context.",
                     "Historical numbers are evidence, not automatic future targets.",
-                    "Keep each RESULT and TEXT concise enough to be operational, but specific enough that a team can tell what must be completed by Friday.",
-                    "Do not introduce a new strategic objective, identity project, governance project, or organizational redesign unless it is part of the approved intervention/context.",
+                    "Do not introduce a new strategic objective, identity project, governance project, or organizational redesign outside the approved intervention.",
                 ],
             }
+
             if repair_errors:
                 task_obj["task"] = (
-                    "Repair the complete twelve-week route for the SAME approved intervention. "
-                    "Return the COMPLETE SPRINT 1..12 protocol again."
+                    "Repair ONLY the requested sprint units for the SAME approved "
+                    "intervention. Preserve the fixed intervention header."
                 )
-                task_obj["validation_errors"] = repair_errors[:30]
+                task_obj["validation_errors"] = repair_errors[:20]
                 task_obj["previous_output"] = previous_output
                 task_obj["repair_rules"] = [
-                    "Replace generic/repeated weeks with intervention-specific milestones.",
-                    "Keep valid grounded content where possible.",
+                    "Return every requested sprint in this chunk, even if only one was faulty.",
+                    "Replace repeated/generic/unanchored text with concrete intervention-specific language.",
+                    "Do not repeat wording from accepted_previous_sprints.",
                     "Do not change the approved intervention header.",
-                    "Return all twelve sprints, not only the faulty ones.",
                 ]
+
             return task_obj
 
-        def generate_sprint_plan(
+        def generate_sprint_chunk(
             intervention: Dict[str, Any],
+            sprint_numbers: List[int],
             *,
+            prior_outputs: Optional[List[Dict[str, Any]]] = None,
             repair_errors: Optional[List[str]] = None,
             previous_output: Optional[str] = None,
         ) -> Dict[str, Any]:
+            max_tokens = 1250 if len(sprint_numbers) <= 4 else 1800
             raw = self._generate(
                 meta_adapter,
                 meta["prompt"],
                 json.dumps(
-                    sprint_task(
+                    sprint_chunk_task(
                         intervention,
+                        sprint_numbers,
+                        prior_outputs=prior_outputs,
                         repair_errors=repair_errors,
                         previous_output=previous_output,
                     ),
                     ensure_ascii=False,
                     separators=(",", ":"),
                 ),
-                min(max(META_MAX_NEW_TOKENS, 3000), 3800),
+                max_tokens,
                 deterministic=True,
-                repetition_penalty=1.08,
+                repetition_penalty=1.12,
+                no_repeat_ngram_size=6,
             )
             return parse_sprints(raw)
 
-        def patch_sprints(
-            intervention: Dict[str, Any],
-            plan: Dict[str, Any],
-            bad_numbers: set[int],
-            errors: List[str],
-        ) -> Dict[str, Any]:
-            if not bad_numbers or len(bad_numbers) > 4:
-                return plan
+        def merge_sprint_units(
+            existing: List[Dict[str, Any]],
+            incoming: List[Dict[str, Any]],
+        ) -> List[Dict[str, Any]]:
+            by_number: Dict[int, Dict[str, Any]] = {}
+            for unit in list(existing) + list(incoming):
+                if not isinstance(unit, dict):
+                    continue
+                n = int(unit.get("_sprint") or 0)
+                if 1 <= n <= SPRINT_COUNT:
+                    by_number[n] = unit
+            return [by_number[n] for n in sorted(by_number)]
 
-            existing_by_number = {
-                int(x.get("_sprint") or 0): x
-                for x in (plan.get("outputs") or [])
-                if isinstance(x, dict) and int(x.get("_sprint") or 0) not in bad_numbers
-            }
-            neighborhood = {
-                n: existing_by_number.get(n)
-                for n in range(1, SPRINT_COUNT + 1)
-                if n not in bad_numbers
-            }
-            patch_task = {
-                "role": meta["slug"],
-                "task": "Rewrite ONLY the listed faulty/missing sprint units for the same approved intervention.",
-                **authoritative_context,
-                "approved_intervention": {
-                    "title": intervention.get("title"),
-                    "impact_description": intervention.get("impact_description"),
-                    "reportable_value": intervention.get("reportable_value"),
-                },
-                "faulty_or_missing_sprints": sorted(bad_numbers),
-                "valid_neighboring_sprints": neighborhood,
-                "validation_errors": errors[:20],
-                "rules": [
-                    "Return only the requested sprint numbers.",
-                    "Each requested sprint must have one specific RESULT and 1-3 specific TEXT lines.",
-                    "The replacement must fit logically between the valid neighboring weeks.",
-                    "Every TEXT must be executable in 5 working days.",
-                    "No placeholders, no repeated content, and no unsupported numbers/facts.",
-                ],
-                "protocol": sprint_protocol,
-            }
-            raw = self._generate(
-                meta_adapter,
-                meta["prompt"],
-                json.dumps(patch_task, ensure_ascii=False, separators=(",", ":")),
-                1400 if len(bad_numbers) <= 2 else 2200,
-                deterministic=True,
-                repetition_penalty=1.08,
+        def repair_chunk_or_fallback(
+            intervention: Dict[str, Any],
+            sprint_numbers: List[int],
+            chunk: Dict[str, Any],
+            prior_outputs: List[Dict[str, Any]],
+        ) -> tuple[Dict[str, Any], List[int], List[str]]:
+            errors, bad = sprint_quality_errors(
+                chunk,
+                intervention,
+                expected_numbers=sprint_numbers,
             )
-            patched = parse_sprints(raw)
-            patch_by_number = {
+            if not errors:
+                return chunk, [], []
+
+            repaired = generate_sprint_chunk(
+                intervention,
+                sprint_numbers,
+                prior_outputs=prior_outputs,
+                repair_errors=errors,
+                previous_output=chunk.get("raw"),
+            )
+            errors2, bad2 = sprint_quality_errors(
+                repaired,
+                intervention,
+                expected_numbers=sprint_numbers,
+            )
+            if not errors2:
+                return repaired, [], []
+
+            # Preserve any valid repaired units and replace only the still-bad
+            # sprint rows with a deterministic intervention-grounded fallback.
+            repaired_by_number = {
                 int(x.get("_sprint") or 0): x
-                for x in (patched.get("outputs") or [])
+                for x in (repaired.get("outputs") or [])
                 if isinstance(x, dict)
             }
-            merged = dict(existing_by_number)
-            for n in bad_numbers:
-                if n in patch_by_number:
-                    merged[n] = patch_by_number[n]
+            final_units: List[Dict[str, Any]] = []
+            fallback_numbers: List[int] = []
+            for n in sprint_numbers:
+                candidate = repaired_by_number.get(n)
+                if candidate is None or n in bad2:
+                    candidate = deterministic_sprint_fallback(intervention, n)
+                    fallback_numbers.append(n)
+                final_units.append(candidate)
 
-            return {
-                "outputs": [merged[n] for n in sorted(merged)],
-                "raw": raw,
+            final_plan = {
+                "outputs": final_units,
+                "raw": repaired.get("raw"),
+            }
+            final_errors, final_bad = sprint_quality_errors(
+                final_plan,
+                intervention,
+                expected_numbers=sprint_numbers,
+            )
+
+            # Fallback templates are intentionally grounded by the approved title.
+            # If they ever fail the validator, that indicates a code/validator bug
+            # rather than an LLM quality issue, so surface it explicitly.
+            if final_errors:
+                raise ValueError(
+                    "Internal sprint fallback failed quality validation for "
+                    f"sprints {sorted(final_bad)}: "
+                    + " | ".join(final_errors[:12])
+                )
+
+            return final_plan, fallback_numbers, errors2
+
+        def generate_chunked_sprint_plan(
+            intervention: Dict[str, Any],
+        ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+            accepted: List[Dict[str, Any]] = []
+            raw_chunks: List[str] = []
+            fallback_sprints: List[int] = []
+            repaired_chunks: List[List[int]] = []
+
+            for sprint_numbers in SPRINT_CHUNKS:
+                chunk = generate_sprint_chunk(
+                    intervention,
+                    sprint_numbers,
+                    prior_outputs=accepted,
+                )
+                initial_errors, _ = sprint_quality_errors(
+                    chunk,
+                    intervention,
+                    expected_numbers=sprint_numbers,
+                )
+                if initial_errors:
+                    repaired_chunks.append(list(sprint_numbers))
+
+                chunk, chunk_fallbacks, _ = repair_chunk_or_fallback(
+                    intervention,
+                    sprint_numbers,
+                    chunk,
+                    accepted,
+                )
+                fallback_sprints.extend(chunk_fallbacks)
+                accepted = merge_sprint_units(
+                    accepted,
+                    chunk.get("outputs") or [],
+                )
+                raw_chunks.append(str(chunk.get("raw") or ""))
+
+            plan = {
+                "outputs": accepted,
+                "raw": "\n\n".join(raw_chunks),
+            }
+
+            # Final global check catches cross-chunk duplicates/progression collapse.
+            global_errors, global_bad = sprint_quality_errors(plan, intervention)
+
+            if global_errors:
+                # Repair only the globally faulty rows, grouped into chunks of up
+                # to four. Never regenerate the whole 12-week plan.
+                bad_numbers = sorted(n for n in global_bad if 1 <= n <= SPRINT_COUNT)
+                for offset in range(0, len(bad_numbers), 4):
+                    subset = bad_numbers[offset:offset + 4]
+                    if not subset:
+                        continue
+
+                    existing_good = [
+                        unit for unit in accepted
+                        if int(unit.get("_sprint") or 0) not in subset
+                    ]
+                    repair = generate_sprint_chunk(
+                        intervention,
+                        subset,
+                        prior_outputs=existing_good,
+                        repair_errors=global_errors,
+                        previous_output=None,
+                    )
+                    repair_errors, repair_bad = sprint_quality_errors(
+                        repair,
+                        intervention,
+                        expected_numbers=subset,
+                    )
+
+                    repair_by_number = {
+                        int(x.get("_sprint") or 0): x
+                        for x in (repair.get("outputs") or [])
+                        if isinstance(x, dict)
+                    }
+                    replacements: List[Dict[str, Any]] = []
+                    for n in subset:
+                        candidate = repair_by_number.get(n)
+                        if candidate is None or n in repair_bad:
+                            candidate = deterministic_sprint_fallback(intervention, n)
+                            if n not in fallback_sprints:
+                                fallback_sprints.append(n)
+                        replacements.append(candidate)
+
+                    accepted = merge_sprint_units(existing_good, replacements)
+
+                plan = {
+                    "outputs": accepted,
+                    "raw": plan.get("raw"),
+                }
+                global_errors, global_bad = sprint_quality_errors(plan, intervention)
+
+            # At this point only an internal inconsistency should fail the job.
+            if global_errors:
+                raise ValueError(
+                    "Internal chunked 12-week planner could not produce a valid "
+                    f"plan for intervention «{intervention.get('title')}»: "
+                    + " | ".join(global_errors[:20])
+                )
+
+            return plan, {
+                "architecture": "three_chunks_of_four",
+                "repaired_chunks": repaired_chunks,
+                "fallback_sprints": sorted(set(fallback_sprints)),
             }
 
         approved = strategy["interventions"]
@@ -3508,32 +3825,7 @@ class AtharCouncilEngine:
                 f"{intervention.get('title')}",
                 flush=True,
             )
-            plan = generate_sprint_plan(intervention)
-            errors, bad = sprint_quality_errors(plan, intervention)
-
-            # Small local defects are cheaper to patch than to regenerate all 12.
-            if errors and bad and len(bad) <= 4:
-                plan = patch_sprints(intervention, plan, bad, errors)
-                errors, bad = sprint_quality_errors(plan, intervention)
-
-            # Broad template collapse or semantic drift gets one full intervention
-            # regeneration, never a regeneration of the whole council portfolio.
-            if errors:
-                plan = generate_sprint_plan(
-                    intervention,
-                    repair_errors=errors,
-                    previous_output=plan.get("raw"),
-                )
-                errors, bad = sprint_quality_errors(plan, intervention)
-                if errors and bad and len(bad) <= 4:
-                    plan = patch_sprints(intervention, plan, bad, errors)
-                    errors, bad = sprint_quality_errors(plan, intervention)
-
-            if errors:
-                raise ValueError(
-                    f"Meta 12-week plan failed quality gate for intervention {idx} "
-                    f"({intervention.get('title')}): " + " | ".join(errors[:20])
-                )
+            plan, chunk_debug = generate_chunked_sprint_plan(intervention)
 
             clean_outputs = [
                 {
@@ -3554,6 +3846,9 @@ class AtharCouncilEngine:
                 "title": intervention.get("title"),
                 "sprint_count": len(clean_outputs),
                 "quality_errors": [],
+                "planning_architecture": chunk_debug.get("architecture"),
+                "repaired_chunks": chunk_debug.get("repaired_chunks"),
+                "fallback_sprints": chunk_debug.get("fallback_sprints"),
             })
 
         # Pair every Specialist opinion with a genuinely advisor-specific Meta
