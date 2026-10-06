@@ -59,12 +59,24 @@ GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main").strip()
 
 SPECIALIST_REL = os.getenv(
     "COUNCIL_SPECIALIST_REL",
-    "checkpoints/specialist",
+    "checkpoints/specialist-v2",
 ).strip("/")
 META_REL = os.getenv(
     "COUNCIL_META_REL",
     "checkpoints/meta",
 ).strip("/")
+
+# Historical repositories used both `checkpoints/specialist` and
+# `checkpoints/specialist-v2`. Production must tolerate either layout.
+SPECIALIST_REL_CANDIDATES = tuple(dict.fromkeys([
+    SPECIALIST_REL,
+    "checkpoints/specialist-v2",
+    "checkpoints/specialist",
+]))
+META_REL_CANDIDATES = tuple(dict.fromkeys([
+    META_REL,
+    "checkpoints/meta",
+]))
 
 _ENGINE = None
 _ENGINE_LOCK = threading.RLock()
@@ -74,7 +86,7 @@ _ENGINE_LOCK = threading.RLock()
 _BASE_MODEL = None
 _TOKENIZER = None
 
-BOOT_VERSION = "athar-runpod-safe-entry-v2-lfs-recovery"
+BOOT_VERSION = "athar-runpod-safe-entry-v3-lfs-autodiscovery"
 
 
 # ---------------------------------------------------------------------------
@@ -149,20 +161,18 @@ def _adapter_diagnostics(repo_dir: Path) -> Dict[str, Any]:
     """Return safe diagnostics without exposing credentials."""
     diagnostics: Dict[str, Any] = {
         "repo_dir": str(repo_dir),
-        "files": {},
+        "candidate_files": {},
         "lfs_ls_files_tail": "",
     }
 
-    for rel in (
-        f"{SPECIALIST_REL}/adapter_model.safetensors",
-        f"{SPECIALIST_REL}/adapter_config.json",
-        f"{META_REL}/adapter_model.safetensors",
-        f"{META_REL}/adapter_config.json",
-    ):
-        p = repo_dir / rel
-        diagnostics["files"][rel] = {
-            "exists": p.exists(),
-            "size_bytes": p.stat().st_size if p.exists() else None,
+    rels = list(SPECIALIST_REL_CANDIDATES) + list(META_REL_CANDIDATES)
+    for rel in rels:
+        weight = repo_dir / rel / "adapter_model.safetensors"
+        config = repo_dir / rel / "adapter_config.json"
+        diagnostics["candidate_files"][rel] = {
+            "weight_exists": weight.exists(),
+            "weight_size_bytes": weight.stat().st_size if weight.exists() else None,
+            "config_exists": config.exists(),
         }
 
     try:
@@ -171,25 +181,167 @@ def _adapter_diagnostics(repo_dir: Path) -> Dict[str, Any]:
             cwd=repo_dir,
         )[-5000:]
     except Exception as exc:
-        diagnostics["lfs_ls_files_tail"] = f"unavailable: {type(exc).__name__}: {exc}"
+        diagnostics["lfs_ls_files_tail"] = (
+            f"unavailable: {type(exc).__name__}: {exc}"
+        )
 
     return diagnostics
 
 
+def _discover_lfs_adapter_rel(
+    repo_dir: Path,
+    *,
+    kind: str,
+) -> Optional[str]:
+    """
+    Discover the real tracked adapter directory from `git lfs ls-files`.
+
+    Example production repository currently exposes:
+      checkpoints/meta/adapter_model.safetensors
+      checkpoints/specialist-v2/adapter_model.safetensors
+
+    Older repositories used:
+      checkpoints/specialist/adapter_model.safetensors
+    """
+    output = _run(["git", "lfs", "ls-files"], cwd=repo_dir)
+
+    tracked_paths = []
+    for raw in output.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+
+        # `git lfs ls-files` commonly prints:
+        #   <oid-prefix> * path
+        # or
+        #   <oid-prefix> - path
+        m = re.match(r"^[0-9a-fA-F]+\s+[*-]\s+(.+)$", line)
+        if not m:
+            continue
+
+        path = m.group(1).strip().replace("\\\\", "/")
+        if path.endswith("/adapter_model.safetensors"):
+            tracked_paths.append(path)
+
+    # Exclude recovery/pointer archives. They are historical references and
+    # some of their LFS objects no longer exist on the server.
+    tracked_paths = [
+        p for p in tracked_paths
+        if not p.startswith("_recovery/")
+        and "/_recovery/" not in p
+        and "pointer" not in p.lower()
+    ]
+
+    if kind == "meta":
+        preferred = [
+            p for p in tracked_paths
+            if re.search(r"(^|/)meta(/|$)", p, flags=re.I)
+        ]
+    elif kind == "specialist":
+        preferred = [
+            p for p in tracked_paths
+            if re.search(r"(^|/)specialist(?:-v?\d+)?(/|$)", p, flags=re.I)
+            or "/specialist-" in p.lower()
+            or "/specialist/" in p.lower()
+        ]
+
+        # Prefer V2/current specialist if both old and new paths exist.
+        preferred.sort(
+            key=lambda p: (
+                0 if "specialist-v2" in p.lower() else
+                1 if "specialist_v2" in p.lower() else
+                2
+            )
+        )
+    else:
+        raise ValueError(f"Unknown adapter kind: {kind}")
+
+    if not preferred:
+        return None
+
+    return str(Path(preferred[0]).parent).replace("\\\\", "/")
+
+
+def _first_real_local_adapter(
+    root: Path,
+    candidates,
+) -> Optional[Path]:
+    for rel in candidates:
+        p = root / rel
+        if _real_adapter_checkpoint(p):
+            return p
+    return None
+
+
+def _materialize_exact_lfs_file(
+    repo_dir: Path,
+    env: Dict[str, str],
+    rel_file: str,
+) -> None:
+    """
+    Fetch and checkout ONE exact LFS object only.
+
+    Never run a repository-wide `git lfs pull`: the production repo contains
+    historical `_recovery/lfs_pointers/*` objects whose remote LFS blobs return
+    404 and are unrelated to inference.
+    """
+    _log(f"Fetching exact Git-LFS object: {rel_file}")
+
+    fetch_error = None
+    try:
+        _run(
+            [
+                "git", "lfs", "fetch",
+                "origin", GITHUB_BRANCH,
+                f"--include={rel_file}",
+                "--exclude=",
+            ],
+            cwd=repo_dir,
+            env=env,
+        )
+    except Exception as exc:
+        fetch_error = exc
+
+    if fetch_error is None:
+        try:
+            _run(
+                ["git", "lfs", "checkout", rel_file],
+                cwd=repo_dir,
+                env=env,
+            )
+            return
+        except Exception as exc:
+            fetch_error = exc
+
+    # Some LFS versions behave better with `pull --include=<exact file>`.
+    _log(
+        f"Exact fetch/checkout fallback for {rel_file}: "
+        f"{type(fetch_error).__name__}: {fetch_error}"
+    )
+    _run(
+        [
+            "git", "lfs", "pull",
+            f"--include={rel_file}",
+            "--exclude=",
+        ],
+        cwd=repo_dir,
+        env=env,
+    )
+    _run(
+        ["git", "lfs", "checkout", rel_file],
+        cwd=repo_dir,
+        env=env,
+    )
+
+
 def _clone_adapters_from_github() -> Tuple[Path, Path]:
     """
-    Clone the private repository without smudging every LFS object, then fetch
-    the exact Specialist + Meta adapter weights.
+    Clone normal Git files, discover the repository's CURRENT adapter paths,
+    and materialize only the two LFS weight files needed for inference.
 
-    Important robustness detail:
-    some Git-LFS/container combinations report a successful `git lfs pull`
-    while the working-tree file remains an LFS pointer. We therefore:
-      1) fetch exact adapter_model.safetensors objects;
-      2) explicitly run `git lfs checkout` on those paths;
-      3) validate real file size;
-      4) if still not materialized, fall back to the known-good FULL
-         `git lfs pull` flow used successfully in the training notebooks;
-      5) validate again and return detailed diagnostics on failure.
+    This intentionally avoids full `git lfs pull` because the current repo
+    contains historical `_recovery/lfs_pointers` entries whose LFS objects no
+    longer exist remotely.
     """
     token = os.getenv("GITHUB_TOKEN", "").strip()
     if not token:
@@ -221,107 +373,89 @@ def _clone_adapters_from_github() -> Tuple[Path, Path]:
         ],
         env=env,
     )
-
     _run(["git", "lfs", "install", "--local"], cwd=repo_dir, env=env)
 
-    specialist = repo_dir / SPECIALIST_REL
-    meta = repo_dir / META_REL
+    specialist_rel = _discover_lfs_adapter_rel(
+        repo_dir,
+        kind="specialist",
+    )
+    meta_rel = _discover_lfs_adapter_rel(
+        repo_dir,
+        kind="meta",
+    )
 
-    specialist_weight = f"{SPECIALIST_REL}/adapter_model.safetensors"
-    meta_weight = f"{META_REL}/adapter_model.safetensors"
-    exact_include = f"{specialist_weight},{meta_weight}"
-
-    # Stage 1: exact LFS fetch + explicit checkout.
-    _log("Fetching exact Specialist + Meta LFS adapter weights.")
-    targeted_error = None
-    try:
-        _run(
-            [
-                "git", "lfs", "fetch",
-                "origin", GITHUB_BRANCH,
-                f"--include={exact_include}",
-                "--exclude=",
-            ],
-            cwd=repo_dir,
-            env=env,
+    if not specialist_rel:
+        raise RuntimeError(
+            "Could not discover a Specialist adapter in Git LFS. "
+            f"diagnostics={json.dumps(_adapter_diagnostics(repo_dir), ensure_ascii=False)}"
         )
-        _run(
-            [
-                "git", "lfs", "checkout",
-                specialist_weight,
-                meta_weight,
-            ],
-            cwd=repo_dir,
-            env=env,
-        )
-    except Exception as exc:
-        targeted_error = f"{type(exc).__name__}: {exc}"
-        _log(
-            "Targeted Git-LFS materialization did not complete; "
-            "will try full pull fallback."
+    if not meta_rel:
+        raise RuntimeError(
+            "Could not discover a Meta adapter in Git LFS. "
+            f"diagnostics={json.dumps(_adapter_diagnostics(repo_dir), ensure_ascii=False)}"
         )
 
-    if (
-        _real_adapter_checkpoint(specialist)
-        and _real_adapter_checkpoint(meta)
-    ):
-        _log("Specialist + Meta adapters materialized via targeted Git LFS fetch.")
-        return specialist, meta
-
-    # Stage 2: known-good fallback. This is the exact broad pattern that
-    # previously materialized the four ~190 MB adapters in Kaggle.
     _log(
-        "Targeted LFS fetch left pointer/missing files. "
-        "Running full `git lfs pull` fallback."
+        f"Discovered current adapter paths: "
+        f"specialist={specialist_rel}, meta={meta_rel}"
     )
-    full_pull_error = None
-    try:
-        _run(["git", "lfs", "pull"], cwd=repo_dir, env=env)
 
-        # Explicit checkout is harmless if pull already smudged the files and
-        # fixes environments where objects were fetched but pointers remained.
-        _run(
-            [
-                "git", "lfs", "checkout",
-                specialist_weight,
-                meta_weight,
-            ],
-            cwd=repo_dir,
-            env=env,
+    specialist_weight = f"{specialist_rel}/adapter_model.safetensors"
+    meta_weight = f"{meta_rel}/adapter_model.safetensors"
+
+    _materialize_exact_lfs_file(
+        repo_dir,
+        env,
+        specialist_weight,
+    )
+    _materialize_exact_lfs_file(
+        repo_dir,
+        env,
+        meta_weight,
+    )
+
+    specialist_path = repo_dir / specialist_rel
+    meta_path = repo_dir / meta_rel
+
+    specialist_ok = _real_adapter_checkpoint(specialist_path)
+    meta_ok = _real_adapter_checkpoint(meta_path)
+
+    if not specialist_ok or not meta_ok:
+        diagnostics = _adapter_diagnostics(repo_dir)
+        raise RuntimeError(
+            "Exact Git-LFS materialization did not produce valid adapter "
+            "checkpoints. "
+            f"specialist_rel={specialist_rel!r}; "
+            f"meta_rel={meta_rel!r}; "
+            f"diagnostics={json.dumps(diagnostics, ensure_ascii=False)}"
         )
-    except Exception as exc:
-        full_pull_error = f"{type(exc).__name__}: {exc}"
 
-    if (
-        _real_adapter_checkpoint(specialist)
-        and _real_adapter_checkpoint(meta)
-    ):
-        _log("Specialist + Meta adapters materialized via full Git LFS fallback.")
-        return specialist, meta
-
-    diagnostics = _adapter_diagnostics(repo_dir)
-
-    raise RuntimeError(
-        "Git LFS finished without materializing the required adapters. "
-        f"targeted_error={targeted_error!r}; "
-        f"full_pull_error={full_pull_error!r}; "
-        f"diagnostics={json.dumps(diagnostics, ensure_ascii=False)}"
+    _log(
+        "Specialist + Meta adapters are materialized and validated: "
+        f"specialist={specialist_path}, meta={meta_path}"
     )
+    return specialist_path, meta_path
 
 
 def _resolve_adapter_paths() -> Tuple[Path, Path]:
     """
-    Prefer weights already baked/mounted in the image. Only use GitHub when
-    necessary. Nothing in this function runs during worker boot.
+    Prefer real local checkpoints. Support both historical and current
+    Specialist directory names. Only hit GitHub when necessary.
     """
-    local_specialist = ROOT / SPECIALIST_REL
-    local_meta = ROOT / META_REL
+    local_specialist = _first_real_local_adapter(
+        ROOT,
+        SPECIALIST_REL_CANDIDATES,
+    )
+    local_meta = _first_real_local_adapter(
+        ROOT,
+        META_REL_CANDIDATES,
+    )
 
-    if (
-        _real_adapter_checkpoint(local_specialist)
-        and _real_adapter_checkpoint(local_meta)
-    ):
-        _log("Using local Specialist + Meta adapter checkpoints.")
+    if local_specialist and local_meta:
+        _log(
+            "Using local Specialist + Meta adapter checkpoints: "
+            f"{local_specialist} | {local_meta}"
+        )
         return local_specialist, local_meta
 
     return _clone_adapters_from_github()
@@ -428,11 +562,27 @@ def _ensure_engine():
 
 def _safe_preflight(job_input: Dict[str, Any]) -> Dict[str, Any]:
     """
-    IMPORTANT: this intentionally does not load Qwen or import the council file.
-    It lets us prove the worker + RunPod entrypoint are healthy first.
+    Zero-model preflight. No Qwen/council load and no GitHub network call.
     """
-    local_specialist = ROOT / SPECIALIST_REL
-    local_meta = ROOT / META_REL
+    specialist_candidates = []
+    for rel in SPECIALIST_REL_CANDIDATES:
+        p = ROOT / rel
+        weight = p / "adapter_model.safetensors"
+        specialist_candidates.append({
+            "rel": rel,
+            "real": _real_adapter_checkpoint(p),
+            "weight_bytes": weight.stat().st_size if weight.exists() else None,
+        })
+
+    meta_candidates = []
+    for rel in META_REL_CANDIDATES:
+        p = ROOT / rel
+        weight = p / "adapter_model.safetensors"
+        meta_candidates.append({
+            "rel": rel,
+            "real": _real_adapter_checkpoint(p),
+            "weight_bytes": weight.stat().st_size if weight.exists() else None,
+        })
 
     return {
         "status": "advisory_consultation_preflight_ok",
@@ -441,22 +591,14 @@ def _safe_preflight(job_input: Dict[str, Any]) -> Dict[str, Any]:
         "root": str(ROOT),
         "model": MODEL_ID,
         "cuda_model_not_loaded": True,
-        "specialist_local_real": _real_adapter_checkpoint(local_specialist),
-        "meta_local_real": _real_adapter_checkpoint(local_meta),
-        "specialist_local_weight_bytes": (
-            (local_specialist / "adapter_model.safetensors").stat().st_size
-            if (local_specialist / "adapter_model.safetensors").exists()
-            else None
-        ),
-        "meta_local_weight_bytes": (
-            (local_meta / "adapter_model.safetensors").stat().st_size
-            if (local_meta / "adapter_model.safetensors").exists()
-            else None
-        ),
+        "github_repo": GITHUB_REPO,
+        "github_branch": GITHUB_BRANCH,
         "github_token_present": bool(os.getenv("GITHUB_TOKEN")),
+        "specialist_candidates": specialist_candidates,
+        "meta_candidates": meta_candidates,
         "message": (
-            "Worker/entrypoint is healthy. Heavy model + council initialization "
-            "will happen only on the first real advisory_consultation request."
+            "Worker/entrypoint is healthy. Adapter path discovery and heavy "
+            "model initialization happen only on the first real consultation."
         ),
     }
 
