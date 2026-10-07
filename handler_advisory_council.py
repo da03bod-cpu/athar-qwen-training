@@ -3243,12 +3243,35 @@ class AtharCouncilEngine:
 
             return cleaned, unsupported
 
+        def _normalize_strategy_arabic(value: Any) -> str:
+            """Small deterministic cleanup for strategy headers only."""
+            out = re.sub(r"\s+", " ", str(value or "")).strip()
+
+            replacements = {
+                "المدرسى": "المدرسي",
+                "الاساسى": "الأساسي",
+                "الأساسى": "الأساسي",
+                "الزى": "الزي",
+                "الداعمه": "الداعمة",
+                "الجمعيه": "الجمعية",
+                "الغيابة": "الغياب",
+                "التسَرب": "التسرب",
+                "التسرّب": "التسرب",
+                "هدف التح": "هدف التحدي",
+            }
+            for before, after in replacements.items():
+                out = out.replace(before, after)
+
+            out = re.sub(r"\bال\s+زي\b", "الزي", out)
+            out = re.sub(r"\s+([،؛,.])", r"\1", out)
+            return out.strip(" ،؛:.-–—")
+
         def sanitize_strategy_headers(
             parsed: Dict[str, Any],
         ) -> Dict[str, Any]:
             """
-            Remove unsupported numbers only from the intervention strategy
-            headers before quality validation. Grounded request numbers remain.
+            Normalize surface Arabic and remove unsupported numbers from
+            intervention strategy headers before quality validation.
             """
             interventions = parsed.get("interventions") or []
             sanitizations: List[Dict[str, Any]] = []
@@ -3262,9 +3285,13 @@ class AtharCouncilEngine:
                         continue
 
                     before = str(intervention.get(field) or "")
-                    after, removed = _strip_unsupported_strategy_numbers(before)
-                    if removed:
-                        intervention[field] = after
+                    normalized_before = _normalize_strategy_arabic(before)
+                    after, removed = _strip_unsupported_strategy_numbers(
+                        normalized_before
+                    )
+                    intervention[field] = after
+
+                    if removed or after != before:
                         sanitizations.append({
                             "intervention": i,
                             "field": field,
@@ -3662,6 +3689,85 @@ class AtharCouncilEngine:
                 "targeted intervention recovery: "
                 + " | ".join(s_errors[:20])
             )
+
+        # Product accepts 2-3 interventions. Production quality is more stable
+        # when we execute the strongest two by default; SCREEN3_MAX_INTERVENTIONS
+        # may be set to 3 without code changes.
+        try:
+            max_public_interventions = int(
+                os.getenv("SCREEN3_MAX_INTERVENTIONS", "2")
+            )
+        except Exception:
+            max_public_interventions = 2
+        max_public_interventions = max(2, min(3, max_public_interventions))
+
+        strategy_selection_debug: Dict[str, Any] = {
+            "requested_max_interventions": max_public_interventions,
+            "before_count": len(strategy.get("interventions") or []),
+            "kept_original_indices": [],
+        }
+
+        if len(strategy.get("interventions") or []) > max_public_interventions:
+            scored: List[tuple[float, int, Dict[str, Any]]] = []
+            confidence_score = {"high": 3.0, "medium": 2.0, "low": 1.0}
+            program_tokens = qtokens(
+                json.dumps(
+                    authoritative_context.get("programs") or [],
+                    ensure_ascii=False,
+                )
+            )
+            goal_tokens = qtokens(
+                json.dumps(
+                    authoritative_context.get("goal") or {},
+                    ensure_ascii=False,
+                )
+            )
+
+            for original_index, item in enumerate(
+                strategy.get("interventions") or []
+            ):
+                combined = " ".join([
+                    str(item.get("title") or ""),
+                    str(item.get("impact_description") or ""),
+                    str(item.get("reportable_value") or ""),
+                ])
+                tokens = qtokens(combined)
+                score = (
+                    confidence_score.get(
+                        str(item.get("confidence_level") or "").lower(),
+                        0.0,
+                    ) * 100.0
+                    + min(len(tokens & authoritative_tokens), 20) * 3.0
+                    + min(len(tokens & program_tokens), 12) * 8.0
+                    + min(len(tokens & goal_tokens), 12) * 5.0
+                )
+                scored.append((score, original_index, item))
+
+            winners = sorted(
+                scored,
+                key=lambda row: (-row[0], row[1]),
+            )[:max_public_interventions]
+            winner_indices = sorted(row[1] for row in winners)
+
+            strategy["interventions"] = [
+                item
+                for i, item in enumerate(strategy.get("interventions") or [])
+                if i in winner_indices
+            ]
+            strategy["final"] = _deterministic_strategy_final(
+                strategy["interventions"]
+            )
+            strategy_selection_debug["kept_original_indices"] = [
+                i + 1 for i in winner_indices
+            ]
+        else:
+            strategy_selection_debug["kept_original_indices"] = list(
+                range(1, len(strategy.get("interventions") or []) + 1)
+            )
+
+        strategy_selection_debug["after_count"] = len(
+            strategy.get("interventions") or []
+        )
 
         # ------------------------------------------------------------------
         # PHASE B — generate the 12-week route separately for each approved
@@ -4429,131 +4535,403 @@ class AtharCouncilEngine:
 
             return final_plan, fallback_numbers, errors2, list(sprint_numbers)
 
-        def generate_chunked_sprint_plan(
+        def _safe_program_names() -> List[str]:
+            names: List[str] = []
+            for row in authoritative_context.get("programs") or []:
+                if not isinstance(row, dict):
+                    continue
+                name = _normalize_strategy_arabic(row.get("name"))
+                if name and name not in names:
+                    names.append(name)
+            return names[:3]
+
+        def _program_reference() -> str:
+            names = _safe_program_names()
+            if not names:
+                return "البرامج القائمة"
+            if len(names) == 1:
+                return f"«{names[0]}»"
+            return " و".join(
+                [f"«{names[0]}»"] + [f"«{x}»" for x in names[1:]]
+            )
+
+        def _intervention_archetype(
             intervention: Dict[str, Any],
-        ) -> tuple[Dict[str, Any], Dict[str, Any]]:
-            accepted: List[Dict[str, Any]] = []
-            raw_chunks: List[str] = []
-            fallback_sprints: List[int] = []
-            repaired_chunks: List[List[int]] = []
-            individually_repaired_sprints: List[int] = []
+        ) -> str:
+            blob = " ".join([
+                str(intervention.get("title") or ""),
+                str(intervention.get("impact_description") or ""),
+                str(intervention.get("reportable_value") or ""),
+            ]).lower()
 
-            for sprint_numbers in SPRINT_CHUNKS:
-                chunk = generate_sprint_chunk(
-                    intervention,
-                    sprint_numbers,
-                    prior_outputs=accepted,
-                )
-                initial_errors, _ = sprint_quality_errors(
-                    chunk,
-                    intervention,
-                    expected_numbers=sprint_numbers,
-                )
-                if initial_errors:
-                    repaired_chunks.append(list(sprint_numbers))
+            if any(x in blob for x in (
+                "meal", "قياس", "مؤشر", "تقييم", "الأثر", "الاثر",
+                "رصد", "متابعة وتقييم",
+            )):
+                return "measurement"
+            if any(x in blob for x in (
+                "تكامل", "اعتماديات", "اعتمادية", "ترابط",
+                "تنسيق", "تشغيل مشترك",
+            )):
+                return "integration"
+            if any(x in blob for x in (
+                "تمويل", "استدامة مالية", "تنمية الموارد",
+                "موارد مالية",
+            )):
+                return "funding"
+            if any(x in blob for x in (
+                "شراكة", "شراكات", "شركاء", "تحالف",
+            )):
+                return "partnership"
+            if any(x in blob for x in (
+                "تعليم", "تعليمي", "تعليمية", "تعلم",
+            )):
+                return "education"
+            return "generic"
 
-                chunk, chunk_fallbacks, _, chunk_individual_repairs = repair_chunk_or_fallback(
-                    intervention,
-                    sprint_numbers,
-                    chunk,
-                    accepted,
-                )
-                fallback_sprints.extend(chunk_fallbacks)
-                individually_repaired_sprints.extend(chunk_individual_repairs)
-                accepted = merge_sprint_units(
-                    accepted,
-                    chunk.get("outputs") or [],
-                )
-                raw_chunks.append(str(chunk.get("raw") or ""))
+        def _archetype_anchor(
+            intervention: Dict[str, Any],
+            archetype: str,
+        ) -> str:
+            title = _normalize_strategy_arabic(
+                intervention.get("title")
+            )
+            if archetype == "measurement":
+                if "MEAL" in title.upper():
+                    return "إطار MEAL لقياس أثر البرامج"
+                return "منظومة قياس الأثر"
+            if archetype == "integration":
+                return "تكامل البرامج والاعتماديات التشغيلية"
+            if archetype == "funding":
+                return "الاستدامة المالية للتدخل"
+            if archetype == "partnership":
+                return "الشراكات المرتبطة بالتدخل"
+            if archetype == "education":
+                return "التدخل التعليمي المعتمد"
 
-            plan = {
-                "outputs": accepted,
-                "raw": "\n\n".join(raw_chunks),
+            words = title.split()
+            return " ".join(words[:7]) if words else "التدخل المعتمد"
+
+        def _unit(
+            sprint_number: int,
+            result: str,
+            *deliverables: str,
+        ) -> Dict[str, Any]:
+            return {
+                "_sprint": sprint_number,
+                "text": _normalize_strategy_arabic(result),
+                "results": [
+                    {"text": _normalize_strategy_arabic(x)}
+                    for x in deliverables
+                    if _normalize_strategy_arabic(x)
+                ][:3],
+                "_composer": True,
             }
 
-            # Final global check catches cross-chunk duplicates/progression collapse.
-            global_errors, global_bad = sprint_quality_errors(plan, intervention)
+        def _measurement_plan(
+            intervention: Dict[str, Any],
+        ) -> List[Dict[str, Any]]:
+            anchor = _archetype_anchor(intervention, "measurement")
+            programs = _program_reference()
 
-            if global_errors:
-                # One bounded global repair call for only the faulty sprint
-                # numbers. This catches cross-chunk duplicates without an
-                # unbounded sequence of per-sprint model calls.
-                bad_numbers = sorted(
-                    n for n in global_bad
-                    if 1 <= n <= SPRINT_COUNT
+            return [
+                _unit(
+                    1,
+                    f"توثقت نقطة البداية ومصادر البيانات اللازمة لـ«{anchor}» وأصبحت قابلة للمراجعة.",
+                    f"إعداد ورقة خط أساس تربط {programs} بالمشكلة الاجتماعية والبيانات المتاحة ضمن «{anchor}».",
+                    f"إعداد سجل فجوات بيانات يوضح ما يتوافر وما يلزم استكماله لقياس أثر {programs}.",
+                ),
+                _unit(
+                    2,
+                    f"اعتمدت أسئلة القياس وقاموس المؤشرات الخاصة بـ«{anchor}» وربطت بالبرامج القائمة.",
+                    f"إعداد قاموس مؤشرات يوضح تعريف كل مؤشر ومصدره وطريقة التحقق منه ضمن «{anchor}».",
+                    f"إعداد أسئلة تقييم تربط مخرجات {programs} بالنتائج التي تستهدفها الجمعية.",
+                ),
+                _unit(
+                    3,
+                    f"أصبحت أدوات جمع البيانات وتعريفاتها جاهزة للاستخدام ضمن «{anchor}».",
+                    f"إعداد نموذج جمع بيانات موحد للمؤشرات المعتمدة في «{anchor}».",
+                    f"إعداد دليل تعبئة مختصر يوضح مصدر كل حقل وطريقة تسجيله والتحقق منه.",
+                ),
+                _unit(
+                    4,
+                    f"ثبتت جاهزية أدوات «{anchor}» بعد اختبارها على البيانات المتاحة وتوثيق الملاحظات.",
+                    f"اختبار نموذج جمع البيانات على سجلات متاحة من {programs} وتوثيق الملاحظات الناتجة.",
+                    f"تحديث أداة القياس وإغلاق ملاحظات الجاهزية التي تمنع استخدامها.",
+                ),
+                _unit(
+                    5,
+                    f"بدأ تشغيل «{anchor}» بملف بيانات أولي موثق المصدر للبرامج القائمة.",
+                    f"إنشاء ملف بيانات أولي يجمع القيم المتاحة للمؤشرات الخاصة بـ{programs}.",
+                    f"إضافة سجل مصدر لكل قيمة حتى يمكن الرجوع إلى دليلها والتحقق منها.",
+                ),
+                _unit(
+                    6,
+                    f"اجتازت البيانات الأولية لـ«{anchor}» مراجعة الجودة وأصبحت صالحة للتحليل.",
+                    f"تنفيذ فحص جودة للبيانات يحدد القيم الناقصة أو غير المتسقة داخل «{anchor}».",
+                    f"إعداد سجل معالجة يوضح ما تم تصحيحه وما بقي بحاجة إلى استكمال.",
+                ),
+                _unit(
+                    7,
+                    f"اكتمل تحليل مساهمة {programs} في النتائج المستهدفة ضمن «{anchor}».",
+                    f"إعداد مصفوفة تربط كل برنامج بالمؤشرات والنتائج التي تظهرها البيانات المتاحة.",
+                    f"إعداد مذكرة تحليل تميز بين ما تدعمه الأدلة وما لا يمكن الجزم به من أثر.",
+                ),
+                _unit(
+                    8,
+                    f"صيغت النتائج الأولية لـ«{anchor}» وربطت كل نتيجة بالدليل المتاح.",
+                    f"إعداد ملخص نتائج يربط كل استنتاج بمؤشر ومصدر تحقق واضح.",
+                    f"إعداد قائمة بالأدلة التي تدعم النتيجة القابلة للتقرير لكل برنامج.",
+                ),
+                _unit(
+                    9,
+                    f"راجعت الجمعية نتائج «{anchor}» وثبتت التعديلات اللازمة قبل اعتماد الاستنتاجات.",
+                    f"إعداد سجل مراجعة للنتائج يوضح الملاحظات والتعديلات المطلوبة على التحليل.",
+                    f"تحديث النتائج بعد المراجعة مع الحفاظ على رابط واضح بين الاستنتاج والدليل.",
+                ),
+                _unit(
+                    10,
+                    f"اعتمدت توصيات التحسين الناتجة عن «{anchor}» وربطت بالأدلة ومجالات التطبيق.",
+                    f"إعداد سجل توصيات يربط كل توصية بالفجوة أو الدليل الذي بررها.",
+                    f"تحديد ما يلزم تحديثه في جمع البيانات أو تنفيذ {programs} استنادًا إلى النتائج.",
+                ),
+                _unit(
+                    11,
+                    f"أصبحت دورة المتابعة والتحديث الخاصة بـ«{anchor}» محددة المسؤوليات وقابلة للاستمرار.",
+                    f"إعداد جدول متابعة يوضح مسؤولية تحديث كل مؤشر ومصدر التحقق الخاص به.",
+                    f"إعداد قالب تقرير دوري يحافظ على نفس تعريفات المؤشرات والأدلة المعتمدة.",
+                ),
+                _unit(
+                    12,
+                    f"اكتمل تقرير «{anchor}» ووثقت النتيجة النهائية والقرار التالي للجمعية.",
+                    f"إعداد تقرير MEAL نهائي يجمع خط الأساس والمؤشرات والتحليل والنتائج والتوصيات.",
+                    f"توثيق قرار المتابعة والخطوة التالية استنادًا إلى ما أثبته «{anchor}».",
+                ),
+            ]
+
+        def _integration_plan(
+            intervention: Dict[str, Any],
+        ) -> List[Dict[str, Any]]:
+            anchor = _archetype_anchor(intervention, "integration")
+            programs = _program_reference()
+
+            return [
+                _unit(
+                    1,
+                    f"توثقت صورة التفاعل الحالية بين {programs} ضمن «{anchor}».",
+                    f"إعداد خريطة تدفق توضح نقاط الاتصال الحالية بين {programs}.",
+                    f"إعداد سجل بالفجوات أو التداخلات التي تؤثر في ترابط البرامج القائمة.",
+                ),
+                _unit(
+                    2,
+                    f"اعتمدت الأدوار والمسؤوليات اللازمة لإدارة «{anchor}».",
+                    f"إعداد مصفوفة أدوار تبين مسؤولية كل طرف داخلي في نقاط الربط بين {programs}.",
+                    f"توثيق نقاط التسليم والاستلام التي تحتاج إلى مسؤول واضح داخل مسار العمل.",
+                ),
+                _unit(
+                    3,
+                    f"اكتملت خريطة الاعتماديات ومسار تبادل المعلومات داخل «{anchor}».",
+                    f"إعداد سجل اعتماديات يوضح ما يحتاجه كل برنامج من البرنامج الآخر لاستكمال عمله.",
+                    f"إعداد مسار مبسط لتبادل البيانات أو المخرجات بين {programs} دون تكرار غير ضروري.",
+                ),
+                _unit(
+                    4,
+                    f"ثبتت جاهزية مسار «{anchor}» للتجربة التشغيلية على النطاق المتاح.",
+                    f"إعداد قائمة تحقق للجاهزية تغطي الأدوار والاعتماديات ومصادر المعلومات المطلوبة.",
+                    f"مراجعة مسار العمل وإغلاق الفجوات التي تمنع بدء التنسيق بين {programs}.",
+                ),
+                _unit(
+                    5,
+                    f"بدأ التشغيل التجريبي لمسار «{anchor}» باستخدام البرامج والموارد القائمة.",
+                    f"تشغيل مسار التنسيق المعتمد بين {programs} وتوثيق نقاط الانتقال الفعلية.",
+                    f"إعداد سجل تنفيذ يوضح أين تم الالتزام بالمسار وأين ظهرت حاجة إلى تعديل.",
+                ),
+                _unit(
+                    6,
+                    f"توثقت اختناقات التنفيذ ونقاط التعثر الفعلية داخل «{anchor}».",
+                    f"إعداد سجل اختناقات يربط كل تعثر بالاعتمادية أو نقطة التسليم المرتبطة به.",
+                    f"تحديد التعديلات التشغيلية التي يمكن تنفيذها داخل الموارد الحالية لمعالجة التعثر.",
+                ),
+                _unit(
+                    7,
+                    f"حدثت خريطة الاعتماديات في «{anchor}» بناءً على أدلة التشغيل الفعلية.",
+                    f"تحديث سجل الاعتماديات بعد التجربة وإزالة التداخلات التي ثبت عدم ضرورتها.",
+                    f"تحديث نقاط التسليم بين {programs} بما يعالج الفجوات التي ظهرت أثناء التشغيل.",
+                ),
+                _unit(
+                    8,
+                    f"استقرت نسخة محسنة من مسار «{anchor}» وأصبحت قابلة للاستخدام المتكرر.",
+                    f"إصدار نسخة محدثة من مسار العمل توضح ترتيب الخطوات ونقاط الربط بين {programs}.",
+                    f"إعداد سجل تغيير يوضح لماذا عُدلت كل نقطة في المسار وما الدليل الذي دعم التعديل.",
+                ),
+                _unit(
+                    9,
+                    f"اكتملت مراجعة جودة «{anchor}» وربطت الملاحظات بالهدف الذي تخدمه البرامج.",
+                    f"إعداد مذكرة مراجعة تقارن مسار العمل المحسن بالمشكلات التي ظهرت في التشغيل.",
+                    f"توثيق ما إذا كان كل اعتماد أو نقطة تنسيق يخدم النتيجة المستهدفة للبرامج القائمة.",
+                ),
+                _unit(
+                    10,
+                    f"اعتمدت التحسينات النهائية لمسار «{anchor}» وأغلقت الملاحظات التشغيلية الأساسية.",
+                    f"تطبيق التعديلات النهائية على خريطة الاعتماديات ومسار التسليم بين {programs}.",
+                    f"إعداد نسخة تشغيلية معتمدة توضح الإجراء المطلوب عند كل نقطة ارتباط.",
+                ),
+                _unit(
+                    11,
+                    f"أصبحت ملكية «{anchor}» ومسؤولية استمراره واضحة داخل الجمعية.",
+                    f"تحديد مسؤولية حفظ وتحديث خريطة الاعتماديات ومسار العمل داخل الجمعية.",
+                    f"إعداد سجل تسليم يوضح الأدوات والوثائق اللازمة لاستمرار التنسيق بين {programs}.",
+                ),
+                _unit(
+                    12,
+                    f"اكتمل ملف «{anchor}» ووثقت النتيجة النهائية والقرار التالي بشأن التكامل بين البرامج.",
+                    f"تجميع خريطة الاعتماديات ومسار العمل وسجل الاختناقات والتحسينات في ملف ختامي واحد.",
+                    f"توثيق القرار التالي للجمعية استنادًا إلى ما أثبته تشغيل «{anchor}».",
+                ),
+            ]
+
+        def _funding_plan(
+            intervention: Dict[str, Any],
+        ) -> List[Dict[str, Any]]:
+            anchor = _archetype_anchor(intervention, "funding")
+            programs = _program_reference()
+
+            phases = [
+                ("توثقت صورة التمويل الحالية", "خريطة مصادر التمويل الواردة في البيانات", "سجل ارتباط التمويل بالبرامج القائمة"),
+                ("اتضحت مخاطر الاعتماد على التمويل الحالي", "سجل مخاطر تمويل مرتبطة باستمرار البرامج", "مذكرة تبين أثر كل خطر على البرامج"),
+                ("حددت احتياجات الموارد دون افتراض مبالغ جديدة", "قائمة احتياجات تشغيلية مرتبطة بالمخرجات", "سجل يميز الاحتياج المؤكد عن غير المتاح"),
+                ("اعتمدت معايير ترتيب احتياجات الموارد", "مصفوفة أولوية مرتبطة بالأثر والضرورة", "سجل مبررات ترتيب الاحتياجات"),
+                ("بدأ تطبيق منهج توزيع الموارد على النطاق المتاح", "ورقة تخصيص للموارد المتاحة فقط", "سجل قرارات يوضح سبب كل تخصيص"),
+                ("توثقت نتائج التطبيق الأولي ومواطن العجز", "سجل فجوات موارد بعد التطبيق", "مذكرة أثر الفجوات على البرامج"),
+                ("حدثت خطة الموارد بناء على الأدلة", "نسخة محدثة من خطة الموارد", "سجل تغييرات مدعوم بالأدلة"),
+                ("استقرت آلية أكثر قابلية للاستمرار", "إجراء مبسط لمراجعة الاحتياجات والموارد", "قالب متابعة للموارد المرتبطة بالبرامج"),
+                ("راجعت الجمعية جودة قرارات الموارد", "مذكرة مراجعة لقرارات التمويل", "سجل ملاحظات وتحسينات"),
+                ("اعتمدت تحسينات الاستدامة المالية الممكنة", "قائمة إجراءات قابلة للتنفيذ ضمن المعطيات", "سجل ارتباط كل إجراء برسالة الجمعية"),
+                ("أصبحت مسؤولية متابعة الموارد واضحة", "جدول مسؤوليات المتابعة", "قالب تحديث دوري للمخاطر والاحتياجات"),
+                ("اكتمل ملف الاستدامة المالية للتدخل", "ملف ختامي يجمع المخاطر والاحتياجات والقرارات", "توثيق القرار والخطوة التالية"),
+            ]
+
+            rows = []
+            for i, (state, d1, d2) in enumerate(phases, start=1):
+                rows.append(
+                    _unit(
+                        i,
+                        f"{state} ضمن «{anchor}» بما يخدم {programs}.",
+                        f"{d1} ضمن «{anchor}».",
+                        f"{d2} المرتبط بـ{programs}.",
+                    )
                 )
+            return rows
 
-                existing_good = [
-                    unit for unit in accepted
-                    if int(unit.get("_sprint") or 0) not in set(bad_numbers)
-                ]
-                previous_bad = [
-                    unit for unit in accepted
-                    if int(unit.get("_sprint") or 0) in set(bad_numbers)
-                ]
+        def _partnership_plan(
+            intervention: Dict[str, Any],
+        ) -> List[Dict[str, Any]]:
+            anchor = _archetype_anchor(intervention, "partnership")
+            programs = _program_reference()
 
-                grouped_repair = generate_sprint_chunk(
-                    intervention,
-                    bad_numbers,
-                    prior_outputs=existing_good,
-                    repair_errors=global_errors,
-                    previous_output=json.dumps(
-                        previous_bad,
-                        ensure_ascii=False,
-                    ),
+            phases = [
+                ("توثقت العلاقات القائمة ذات الصلة", "سجل العلاقات الواردة في البيانات", "خريطة ارتباط كل علاقة بالبرامج"),
+                ("اتضحت القيمة المتوقعة والأدوار", "مصفوفة قيمة وأدوار للجهات القائمة", "سجل نقاط الالتقاء مع البرامج"),
+                ("اكتملت متطلبات التنسيق", "قائمة متطلبات تبادل المعلومات", "مسار تنسيق عملي"),
+                ("ثبتت الجاهزية للتعاون", "قائمة تحقق للجاهزية", "سجل ملاحظات وإغلاقات"),
+                ("بدأ تشغيل مسار التعاون", "سجل تنفيذ للاتصالات والالتزامات", "توثيق المخرجات المتبادلة"),
+                ("توثقت نتائج التعاون الأولية", "مذكرة نتائج", "سجل نقاط التعثر"),
+                ("عولجت فجوات التعاون", "قائمة تعديلات", "سجل أسباب التعديل"),
+                ("استقرت آلية التعاون", "نسخة محدثة من مسار التنسيق", "سجل الالتزامات"),
+                ("اكتملت مراجعة جودة التعاون", "مذكرة مراجعة", "قائمة تحسينات"),
+                ("اعتمدت التحسينات النهائية", "مسار تنسيق نهائي", "سجل إغلاق الملاحظات"),
+                ("أصبحت مسؤولية الاستمرار واضحة", "جدول مسؤوليات", "سجل تسليم"),
+                ("اكتمل ملف الشراكات", "ملف ختامي للأدوار والمخرجات", "توثيق القرار التالي"),
+            ]
+
+            rows = []
+            for i, (state, d1, d2) in enumerate(phases, start=1):
+                rows.append(
+                    _unit(
+                        i,
+                        f"{state} ضمن «{anchor}» المرتبط بـ{programs}.",
+                        f"{d1} لخدمة «{anchor}».",
+                        f"{d2} المرتبط بـ{programs}.",
+                    )
                 )
-                repair_errors, repair_bad = sprint_quality_errors(
-                    grouped_repair,
-                    intervention,
-                    expected_numbers=bad_numbers,
+            return rows
+
+        def _generic_plan(
+            intervention: Dict[str, Any],
+        ) -> List[Dict[str, Any]]:
+            title = _normalize_strategy_arabic(
+                intervention.get("title")
+            ) or "التدخل المعتمد"
+            programs = _program_reference()
+
+            phases = [
+                ("توثقت نقطة البداية", "ورقة وضع حالي", "سجل فجوات"),
+                ("اعتمد نطاق العمل", "وثيقة نطاق", "جدول مسؤوليات"),
+                ("اكتملت أدوات التنفيذ", "أداة تنفيذ رئيسية", "دليل استخدام مختصر"),
+                ("ثبتت الجاهزية", "قائمة تحقق للجاهزية", "سجل ملاحظات مغلقة"),
+                ("بدأ التطبيق الفعلي", "سجل تنفيذ", "توثيق المخرجات الفعلية"),
+                ("توثقت الأدلة الأولية", "سجل أدلة", "مذكرة نجاحات وتعثرات"),
+                ("عولجت فجوات التنفيذ", "قائمة تحسينات", "سجل أسباب التعديل"),
+                ("استقرت نسخة محسنة", "نسخة محدثة من أداة التنفيذ", "سجل تغيير"),
+                ("اكتملت مراجعة الجودة", "مذكرة مراجعة", "قائمة ملاحظات نهائية"),
+                ("اعتمدت التحسينات النهائية", "نسخة تنفيذ نهائية", "سجل إغلاق"),
+                ("أصبحت مسؤولية الاستمرار واضحة", "جدول مسؤوليات المتابعة", "سجل تسليم"),
+                ("اكتمل الملف الختامي", "ملف أدلة نهائي", "توثيق القرار والخطوة التالية"),
+            ]
+
+            rows = []
+            for i, (state, d1, d2) in enumerate(phases, start=1):
+                rows.append(
+                    _unit(
+                        i,
+                        f"{state} لـ«{title}» وربطت بالبرامج القائمة.",
+                        f"{d1} خاص بـ«{title}» ويستند إلى {programs}.",
+                        f"{d2} يوضح ما تم إنجازه داخل «{title}».",
+                    )
                 )
+            return rows
 
-                repaired_map = {
-                    int(x.get("_sprint") or 0): x
-                    for x in (grouped_repair.get("outputs") or [])
-                    if isinstance(x, dict)
-                }
+        def deterministic_artifact_plan(
+            intervention: Dict[str, Any],
+        ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+            archetype = _intervention_archetype(intervention)
 
-                replacements: List[Dict[str, Any]] = []
-                for n in bad_numbers:
-                    candidate = repaired_map.get(n)
-                    if candidate is not None and n not in repair_bad:
-                        replacements.append(candidate)
-                        if n not in individually_repaired_sprints:
-                            individually_repaired_sprints.append(n)
-                    else:
-                        replacements.append(
-                            deterministic_sprint_fallback(intervention, n)
-                        )
-                        if n not in fallback_sprints:
-                            fallback_sprints.append(n)
+            if archetype == "measurement":
+                outputs = _measurement_plan(intervention)
+            elif archetype == "integration":
+                outputs = _integration_plan(intervention)
+            elif archetype == "funding":
+                outputs = _funding_plan(intervention)
+            elif archetype == "partnership":
+                outputs = _partnership_plan(intervention)
+            else:
+                outputs = _generic_plan(intervention)
 
-                accepted = merge_sprint_units(
-                    existing_good,
-                    replacements,
-                )
-
-                plan = {
-                    "outputs": accepted,
-                    "raw": plan.get("raw"),
-                }
-                global_errors, global_bad = sprint_quality_errors(plan, intervention)
-
-            # At this point only an internal inconsistency should fail the job.
-            if global_errors:
+            plan = {
+                "outputs": outputs,
+                "raw": "",
+            }
+            errors, bad = sprint_quality_errors(plan, intervention)
+            if errors:
                 raise ValueError(
-                    "Internal chunked 12-week planner could not produce a valid "
-                    f"plan for intervention «{intervention.get('title')}»: "
-                    + " | ".join(global_errors[:20])
+                    "Internal deterministic artifact composer failed quality "
+                    f"validation for «{intervention.get('title')}», "
+                    f"faulty={sorted(bad)}: "
+                    + " | ".join(errors[:20])
                 )
 
             return plan, {
-                "architecture": "two_chunks_of_six_base_writer",
-                "repaired_chunks": repaired_chunks,
-                "individually_repaired_sprints": sorted(set(individually_repaired_sprints)),
-                "fallback_sprints": sorted(set(fallback_sprints)),
-                "fallback_count": len(set(fallback_sprints)),
+                "architecture": "deterministic_artifact_composer_v6",
+                "archetype": archetype,
+                "model_calls": 0,
+                "fallback_sprints": [],
+                "fallback_count": 0,
             }
+
+        def generate_chunked_sprint_plan(
+            intervention: Dict[str, Any],
+        ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+            return deterministic_artifact_plan(intervention)
 
         approved = strategy["interventions"]
         interventions: List[Dict[str, Any]] = []
@@ -4587,8 +4965,8 @@ class AtharCouncilEngine:
                 "sprint_count": len(clean_outputs),
                 "quality_errors": [],
                 "planning_architecture": chunk_debug.get("architecture"),
-                "repaired_chunks": chunk_debug.get("repaired_chunks"),
-                "individually_repaired_sprints": chunk_debug.get("individually_repaired_sprints"),
+                "planning_archetype": chunk_debug.get("archetype"),
+                "planning_model_calls": chunk_debug.get("model_calls"),
                 "fallback_sprints": chunk_debug.get("fallback_sprints"),
                 "fallback_count": chunk_debug.get("fallback_count"),
             })
@@ -4651,7 +5029,7 @@ class AtharCouncilEngine:
         }
 
         self._last_meta_debug = {
-            "architecture": "meta_strategy_plus_base_sprint_writer_v5",
+            "architecture": "meta_strategy_plus_deterministic_artifact_composer_v6",
             "meta_advisor_slug": meta["slug"],
             "meta_advisor_name": meta["name"],
             "meta_prompt_path": meta["prompt_path"],
@@ -4661,10 +5039,9 @@ class AtharCouncilEngine:
             "plan_quality": plan_debug,
             "meta_generation_calls_expected": 2,
             "sprint_writer": {
-                "adapter": sprint_writer_adapter,
-                "normal_calls_per_intervention": len(SPRINT_CHUNKS),
-                "max_chunk_repair_calls_per_intervention": len(SPRINT_CHUNKS),
-                "max_global_repair_calls_per_intervention": 1,
+                "mode": "deterministic_artifact_composer_v6",
+                "model_calls_per_intervention": 0,
+                "max_public_interventions": max_public_interventions,
             },
             "meta_review_phase": {
                 "advisor_count": len(meta_reviews),
@@ -4675,6 +5052,7 @@ class AtharCouncilEngine:
             },
             "strategy_numeric_sanitizations": strategy.get("_numeric_sanitizations", []),
             "strategy_targeted_recovery": strategy_recovery_debug,
+            "strategy_selection": strategy_selection_debug,
         }
 
         self._validate_screen3_public_response(result)
