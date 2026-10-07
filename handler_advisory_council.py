@@ -4558,35 +4558,117 @@ class AtharCouncilEngine:
         def _intervention_archetype(
             intervention: Dict[str, Any],
         ) -> str:
-            blob = " ".join([
-                str(intervention.get("title") or ""),
+            """
+            Classify by the approved TITLE first.
+
+            Matching is boundary-aware so words such as `متكاملة` do not
+            accidentally match the separate concept `تكامل`.
+            """
+            title = _normalize_strategy_arabic(
+                intervention.get("title")
+            ).lower()
+            body = " ".join([
                 str(intervention.get("impact_description") or ""),
                 str(intervention.get("reportable_value") or ""),
             ]).lower()
 
-            if any(x in blob for x in (
-                "meal", "قياس", "مؤشر", "تقييم", "الأثر", "الاثر",
-                "رصد", "متابعة وتقييم",
-            )):
-                return "measurement"
-            if any(x in blob for x in (
-                "تكامل", "اعتماديات", "اعتمادية", "ترابط",
-                "تنسيق", "تشغيل مشترك",
-            )):
-                return "integration"
-            if any(x in blob for x in (
-                "تمويل", "استدامة مالية", "تنمية الموارد",
-                "موارد مالية",
-            )):
-                return "funding"
-            if any(x in blob for x in (
-                "شراكة", "شراكات", "شركاء", "تحالف",
-            )):
-                return "partnership"
-            if any(x in blob for x in (
-                "تعليم", "تعليمي", "تعليمية", "تعلم",
-            )):
+            def has_term(value: str, *terms: str) -> bool:
+                for term in terms:
+                    if re.search(
+                        rf"(?<![\w\u0600-\u06FF]){re.escape(term)}(?![\w\u0600-\u06FF])",
+                        value,
+                        flags=re.I,
+                    ):
+                        return True
+                return False
+
+            if has_term(
+                title,
+                "أهلية", "اهلية", "الأهلية", "الاهلية",
+                "الأسر", "الاسر", "هشاشة", "الهشاشة",
+                "احتياج الأسر", "احتياج الاسر", "حالات اجتماعية",
+                "الفئات الأكثر", "الفئات الاكثر",
+            ):
+                return "social_support"
+
+            if has_term(
+                title,
+                "تعلم", "التعلم", "تعليمي", "تعليمية",
+                "تعليم", "التعليم", "مهارات", "المهارات",
+                "طلبة", "الطلبة", "طلاب", "الطلاب",
+                "محتوى تعليمي", "المحتوى التعليمي",
+            ):
                 return "education"
+
+            if has_term(
+                title,
+                "تكامل", "التكامل", "اعتماديات", "الاعتماديات",
+                "اعتمادية", "الاعتمادية", "ترابط", "الترابط",
+                "تنسيق", "التنسيق", "تشغيل مشترك",
+            ):
+                return "integration"
+
+            if has_term(
+                title,
+                "تمويل", "التمويل", "استدامة مالية", "الاستدامة المالية",
+                "تنمية الموارد", "موارد مالية",
+            ):
+                return "funding"
+
+            if has_term(
+                title,
+                "شراكة", "الشراكة", "شراكات", "الشراكات",
+                "شركاء", "الشركاء", "تحالف", "التحالف",
+            ):
+                return "partnership"
+
+            if has_term(
+                title,
+                "meal", "قياس الأثر", "قياس اثر", "القياس",
+                "مؤشرات", "المؤشرات", "رصد", "الرصد",
+                "متابعة وتقييم", "منهجية قياس",
+            ):
+                return "measurement"
+
+            # Fallback to other approved strategy fields only if title is silent.
+            if has_term(
+                body,
+                "أهلية", "الاهلية", "الأهلية", "الأسر", "الاسر",
+                "هشاشة", "الهشاشة", "حالات اجتماعية",
+            ):
+                return "social_support"
+            if has_term(
+                body,
+                "تعلم", "التعلم", "تعليمي", "تعليمية",
+                "تعليم", "التعليم", "مهارات", "المهارات",
+            ):
+                return "education"
+            if has_term(
+                body,
+                "تكامل", "التكامل", "اعتماديات", "الاعتماديات",
+                "اعتمادية", "الاعتمادية", "ترابط", "الترابط",
+            ):
+                return "integration"
+            if has_term(
+                body,
+                "تمويل", "التمويل", "استدامة مالية",
+                "الاستدامة المالية", "تنمية الموارد",
+            ):
+                return "funding"
+            if has_term(
+                body,
+                "شراكة", "الشراكة", "شراكات", "الشراكات",
+                "شركاء", "الشركاء",
+            ):
+                return "partnership"
+            if has_term(
+                body,
+                "meal", "قياس", "القياس", "مؤشر", "مؤشرات",
+                "المؤشر", "المؤشرات", "تقييم الأثر", "تقييم الاثر",
+                "رصد", "الرصد", "متابعة وتقييم",
+            ):
+                return "measurement"
+
             return "generic"
 
         def _archetype_anchor(
@@ -4607,7 +4689,9 @@ class AtharCouncilEngine:
             if archetype == "partnership":
                 return "الشراكات المرتبطة بالتدخل"
             if archetype == "education":
-                return "التدخل التعليمي المعتمد"
+                return "إطار التعلم للطلبة"
+            if archetype == "social_support":
+                return "نموذج أهلية واحتياج الأسر"
 
             words = title.split()
             return " ".join(words[:7]) if words else "التدخل المعتمد"
@@ -4707,6 +4791,96 @@ class AtharCouncilEngine:
                     f"إعداد تقرير MEAL نهائي يجمع خط الأساس والمؤشرات والتحليل والنتائج والتوصيات.",
                     f"توثيق قرار المتابعة والخطوة التالية استنادًا إلى ما أثبته «{anchor}».",
                 ),
+            ]
+
+        def _education_plan(
+            intervention: Dict[str, Any],
+        ) -> List[Dict[str, Any]]:
+            anchor = _archetype_anchor(intervention, "education")
+            programs = _program_reference()
+
+            return [
+                _unit(1, f"توثقت احتياجات التعلم والقيود المؤثرة في المستفيدين ضمن «{anchor}».",
+                      "إعداد ورقة احتياجات تعلم تستند إلى المشكلة الاجتماعية والفئة المستهدفة والبيانات المتاحة.",
+                      f"إعداد سجل يوضح كيف يمكن لـ{programs} دعم الوصول إلى نتائج التعلم دون تغيير نطاقها القائم."),
+                _unit(2, f"اعتمدت نتائج التعلم التي سيستهدفها «{anchor}» وأصبحت قابلة للملاحظة والمتابعة.",
+                      "إعداد مصفوفة نتائج تعلم تربط كل نتيجة بحاجة محددة لدى الطلبة المستهدفين.",
+                      "تحديد دليل تحقق مناسب لكل نتيجة تعلم دون اختراع مستهدفات رقمية جديدة."),
+                _unit(3, f"اكتمل المسار التعليمي الأولي لـ«{anchor}» من نقطة البداية حتى النتيجة المستهدفة.",
+                      "إعداد خريطة تعلم ترتب المهارات أو الخبرات التعليمية في تسلسل قابل للتطبيق.",
+                      "ربط كل مرحلة في خريطة التعلم بالنتيجة التي يفترض أن تحققها."),
+                _unit(4, f"اكتملت مواصفات الأنشطة والمحتوى اللازمة لتطبيق «{anchor}».",
+                      "إعداد بطاقة مواصفات لكل نشاط توضح الهدف والمحتوى وطريقة التنفيذ ودليل الإنجاز.",
+                      "مراجعة الأنشطة للتأكد من ملاءمتها للفئة المستهدفة وسياق القرى النائية."),
+                _unit(5, f"أصبحت أداة متابعة تقدم التعلم جاهزة للاستخدام ضمن «{anchor}».",
+                      "إعداد أداة بسيطة لتوثيق التقدم في نتائج التعلم المعتمدة.",
+                      "إعداد دليل استخدام يوضح متى تسجل الملاحظة وكيف يتحقق الفريق من اكتمالها."),
+                _unit(6, f"ثبتت جاهزية «{anchor}» للتطبيق بعد مراجعة المسار والأنشطة وأداة المتابعة.",
+                      "تنفيذ مراجعة مكتبية لمسار التعلم والأنشطة وأداة المتابعة وتوثيق الملاحظات.",
+                      "إغلاق الملاحظات التي تمنع استخدام الحزمة التعليمية بصورة متسقة."),
+                _unit(7, f"بدأ التطبيق التجريبي المحدود لـ«{anchor}» ووثقت الملاحظات الناتجة عنه.",
+                      "تطبيق الحزمة التعليمية على النطاق المتاح وتوثيق ما تم تنفيذه فعليًا.",
+                      "إعداد سجل ملاحظات يوضح ما نجح وما احتاج إلى تعديل أثناء التطبيق."),
+                _unit(8, f"اكتمل تحليل أدلة التطبيق الأولي لـ«{anchor}» وربطت الملاحظات بنتائج التعلم.",
+                      "إعداد مذكرة تحليل تربط ملاحظات التطبيق بكل نتيجة تعلم معتمدة.",
+                      "تحديد الأجزاء التي تحتاج إلى تعديل استنادًا إلى الدليل المتاح فقط."),
+                _unit(9, f"حدثت الحزمة التعليمية لـ«{anchor}» بناءً على أدلة التطبيق الأولي.",
+                      "تحديث خريطة التعلم والأنشطة التي أثبتت المراجعة حاجتها إلى تعديل.",
+                      "إعداد سجل تغيير يوضح سبب كل تعديل والدليل الذي استند إليه."),
+                _unit(10, f"اكتملت النسخة التشغيلية من «{anchor}» وأصبحت قابلة للاستخدام بصورة متكررة.",
+                      "تجميع خريطة التعلم والأنشطة وأداة المتابعة في حزمة تشغيلية واحدة.",
+                      "إعداد دليل تنفيذ مختصر يحافظ على اتساق تطبيق الحزمة التعليمية."),
+                _unit(11, f"أصبحت مسؤولية متابعة جودة «{anchor}» وتحديثه واضحة داخل الجمعية.",
+                      "إعداد جدول مسؤوليات يوضح من يراجع نتائج التعلم ومن يحدث المحتوى عند الحاجة.",
+                      "إعداد قالب مراجعة دورية يوثق الملاحظات والتعديلات على الحزمة التعليمية."),
+                _unit(12, f"اكتمل ملف «{anchor}» ووثقت نتائج التطبيق والقرار التالي للجمعية.",
+                      "إعداد ملف ختامي يجمع نتائج التعلم وخريطة التعلم والأنشطة وأداة المتابعة وأدلة التطبيق.",
+                      f"توثيق القرار التالي بشأن استمرار أو تطوير «{anchor}» استنادًا إلى الأدلة المتاحة."),
+            ]
+
+        def _social_support_plan(
+            intervention: Dict[str, Any],
+        ) -> List[Dict[str, Any]]:
+            anchor = _archetype_anchor(intervention, "social_support")
+            programs = _program_reference()
+
+            return [
+                _unit(1, f"توثقت بيانات الاستحقاق والاحتياج المتاحة حاليًا لتأسيس «{anchor}».",
+                      f"إعداد جرد للبيانات المتاحة عن الأسر المستفيدة والمرتبطة بـ{programs}.",
+                      "إعداد سجل فجوات يوضح البيانات اللازمة لاتخاذ قرار أهلية أكثر اتساقًا."),
+                _unit(2, f"اعتمدت أبعاد الأهلية والاحتياج التي سيستخدمها «{anchor}» دون أوزان أو أرقام مخترعة.",
+                      "إعداد قاموس معايير يعرّف كل بعد من أبعاد الأهلية والاحتياج ومصدر التحقق منه.",
+                      "ربط كل معيار بسبب واضح يتعلق بتوجيه الدعم للفئات الأكثر احتياجًا."),
+                _unit(3, f"اكتملت مصفوفة القرار الأولية لـ«{anchor}» وأصبحت قواعد القبول والمراجعة واضحة.",
+                      "إعداد مصفوفة قرار توضح كيف تجمع الأدلة للوصول إلى قرار أهلية دون أوزان غير مدعومة.",
+                      "إعداد قائمة بالحالات التي تحتاج إلى مراجعة إضافية بسبب نقص أو تعارض البيانات."),
+                _unit(4, f"أصبحت استمارة جمع بيانات الأهلية والتحقق جاهزة للاستخدام ضمن «{anchor}».",
+                      "إعداد استمارة موحدة لجمع بيانات الأهلية والاحتياج ومصادر التحقق المرتبطة بها.",
+                      "إعداد دليل تعبئة يوضح المستند أو المصدر المطلوب لكل معلومة."),
+                _unit(5, f"ثبتت جاهزية «{anchor}» بعد اختبار قواعده واستماراته على السجلات المتاحة.",
+                      "اختبار الاستمارة ومصفوفة القرار على سجلات متاحة دون تغيير قرارات الدعم القائمة تلقائيًا.",
+                      "توثيق الحالات التي كشفت غموضًا في تعريف معيار أو في مصدر التحقق."),
+                _unit(6, f"عولجت فجوات البيانات والقواعد التي ظهرت أثناء اختبار «{anchor}».",
+                      "تحديث تعريفات المعايير التي سببت اختلافًا في تفسير الأهلية.",
+                      "إعداد سجل معالجة يوضح ما تم تعديله وما بقي بحاجة إلى تحقق إضافي."),
+                _unit(7, f"أصبحت آلية التعامل مع الحالات الاستثنائية ونقص البيانات واضحة داخل «{anchor}».",
+                      "إعداد مسار مراجعة للحالات التي تفتقد دليلًا كافيًا أو تحتوي بيانات متعارضة.",
+                      "إعداد سجل قرار يوضح سبب قبول الحالة أو إحالتها للمراجعة الإضافية."),
+                _unit(8, f"اكتملت مراجعة اتساق قرارات «{anchor}» عبر الحالات المتاحة.",
+                      "مراجعة القرارات الناتجة للتأكد من تطبيق نفس المعايير على الحالات المتشابهة.",
+                      "توثيق مواضع عدم الاتساق واقتراح التعديل اللازم على قاعدة القرار."),
+                _unit(9, f"حدث «{anchor}» بناءً على نتائج مراجعة الاتساق وجودة الأدلة.",
+                      "تحديث مصفوفة القرار وتعريفات المعايير استنادًا إلى الملاحظات المثبتة.",
+                      "إعداد سجل تغيير يوضح سبب كل تعديل في النموذج."),
+                _unit(10, f"اكتملت النسخة التشغيلية من «{anchor}» وأصبحت قابلة للاستخدام مع البرامج القائمة.",
+                      "تجميع الاستمارة وقاموس المعايير ومصفوفة القرار ومسار المراجعة في حزمة تشغيلية واحدة.",
+                      "إعداد دليل إجراء مختصر يوضح تسلسل تقييم الأهلية من جمع البيانات حتى توثيق القرار."),
+                _unit(11, f"أصبحت مسؤولية تشغيل ومراجعة «{anchor}» واضحة داخل الجمعية.",
+                      "إعداد جدول مسؤوليات يوضح من يجمع البيانات ومن يراجع الأدلة ومن يوثق القرار.",
+                      "إعداد قالب متابعة يرصد مشكلات التطبيق والحالات التي تحتاج إلى مراجعة دورية."),
+                _unit(12, f"اكتمل ملف «{anchor}» ووثقت نتيجة التطبيق والقرار التالي بشأن توجيه الدعم.",
+                      "إعداد ملف ختامي يجمع المعايير والاستمارة ومصفوفة القرار وسجل التعديلات وأدلة الاختبار.",
+                      f"توثيق القرار التالي لتطوير أو استمرار استخدام «{anchor}» مع {programs}."),
             ]
 
         def _integration_plan(
@@ -4891,6 +5065,38 @@ class AtharCouncilEngine:
                 )
             return rows
 
+        def _compact_intervention_anchor(
+            intervention: Dict[str, Any],
+        ) -> str:
+            """Return a short validator-significant phrase from the title."""
+            title = _normalize_strategy_arabic(
+                intervention.get("title")
+            ).strip()
+            if not title:
+                return "التدخل المعتمد"
+
+            approved_tokens = qtokens(
+                " ".join([
+                    title,
+                    str(intervention.get("impact_description") or ""),
+                    str(intervention.get("reportable_value") or ""),
+                ])
+            )
+
+            selected: List[str] = []
+            for word in re.findall(r"[A-Za-z\u0600-\u06FF]+", title):
+                if len(word) < 3:
+                    continue
+                if qtokens(word) & approved_tokens:
+                    selected.append(word)
+                if len(selected) >= 4:
+                    break
+
+            phrase = " ".join(selected).strip()
+            if phrase and (qtokens(phrase) & approved_tokens):
+                return phrase
+            return title
+
         def _anchor_deterministic_plan_to_intervention(
             outputs: List[Dict[str, Any]],
             intervention: Dict[str, Any],
@@ -4915,6 +5121,9 @@ class AtharCouncilEngine:
             title = _normalize_strategy_arabic(
                 intervention.get("title")
             ).strip()
+            compact_anchor = _compact_intervention_anchor(
+                intervention
+            )
             approved_intervention_text = " ".join([
                 str(intervention.get("title") or ""),
                 str(intervention.get("impact_description") or ""),
@@ -4941,10 +5150,10 @@ class AtharCouncilEngine:
                     or broken_or_placeholder(cleaned)
                 )
 
-                if needs_anchor and title:
+                if needs_anchor and compact_anchor:
                     cleaned = (
                         cleaned
-                        + f" ضمن التدخل المعتمد «{title}»"
+                        + f" ضمن «{compact_anchor}»"
                     )
 
                 cleaned = re.sub(r"\s+", " ", cleaned).strip()
@@ -4962,7 +5171,7 @@ class AtharCouncilEngine:
                 ):
                     cleaned = (
                         f"اكتمل توثيق مخرج أسبوعي محدد وقابل للتحقق ضمن "
-                        f"التدخل المعتمد «{title}»."
+                        f"«{compact_anchor}»."
                     )
 
                 return cleaned
@@ -4998,6 +5207,10 @@ class AtharCouncilEngine:
 
             if archetype == "measurement":
                 outputs = _measurement_plan(intervention)
+            elif archetype == "education":
+                outputs = _education_plan(intervention)
+            elif archetype == "social_support":
+                outputs = _social_support_plan(intervention)
             elif archetype == "integration":
                 outputs = _integration_plan(intervention)
             elif archetype == "funding":
@@ -5026,7 +5239,7 @@ class AtharCouncilEngine:
                 )
 
             return plan, {
-                "architecture": "deterministic_artifact_composer_v6_1_anchored",
+                "architecture": "deterministic_artifact_composer_v6_2_semantic",
                 "archetype": archetype,
                 "model_calls": 0,
                 "fallback_sprints": [],
@@ -5134,7 +5347,7 @@ class AtharCouncilEngine:
         }
 
         self._last_meta_debug = {
-            "architecture": "meta_strategy_plus_deterministic_artifact_composer_v6_1",
+            "architecture": "meta_strategy_plus_deterministic_artifact_composer_v6_2",
             "meta_advisor_slug": meta["slug"],
             "meta_advisor_name": meta["name"],
             "meta_prompt_path": meta["prompt_path"],
@@ -5144,7 +5357,7 @@ class AtharCouncilEngine:
             "plan_quality": plan_debug,
             "meta_generation_calls_expected": 2,
             "sprint_writer": {
-                "mode": "deterministic_artifact_composer_v6_1_anchored",
+                "mode": "deterministic_artifact_composer_v6_2_semantic",
                 "model_calls_per_intervention": 0,
                 "max_public_interventions": max_public_interventions,
             },
