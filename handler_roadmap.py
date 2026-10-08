@@ -30,6 +30,20 @@ _ADVISOR_AS_TASK = re.compile(
     r"(?:المستشار(?:ين)?|مستشار(?:ين)?|المستشارة|مستشارة|الخبير(?:ين)?|خبير(?:ين)?)"
 )
 _WEAK_INDICATOR = re.compile(r"(?:التوصيات\s+المؤجلة|التوصيات\s+المؤثرة|التغطية\s+المؤقتة\s+للتمويل)")
+# A structurally valid unit can still contradict the Arabic indicator label.
+# Refuse ambiguous/incorrect model output rather than altering its semantics.
+_PERCENT_LABEL = re.compile(r"^(?:نسبة|النسبة|مؤشر نسبة|معدل النسبة)\s")
+_COUNT_LABEL = re.compile(r"^(?:عدد|العدد|إجمالي عدد)\s")
+_MULTIPLIER_LABEL = re.compile(r"^(?:مضاعف|معامل المضاعفة)\s")
+_WEEKLY_COMPLETION_REASON = re.compile(r"(?:إنجاز|الإنجاز|اكتمال|إتمام|عمل ملموس|مهام السبرينت|التنفيذ خلال)")
+_COMPLETION_WORDS = re.compile(
+    r"(?:اكتمال|إتمام|إنجاز|المنجز|المنفذ|المصنف|المصنفة|الموثق|الموثقة|"
+    r"المعتمد|المعتمدة|المراجع|المراجعة|المحلل|المحللة|المحدد|المحددة|"
+    r"المسجل|المسجلة|المجموع|المجمعة|المدخل|المدخلة|المستكمل|المستكملة|"
+    r"المعد|المعدة|المستلم|المستلمة|المسلم|المسلمة|الجاهز|الجاهزة|"
+    r"توثيق|تصنيف|تسليم|إعداد|إنهاء)"
+)
+
 # Historical lookbacks are facts about availability/period, not target proposals.
 # Validate them against the authoritative sprint context; numeric KPI targets
 # remain suggestions, as explicitly allowed by the Screen 5 contract.
@@ -103,6 +117,12 @@ def _indicator(data: Any) -> dict:
         raise RoadmapError("Indicator must measure sprint work, not an advisor")
     if _WEAK_INDICATOR.search(name):
         raise RoadmapError("Indicator does not measure a concrete sprint deliverable")
+    if _PERCENT_LABEL.search(name) and unit != "percent":
+        raise RoadmapError("Indicator name begins with نسبة, so unit must be percent (not number)")
+    if _COUNT_LABEL.search(name) and unit != "number":
+        raise RoadmapError("Indicator name begins with عدد, so unit must be number")
+    if _MULTIPLIER_LABEL.search(name) and unit != "multiplier":
+        raise RoadmapError("Indicator name begins with مضاعف, so unit must be multiplier")
     return {"name": name, "unit": unit, "target": _number(data.get("target"), unit)}
 
 
@@ -393,6 +413,23 @@ def _parse_regeneration(raw: str, kind: str, existing: Any) -> tuple[dict, str]:
     return indicator, message
 
 
+def _check_indicator_follows_reason(indicator: dict, reason: str) -> None:
+    """On an explicit weekly-completion rewrite, block baseline/outcome ratios.
+
+    The contract allows proposed numeric targets without benchmarks. This guard
+    *only* checks that a completion-oriented user request receives a progress
+    metric, not another measurement of the association's current finances.
+    """
+    if not _WEEKLY_COMPLETION_REASON.search(reason or ""):
+        return
+    if not _COMPLETION_WORDS.search(indicator["name"]):
+        raise RoadmapError(
+            "User requested a measurable sprint completion indicator, but the "
+            "suggested name describes a baseline/outcome rather than completed work. "
+            "Use a documented/approved/classified/completed deliverable."
+        )
+
+
 def _meta_context(advisors: list[dict], opinions: list[dict]) -> list[dict]:
     titles = {x["slug"]: x["title"] for x in advisors}
     return [{"slug": o["advisor_id"], "role": titles[o["advisor_id"]],
@@ -412,6 +449,12 @@ def _meta_system(persona: str) -> str:
         "يُسمح لك باقتراح مستهدفات target رقمية معقولة حتى بلا Benchmarks، لكنها مقترحات تنفيذية وليست حقائق تاريخية. "
         "لا تفترض توفر عدد سنوات أو سجلات أو نسب فعلية لم يذكرها سياق المخرج أو المنظمة؛ استخدم 'البيانات المتاحة' عند غيابها. "
         "الوحدات المسموحة فقط percent أو number أو multiplier، وpercent من 0 إلى 100 لا 0 إلى 1. "
+        "كل مؤشر يبدأ بكلمة نسبة يجب أن تكون وحدته percent، ويبدأ بعدد يجب أن تكون وحدته number. "
+        "لا تستخدم عددًا لتمثيل نسبة حتى لو ذكر المستهدف 10%. لا تغيّر معنى المؤشر أو وحدته دون تطابق دقيق. "
+        "في إعادة التوليد إذا طلبت الجمعية قياس إنجاز العمل هذا الأسبوع، لا ترجع نسبة توزيع التمويل "
+        "(مثل نسبة الإيرادات غير الموسمية من إجمالي الدخل) لأنها تصف وضعًا ماليًا لا إنجاز مهمة. "
+        "اختر بدلاً منها نسبة اكتمال توثيق البيانات أو عدد التقارير المعتمدة أو عدد المصادر المصنفة. "
+        "اجعل رسالة META_MESSAGE متفقة مع اسم المؤشر ووحدته ومستهدفه النهائي في الإخراج. "
         "لا تذكر أي مستشار داخل رسائل المجلس إلا برمز slug صحيح لمستشار وارد في advisors الذين ساهموا، "
         "واكتب صوت الميتا بصيغة meta_advisor؛ لا تختلق مستشارين جدد. "
         "اكتب العربية الفصحى، ولا تُخرج JSON. التزم ببروتوكول السطور حرفيًا."
@@ -529,7 +572,14 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
         if not previous_name:
             raise RoadmapError("Current indicator name is required")
         old_names = [previous_name] + [x for x in other if isinstance(x, str)]
-        output_rule = "INDICATOR|مؤشر عربي جديد غير مكرر|number|1؛ سطر واحد فقط. يمكنك استخدام percent أو multiplier مع target مناسب."
+        output_rule = (
+            "INDICATOR|اسم مؤشر جديد|unit|target؛ سطر واحد فقط. "
+            "مثال صحيح: INDICATOR|عدد التقارير المعتمدة|number|1 أو "
+            "INDICATOR|نسبة اكتمال توثيق المصادر|percent|100. "
+            "الاسم الذي يبدأ بـ(نسبة) يلزمه percent، والذي يبدأ بـ(عدد) يلزمه number. "
+            "إن طلبت الجمعية مؤشر إنجاز خلال السبرينت، اكتب مؤشر اكتمال أو عمل منجز "
+            "وليس نسبة تكوين الإيرادات أو الوضع الحالي."
+        )
     opinions, messages = _specialist_messages(council, data, advisors,
                     {"sprint": sprint, "reason": reason, "existing": old,
                      "other_indicators": payload.get("other_indicators")})
@@ -553,6 +603,8 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
             suggestion, note = _parse_regeneration(raw, kind, old_names)
             if kind == "sprint":
                 _check_historical_lookback({"tasks": suggestion["tasks"]}, sprint)
+            else:
+                _check_indicator_follows_reason(suggestion, reason)
             _check_council_message(note, {a["slug"] for a in advisors})
             break
         except RoadmapError as exc:
