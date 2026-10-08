@@ -22,6 +22,21 @@ _ARABIC = re.compile(r"[\u0600-\u06FF]")
 _INVALID_SCRIPTS = re.compile(r"[\u0400-\u052F\u3040-\u30FF\u4E00-\u9FFF]")
 _ADVISOR_SLUG = re.compile(r"^AOS-[A-Z]{2,5}-\d{2}$")
 _META_SLUG = re.compile(r"^AOS-META-\d{2}$")
+# Only council transcript messages may reference selected advisor slugs.
+# Tasks/titles/indicators are organization-facing work, never instructions
+# to invoke experts. This directly guards an issue observed on the GPU smoke.
+_ANY_ADVISOR_ID = re.compile(r"(?<![A-Za-z0-9])AOS-[A-Z]{2,5}-\d{2}(?![A-Za-z0-9])")
+_ADVISOR_AS_TASK = re.compile(
+    r"(?:المستشار(?:ين)?|مستشار(?:ين)?|المستشارة|مستشارة|الخبير(?:ين)?|خبير(?:ين)?)"
+)
+_WEAK_INDICATOR = re.compile(r"(?:التوصيات\s+المؤجلة|التوصيات\s+المؤثرة|التغطية\s+المؤقتة\s+للتمويل)")
+# Historical lookbacks are facts about availability/period, not target proposals.
+# Validate them against the authoritative sprint context; numeric KPI targets
+# remain suggestions, as explicitly allowed by the Screen 5 contract.
+_HISTORICAL_LOOKBACK = re.compile(
+    r"(?:(?:السنوات?|للسنوات?)\s+(?:الثلاث|الثلاثة|الأربع|الخمس|ثلاث|أربع|خمس|[0-9٠-٩]+)\s+(?:الأخيرة|الماضية)"
+    r"|(?:آخر|خلال)\s+(?:ثلاث|ثلاثة|أربع|خمس|[0-9٠-٩]+)\s+سنوات?)"
+)
 
 
 class RoadmapError(ValueError):
@@ -84,6 +99,10 @@ def _indicator(data: Any) -> dict:
     unit = data.get("unit")
     if not name or unit not in VALID_UNITS:
         raise RoadmapError("Missing indicator name or invalid unit")
+    if _ANY_ADVISOR_ID.search(name) or _ADVISOR_AS_TASK.search(name):
+        raise RoadmapError("Indicator must measure sprint work, not an advisor")
+    if _WEAK_INDICATOR.search(name):
+        raise RoadmapError("Indicator does not measure a concrete sprint deliverable")
     return {"name": name, "unit": unit, "target": _number(data.get("target"), unit)}
 
 
@@ -96,6 +115,8 @@ def _validate_tasks(tasks: Any, *, minimum: int = 1) -> list[dict]:
         clean = _text(value, limit=360, arabic=True)
         if not clean:
             raise RoadmapError("Empty/invalid task text")
+        if _ANY_ADVISOR_ID.search(clean) or _ADVISOR_AS_TASK.search(clean):
+            raise RoadmapError("Task is about calling an advisor, not an executable NGO action")
         out.append({"text": clean})
     if len({_norm(x["text"]) for x in out}) != len(out):
         raise RoadmapError("Duplicate tasks in sprint")
@@ -113,10 +134,15 @@ def _validate_sprint(row: Any, number: int) -> dict:
     desc = _text(row.get("description"), limit=650, arabic=True)
     if not title or not desc:
         raise RoadmapError(f"Sprint {number} missing Arabic title or description")
-    tasks = _validate_tasks(row.get("tasks"))
+    if _ANY_ADVISOR_ID.search(title + " " + desc):
+        raise RoadmapError(f"Sprint {number} title/description contains advisor ID")
+    # Contract design target: approximately 3-5 tasks and indicators per sprint.
+    tasks = _validate_tasks(row.get("tasks"), minimum=3)
+    if len(tasks) > 5:
+        raise RoadmapError(f"Sprint {number} should have 3-5 tasks")
     inds = row.get("indicators")
-    if not isinstance(inds, list) or not 1 <= len(inds) <= 8:
-        raise RoadmapError(f"Sprint {number} indicators missing")
+    if not isinstance(inds, list) or not 3 <= len(inds) <= 5:
+        raise RoadmapError(f"Sprint {number} should have 3-5 indicators")
     indicators = [_indicator(x) for x in inds]
     if len({_norm(x["name"]) for x in indicators}) != len(indicators):
         raise RoadmapError(f"Sprint {number} has duplicate indicators")
@@ -375,12 +401,20 @@ def _meta_context(advisors: list[dict], opinions: list[dict]) -> list[dict]:
 
 def _meta_system(persona: str) -> str:
     return persona + "\n\n" + (
-        "أنت تقود مجلس خارطة الطريق. السياق المرسل من الـBackend هو المرجع الوحيد للمخرجات. "
-        "لا تغيّر output أو phase أو results. لا تكرر المهام بين الأسابيع المتجاورة المرتبطة بنفس المخرج. "
-        "اكتب بالعربية الفصحى، وخطوات قابلة للتنفيذ خلال خمسة أيام عمل، ومؤشرات قابلة للقياس بمستهدف لهذا السبرينت لا للمسار كله. "
-        "لك أن تقترح قيم target عملية حتى لو لا توجد قيم معيارية؛ لا تصفها كحقائق تاريخية. "
-        "الوحدات المسموحة فقط: percent أو number أو multiplier. كل target رقم لا نص، وpercent قيمة من 0 إلى 100. "
-        "إذا ذكرت مستشارًا فاستخدم slug فقط. لا تُخرج JSON. التزم تمامًا ببروتوكول السطور الذي سيُرسل لك."
+        "أنت تقود مجلس خارطة الطريق طبقًا لعقد Screen 5. مخرج السبرينت المعين من Backend هو المرجع الملزم. "
+        "لا تُغيّر output أو phase أو results. إذا تكرر المخرج عبر أسابيع متجاورة، ابنِ عليه بالتدرج بدل إعادة نفس المهام. "
+        "المهام موجهة لفريق الجمعية وليست أوامر لتشغيل المستشارين أو التواصل معهم: "
+        "ممنوع أن يظهر أي رمز مستشار AOS- أو لفظ مستشار أو خبير في TITLE وDESCRIPTION وTASK وINDICATOR. "
+        "بدل 'ابدأ بـ AOS-FG-18' اكتب فعلًا قابلًا للتسليم مثل 'تصنيف الإيرادات حسب المصدر في جدول موحد'. "
+        "كل مهمة إجراء عملي واحد محدد يمكن إتمامه في خمسة أيام عمل، بترتيب الجمع ثم الإعداد ثم المراجعة/الاعتماد المناسب للمخرج. "
+        "اختر مؤشرات تقيس إنجاز المخرج خلال هذا السبرينت نفسه، مثل اكتمال البيانات ذات الصلة أو عدد المصادر المصنفة "
+        "أو عدد التقارير التي سُلّمت، ولا تستخدم مؤشرات غامضة مثل 'التوصيات المؤثرة' أو 'التوصيات المؤجلة'. "
+        "يُسمح لك باقتراح مستهدفات target رقمية معقولة حتى بلا Benchmarks، لكنها مقترحات تنفيذية وليست حقائق تاريخية. "
+        "لا تفترض توفر عدد سنوات أو سجلات أو نسب فعلية لم يذكرها سياق المخرج أو المنظمة؛ استخدم 'البيانات المتاحة' عند غيابها. "
+        "الوحدات المسموحة فقط percent أو number أو multiplier، وpercent من 0 إلى 100 لا 0 إلى 1. "
+        "لا تذكر أي مستشار داخل رسائل المجلس إلا برمز slug صحيح لمستشار وارد في advisors الذين ساهموا، "
+        "واكتب صوت الميتا بصيغة meta_advisor؛ لا تختلق مستشارين جدد. "
+        "اكتب العربية الفصحى، ولا تُخرج JSON. التزم ببروتوكول السطور حرفيًا."
     )
 
 
@@ -407,7 +441,17 @@ def _complete(data: dict, council: Any, advisors: list[dict], persona: str) -> d
                                  "output_occurrence": encountered[key],
                                  "output_total_sprints": all_keys[key]})
         task = {
-            "task": "أنشئ سبرينت لكل رقم معتمد أدناه فقط؛ لا تضف ولا تحذف أرقامًا. لكل سبرينت عنوان ووصف قصير و3-5 مهام متسلسلة و3-5 مؤشرات قابلة للقياس. لو المخرج مكرر طور الخطة تدريجيًا حسب output_occurrence. لا ترجع حقول output/results/phase.",
+            "task": (
+                "أنشئ سبرينت لكل رقم معتمد أدناه فقط، اعتمادًا على output.text وoutput.results. "
+                "لكل سبرينت عنوان ووصف قصير و3-5 مهام متسلسلة ملموسة لفريق الجمعية و3-5 مؤشرات تقيس إنجاز المخرج. "
+                "اعرض محتوى الإنتاج المطلوب فعليًا، وليس ما ينبغي على المستشارين فعله أو مجرد تلخيص آرائهم. "
+                "لا تنشئ أسماء مستشارين ولا مهام للتواصل معهم. "
+                "إذا كان المخرج تقرير تحليل مصادر التمويل، فتتعلق المهام بجمع الإيرادات وتصنيف مصادرها وحساب نسبها وتوثيق التقرير، "
+                "وتقيس المؤشرات البيانات المصنفة والتقرير، لا عدد التوصيات المؤجلة. "
+                "المستهدفات أرقام تنفيذية مقترحة لهذا الأسبوع وليست نتائج مسجلة. "
+                "إذا تكرر المخرج في أكثر من سبرينت، طوّر العمل تدريجيًا حسب output_occurrence. "
+                "لا ترجع حقول output/results/phase ولا تضف أو تحذف أرقام السبرينت."
+            ),
             "context": _context(data), "advisors": _meta_context(advisors, opinions),
             "previous_sprints_summary": [{"number": x["number"], "title": x["title"],
                                            "tasks": [y["text"] for y in x["tasks"]]}
@@ -415,7 +459,7 @@ def _complete(data: dict, council: Any, advisors: list[dict], persona: str) -> d
             "sprints_to_write": payload_rows,
             "required_output_format": (
                 f"BEGIN_SPRINT|{batch[0]['number']}\nTITLE|عنوان عربي\nDESCRIPTION|وصف عربي\nTASK|مهمة 1\nTASK|مهمة 2\nTASK|مهمة 3\n"
-                "INDICATOR|اسم المؤشر|percent|85\nINDICATOR|اسم آخر|number|3\nINDICATOR|مؤشر ثالث|number|1\n"
+                "INDICATOR|اسم مقياس لإنجاز المخرج|number|1\nINDICATOR|اسم مقياس ثان لإنجاز المخرج|percent|100\nINDICATOR|اسم مقياس ثالث لإنجاز المخرج|number|3\n"
                 "END_SPRINT\nكرر بنفس الترتيب لكل سبرينت مطلوب، ثم META_MESSAGE|خلاصة قرار المجلس بالعربية"
             ),
         }
@@ -429,6 +473,21 @@ def _complete(data: dict, council: Any, advisors: list[dict], persona: str) -> d
                                  int(os.getenv("ROADMAP_META_TOKENS", "1900")))
             try:
                 new_sprints, note = _parse_batch(raw, numbers)
+                _check_council_message(note, {a["slug"] for a in advisors})
+                previous_rows = [
+                    {**p, "output_key": _output_key(next(
+                        (r["output"] for r in requested if r["number"] == p["number"]), None
+                    ))} for p in completed
+                ]
+                for sprint, source in zip(new_sprints, batch):
+                    _check_historical_lookback(sprint, {
+                        "output": source["output"],
+                        "organization": payload.get("organization"),
+                        "goal": payload.get("goal"),
+                    })
+                    current = {**sprint, "output_key": _output_key(source["output"])}
+                    _check_recent_history(current, previous_rows)
+                    previous_rows.append(current)
                 break
             except RoadmapError as exc:
                 error = str(exc)
@@ -438,6 +497,8 @@ def _complete(data: dict, council: Any, advisors: list[dict], persona: str) -> d
         meta_messages.append(note)
     if [x["number"] for x in completed] != [x["number"] for x in requested]:
         raise RoadmapError("Incomplete roadmap: no partial successes allowed")
+    for model_message in messages:
+        _check_council_message(model_message["message"], {a["slug"] for a in advisors})
     return _envelope(opinions, messages, meta_messages, {"sprints": completed})
 
 
@@ -474,7 +535,8 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
                      "other_indicators": payload.get("other_indicators")})
     task = {
         "task": ("أعد توليد " + ("مهام هذا السبرينت فقط" if kind == "sprint" else "مؤشر واحد فقط")
-                 + ". التزم بسبب المستخدم، والمخرج والعنوان والوصف. لا تعِد النص السابق ولا تغيّر أي حقل آخر."),
+                 + ". التزم بسبب المستخدم، والمخرج والعنوان والوصف. لا تعِد النص السابق ولا تغيّر أي حقل آخر. "
+                 "يجب أن يكون البديل عملًا/مقياسًا تنفيذيًا لفريق الجمعية، لا توجيهًا للمستشارين ولا مؤشرًا غامضًا."),
         "reason": reason, "sprint": sprint, "previous": old,
         "other_indicators": payload.get("other_indicators", []),
         "advisors": _meta_context(advisors, opinions),
@@ -489,12 +551,48 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
                              int(os.getenv("ROADMAP_REGEN_TOKENS", "850")))
         try:
             suggestion, note = _parse_regeneration(raw, kind, old_names)
+            if kind == "sprint":
+                _check_historical_lookback({"tasks": suggestion["tasks"]}, sprint)
+            _check_council_message(note, {a["slug"] for a in advisors})
             break
         except RoadmapError as exc:
             error = str(exc)
     else:
         raise RoadmapError(f"Failed regeneration: {error}")
+    for model_message in messages:
+        _check_council_message(model_message["message"], {a["slug"] for a in advisors})
     return _envelope(opinions, messages, [note], suggestion)
+
+
+def _check_council_message(message: str, selected: set[str]) -> None:
+    unselected = set(_ANY_ADVISOR_ID.findall(message)) - selected
+    if unselected:
+        raise RoadmapError("Council message mentions advisor not selected for this request: "
+                           + ", ".join(sorted(unselected)))
+
+
+def _check_historical_lookback(sprint: dict, context: Any) -> None:
+    """Avoid inventing years of past financial records absent in backend data."""
+    delivered = " ".join([
+        sprint.get("title", ""), sprint.get("description", ""),
+        *(task.get("text", "") for task in sprint.get("tasks", [])),
+        *(indicator.get("name", "") for indicator in sprint.get("indicators", [])),
+    ])
+    if _HISTORICAL_LOOKBACK.search(delivered) and not _HISTORICAL_LOOKBACK.search(_json(context)):
+        raise RoadmapError("Unsupported historical lookback period; use available records")
+
+
+def _check_recent_history(sprint: dict, previous_sprints: list[dict]) -> None:
+    """Block obvious duplicate task sets in adjacent sprints on the same output."""
+    if not previous_sprints:
+        return
+    current_set = {_norm(task["text"]) for task in sprint["tasks"]}
+    for prior in previous_sprints:
+        if prior["output_key"] != sprint["output_key"]:
+            continue
+        prior_set = {_norm(task["text"]) for task in prior["tasks"]}
+        if current_set == prior_set:
+            raise RoadmapError("Repeated output has identical sprint tasks instead of progression")
 
 
 def _envelope(opinions: list[dict], messages: list[dict], meta_messages: list[str], suggestion: dict) -> dict:
