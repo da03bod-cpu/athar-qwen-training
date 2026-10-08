@@ -19,7 +19,7 @@ from typing import Any
 VALID_UNITS = frozenset(("percent", "number", "multiplier"))
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٫", "01234567890123456789.")
 _ARABIC = re.compile(r"[\u0600-\u06FF]")
-_INVALID_SCRIPTS = re.compile(r"[\u0400-\u052F\u3040-\u30FF\u4E00-\u9FFF]")
+_INVALID_SCRIPTS = re.compile(r"[\u0400-\u052F\u3040-\u30FF\u4E00-\u9FFF\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF\uD7B0-\uD7FF]")
 _ADVISOR_SLUG = re.compile(r"^AOS-[A-Z]{2,5}-\d{2}$")
 _META_SLUG = re.compile(r"^AOS-META-\d{2}$")
 # Only council transcript messages may reference selected advisor slugs.
@@ -55,6 +55,32 @@ _HISTORICAL_LOOKBACK = re.compile(
 
 class RoadmapError(ValueError):
     """Validation/generation failure that must NOT result in partial success."""
+
+
+# Defensive checks for documented Arabic corruption observed in live RunPod
+# results. These cannot replace full linguistic review, but ensure known
+# failures are never treated as a successful customer-visible result.
+_SUSPECT_ARABIC = re.compile(
+    r"\b(?:المؤثمة|التضاريب)\b|الجمعية\s+(?:لن\s+)?يبدأ\b"
+)
+
+
+def _require_generated_arabic_quality(raw: str) -> None:
+    """Reject the entire generation and retry, rather than dropping one task.
+
+    A mixed-language output may omit the crucial first step if filtered down
+    to 3-5 tasks. Rejecting the batch keeps execution order and coverage.
+    """
+    if _INVALID_SCRIPTS.search(raw):
+        raise RoadmapError(
+            "Generated text mixes non-Arabic writing systems (e.g. Korean). "
+            "Rewrite every task and META_MESSAGE in natural Arabic only."
+        )
+    if _SUSPECT_ARABIC.search(raw):
+        raise RoadmapError(
+            "Generated Arabic contains corrupted or ungrammatical wording. "
+            "Rewrite all tasks and META_MESSAGE in clear Modern Standard Arabic."
+        )
 
 
 def _text(value: Any, *, limit: int = 1000, arabic: bool = False) -> str:
@@ -513,7 +539,8 @@ def _meta_system(persona: str) -> str:
         "اجعل رسالة META_MESSAGE متفقة مع اسم المؤشر ووحدته ومستهدفه النهائي في الإخراج. "
         "لا تذكر أي مستشار داخل رسائل المجلس إلا برمز slug صحيح لمستشار وارد في advisors الذين ساهموا، "
         "واكتب صوت الميتا بصيغة meta_advisor؛ لا تختلق مستشارين جدد. "
-        "اكتب العربية الفصحى، ولا تُخرج JSON. التزم ببروتوكول السطور حرفيًا."
+        "اكتب عربية فصحى سليمة وخالية من الكلمات الكورية والصينية والألفاظ المحرّفة أو الركيكة. "
+        "تأكد من سلامة المهام وعناوينها وMETA_MESSAGE؛ لا تُخرج JSON. التزم ببروتوكول السطور حرفيًا."
     )
 
 
@@ -571,6 +598,7 @@ def _complete(data: dict, council: Any, advisors: list[dict], persona: str) -> d
             raw = _meta_generate(council, system, candidate,
                                  int(os.getenv("ROADMAP_META_TOKENS", "1900")))
             try:
+                _require_generated_arabic_quality(raw)
                 new_sprints, note = _parse_batch(raw, numbers)
                 _check_council_message(note, {a["slug"] for a in advisors})
                 previous_rows = [
@@ -597,6 +625,7 @@ def _complete(data: dict, council: Any, advisors: list[dict], persona: str) -> d
     if [x["number"] for x in completed] != [x["number"] for x in requested]:
         raise RoadmapError("Incomplete roadmap: no partial successes allowed")
     for model_message in messages:
+        _require_generated_arabic_quality(model_message["message"])
         _check_council_message(model_message["message"], {a["slug"] for a in advisors})
     return _envelope(opinions, messages, meta_messages, {"sprints": completed})
 
@@ -636,9 +665,16 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
             "إن طلبت الجمعية مؤشر إنجاز خلال السبرينت، اكتب مؤشر اكتمال أو عمل منجز "
             "وليس نسبة تكوين الإيرادات أو الوضع الحالي."
         )
-    opinions, messages = _specialist_messages(council, data, advisors,
-                    {"sprint": sprint, "reason": reason, "existing": old,
-                     "other_indicators": payload.get("other_indicators")})
+    # Keep the old malformed tasks for semantic comparison, but do not feed
+    # them into Specialist/Meta prompts where foreign text can be echoed.
+    advisor_context = {"sprint": sprint, "reason": reason,
+                       "other_indicators": payload.get("other_indicators")}
+    if kind == "sprint_indicator":
+        advisor_context["existing"] = old
+    opinions, messages = _specialist_messages(council, data, advisors, advisor_context)
+    for opinion in opinions:
+        _require_generated_arabic_quality(opinion["reasoning"])
+        _require_generated_arabic_quality(opinion["recommendation"])
     task = {
         "task": ("أعد توليد " + ("مهام هذا السبرينت فقط" if kind == "sprint" else "مؤشر واحد فقط")
                  + ". التزم بسبب المستخدم، والمخرج والعنوان والوصف. لا تعِد النص السابق ولا تغيّر أي حقل آخر. "
@@ -681,6 +717,8 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
                 "ابدأ من جديد تمامًا؛ اكتب 4 مهام جديدة ملموسة يقوم بها موظفو "
                 "الجمعية، كل واحدة فعل يمكن توثيق إنجازه قبل نهاية السبرينت، "
                 "بلا توجيهات للخبراء أو رموز أو مسميات استشارية. "
+                "اكتب بالعربية الفصحى السليمة فقط، بلا أحرف كورية أو صينية أو ألفاظ مشوهة، "
+                "وراجع صياغة رسالة META_MESSAGE أيضًا. "
                 "اتبع البروتوكول TASK|... لكل مهمة وMETA_MESSAGE|... في النهاية."
                 if kind == "sprint" else
                 f"ردك السابق رُفض: {error}. أعِد الرد بالبروتوكول المطلوب."
@@ -688,6 +726,7 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
         raw = _meta_generate(council, _meta_system(persona), candidate,
                              int(os.getenv("ROADMAP_REGEN_TOKENS", "850")))
         try:
+            _require_generated_arabic_quality(raw)
             try:
                 suggestion, note = _parse_regeneration(raw, kind, old_names)
             except RoadmapError as first_error:
@@ -711,6 +750,7 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
     else:
         raise RoadmapError(f"Failed regeneration after {attempts} attempts: {error}")
     for model_message in messages:
+        _require_generated_arabic_quality(model_message["message"])
         _check_council_message(model_message["message"], {a["slug"] for a in advisors})
     return _envelope(opinions, messages, [note], suggestion)
 
@@ -755,6 +795,8 @@ def _envelope(opinions: list[dict], messages: list[dict], meta_messages: list[st
     for note in meta_messages:
         transcript.append({"sequence": len(transcript) + 1,
                            "from": "meta_advisor", "message": note})
+    for opinion in opinions:
+        _require_generated_arabic_quality(opinion["reasoning"])
     return {"involved_advisor_ids": [x["advisor_id"] for x in opinions],
             "advisor_reasonings": [{"advisor_id": x["advisor_id"], "reasoning": x["reasoning"]} for x in opinions],
             "transcript": transcript,
