@@ -350,9 +350,26 @@ def _specialist_messages(council: Any, data: dict, advisors: list[dict], context
     return opinions, messages
 
 
-def _meta_generate(council: Any, system: str, task: dict, tokens: int) -> str:
-    return _clean_model(council._generate("meta", system, _json(task), tokens,
-                                         deterministic=True, repetition_penalty=1.08))
+def _meta_generate(
+    council: Any,
+    system: str,
+    task: dict,
+    tokens: int,
+    *,
+    sample: bool = False,
+    block_non_arabic_scripts: bool = False,
+) -> str:
+    """Use the existing Meta adapter; avoid repeated identical greedy failures.
+
+    The production AtharCouncilEngine._generate supports forbidden_token_regex:
+    a logits processor excludes tokens whose decoded form contains Hangul,
+    Han, Kana, or Cyrillic. The downstream text validator remains mandatory.
+    Only retries sample: first attempt stays reproducible.
+    """
+    kwargs = {"deterministic": not sample, "repetition_penalty": 1.08}
+    if block_non_arabic_scripts:
+        kwargs["forbidden_token_regex"] = _INVALID_SCRIPTS.pattern
+    return _clean_model(council._generate("meta", system, _json(task), tokens, **kwargs))
 
 
 def _lines(raw: str) -> list[str]:
@@ -595,8 +612,12 @@ def _complete(data: dict, council: Any, advisors: list[dict], persona: str) -> d
             candidate = dict(task)
             if error:
                 candidate["repair_instruction"] = f"الاستجابة السابقة رُفضت: {error}. أعد كل كتل السبرينت لهذه المجموعة كاملة؛ لا تحذف أي سطر."
-            raw = _meta_generate(council, system, candidate,
-                                 int(os.getenv("ROADMAP_META_TOKENS", "1900")))
+            raw = _meta_generate(
+                council, system, candidate,
+                int(os.getenv("ROADMAP_META_TOKENS", "1900")),
+                sample=(attempt > 0),
+                block_non_arabic_scripts=True,
+            )
             try:
                 _require_generated_arabic_quality(raw)
                 new_sprints, note = _parse_batch(raw, numbers)
@@ -723,8 +744,12 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
                 if kind == "sprint" else
                 f"ردك السابق رُفض: {error}. أعِد الرد بالبروتوكول المطلوب."
             )
-        raw = _meta_generate(council, _meta_system(persona), candidate,
-                             int(os.getenv("ROADMAP_REGEN_TOKENS", "850")))
+        raw = _meta_generate(
+            council, _meta_system(persona), candidate,
+            int(os.getenv("ROADMAP_REGEN_TOKENS", "850")),
+            sample=(attempt > 0),
+            block_non_arabic_scripts=True,
+        )
         try:
             _require_generated_arabic_quality(raw)
             try:
