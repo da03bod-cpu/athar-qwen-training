@@ -1,3 +1,4 @@
+
 FROM axolotlai/axolotl-cloud-uv:main-latest
 
 ENV JUPYTER_DISABLE=1 \
@@ -7,7 +8,7 @@ ENV JUPYTER_DISABLE=1 \
 
 WORKDIR /workspace/data/athar
 
-# Keep the existing Axolotl environment and only add the RunPod SDK.
+# Keep the existing Axolotl environment.
 RUN uv pip install --python /workspace/axolotl-venv/bin/python runpod
 
 RUN apt-get update \
@@ -16,24 +17,29 @@ RUN apt-get update \
 
 RUN git lfs install
 
-# Fail during build if the runtime needed for both routes is not present.
+# Validate existing runtime.
 RUN test -x /workspace/axolotl-venv/bin/python \
     && /workspace/axolotl-venv/bin/python -c "import runpod, torch, transformers, peft, bitsandbytes; print('ATHAR RUNTIME OK', torch.__version__, transformers.__version__, peft.__version__)"
 
-# Existing training + advisor-match assets.
+# Training and matching assets.
 COPY configs/ ./configs/
 COPY data/ ./data/
 
-# New council assets. All prompts are normal UTF-8 Markdown, so they are baked
-# into the image. Heavy LoRA weights remain in Git LFS and are fetched lazily
-# on the first advisory_consultation request using GITHUB_TOKEN.
+# Advisory council.
 COPY advisors/ ./advisors/
 COPY prompts/ ./prompts/
 COPY handler_advisory_council.py ./handler_advisory_council.py
 
-# Unified entrypoint: advisory_match + advisory_consultation + existing training.
+# Screen 5 Roadmap.
+COPY handler_roadmap.py ./handler_roadmap.py
+
+# Main unified handler.
 COPY handler.py ./handler.py
 
-LABEL athar.redeploy="2026-09-21-unified-council-v1"
+# Verify Python syntax during the build.
+RUN /workspace/axolotl-venv/bin/python -m py_compile \
+    handler.py handler_advisory_council.py handler_roadmap.py
+
+LABEL athar.redeploy="2026-10-08-da03-screen5-roadmap"
 
 ENTRYPOINT ["/workspace/axolotl-venv/bin/python", "-u", "/workspace/data/athar/handler.py"]
