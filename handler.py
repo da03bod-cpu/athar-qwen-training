@@ -4998,7 +4998,7 @@ def advisory_match_rich_v24(job_input):
 
     if candidate_themes:
         review_raw, review_tokens = _v18_generate_text(
-            RICH_V18_THEME_REVIEW_PROMPT,
+        RICH_V18_THEME_REVIEW_PROMPT,
             {
                 "facts": facts,
                 "candidate_themes": candidate_themes,
@@ -5998,7 +5998,7 @@ def advisory_match_rich_v26(job_input):
     )
 
     print(
-        "Rich v26 pass C: strict review of functional candidates >= 0.50...",
+"Rich v26 pass C: strict review of functional candidates >= 0.50...",
         flush=True,
     )
 
@@ -7998,7 +7998,7 @@ def _v30_score_group(
     return rows, input_tokens
 
 
-# ------------------------------------------------------------------
+        # ------------------------------------------------------------------
 # Deterministic evidence guards
 # ------------------------------------------------------------------
 
@@ -14384,6 +14384,9 @@ def ensure_council_engine():
 
 def advisory_consultation_inference(job_input):
     engine = ensure_council_engine()
+    if job_input.get("topic") == "roadmap":
+        from handler_roadmap import consult_roadmap
+        return consult_roadmap(engine, job_input)
     return engine.consult(job_input)
 
 
@@ -18264,6 +18267,19 @@ def _handler_impl(job):
     # Production advisory council:
     # selected advisors -> independent Full DNA opinions -> Meta
     # ---------------------------------------------------------------
+    if request_type == "advisory_consultation" and job_input.get("topic") == "roadmap":
+        if job_input.get("preflight", False):
+            return {
+                "status": "advisory_consultation_preflight_ok",
+                "topic": "roadmap",
+                "kind": ["generate", "regenerate"],
+                "regeneration_targets": ["sprint", "sprint_indicator"],
+                "sprint_max": 12,
+                "sprint_working_days": 5,
+                "response_contract": "athar_screen5_roadmap_v1",
+            }
+        return advisory_consultation_inference(job_input)
+
     if request_type == "advisory_consultation":
         if job_input.get(
             "preflight",
