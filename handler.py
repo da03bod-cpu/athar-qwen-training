@@ -14003,7 +14003,7 @@ def _discover_lfs_adapter_rel(repo_dir, kind):
             continue
 
         match = re.match(
-            r"^[0-9a-fA-F]+\\s+[*-]\\s+(.+)$",
+            r"^[0-9a-fA-F]+\s+[*-]\s+(.+)$",
             line,
         )
         if not match:
@@ -14046,7 +14046,7 @@ def _discover_lfs_adapter_rel(repo_dir, kind):
             for path in tracked_paths
             if (
                 re.search(
-                    r"(^|/)specialist(?:-v?\\d+)?(/|$)",
+                    r"(^|/)specialist(?:[-_]v?\d+)?(/|$)",
                     path,
                     flags=re.I,
                 )
