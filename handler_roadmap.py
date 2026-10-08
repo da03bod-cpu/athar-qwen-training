@@ -413,6 +413,62 @@ def _parse_regeneration(raw: str, kind: str, existing: Any) -> tuple[dict, str]:
     return indicator, message
 
 
+def _task_advisory_insights(opinions: list[dict]) -> list[dict]:
+    """Pass independent specialist advice to Meta without advisor handles.
+
+    The transcript and advisor_reasonings still preserve the actual selected
+    advisor IDs.  Those IDs and advisor titles have no operational reason to
+    appear inside the task-list generation prompt, and encourage the model to
+    generate steps like 'call AOS-FG-18' instead of NGO work.
+    """
+    result = []
+    for opinion in opinions:
+        item = {}
+        for field in ("reasoning", "recommendation"):
+            value = _text(opinion.get(field), limit=750, arabic=True)
+            if value and not _ANY_ADVISOR_ID.search(value) and not _ADVISOR_AS_TASK.search(value):
+                item[field] = value
+        if item:
+            result.append(item)
+    return result
+
+
+def _recover_valid_task_subset(raw: str, existing: list[Any]) -> tuple[dict, str]:
+    """Keep only Meta's valid executable tasks, never author new model output.
+
+    If at least 3 different new tasks remain, the response still matches the
+    contract's single tasks[] rewrite. If fewer remain, reject and retry; no
+    misleading success or invented deterministic fallback is allowed.
+    """
+    lines = _lines(raw)
+    notes = [_text(line.partition("|")[2], limit=1100, arabic=True)
+             for line in lines if line.startswith("META_MESSAGE|")]
+    notes = [x for x in notes if x]
+    if not notes:
+        raise RoadmapError("Meta Advisor message missing")
+    task_lines = [line.partition("|")[2] for line in lines if line.startswith("TASK|")]
+    if not task_lines:
+        raise RoadmapError("No tasks to recover")
+    valid, seen = [], set()
+    for candidate in task_lines:
+        try:
+            task = _validate_tasks([candidate])[0]
+        except RoadmapError:
+            continue
+        key = _norm(task["text"])
+        if key not in seen:
+            seen.add(key)
+            valid.append(task)
+    # The contract allows at least one, but 3-5 ensures a useful weekly list.
+    if not 3 <= len(valid) <= 5:
+        raise RoadmapError("Too few valid executable tasks after filtering")
+    old_tasks = [_norm(x.get("text") if isinstance(x, dict) else x)
+                 for x in existing]
+    if old_tasks == [_norm(x["text"]) for x in valid]:
+        raise RoadmapError("Regeneration returned unchanged task list")
+    return {"tasks": valid}, notes[-1]
+
+
 def _check_indicator_follows_reason(indicator: dict, reason: str) -> None:
     """On an explicit weekly-completion rewrite, block baseline/outcome ratios.
 
@@ -442,7 +498,7 @@ def _meta_system(persona: str) -> str:
         "لا تُغيّر output أو phase أو results. إذا تكرر المخرج عبر أسابيع متجاورة، ابنِ عليه بالتدرج بدل إعادة نفس المهام. "
         "المهام موجهة لفريق الجمعية وليست أوامر لتشغيل المستشارين أو التواصل معهم: "
         "ممنوع أن يظهر أي رمز مستشار AOS- أو لفظ مستشار أو خبير في TITLE وDESCRIPTION وTASK وINDICATOR. "
-        "بدل 'ابدأ بـ AOS-FG-18' اكتب فعلًا قابلًا للتسليم مثل 'تصنيف الإيرادات حسب المصدر في جدول موحد'. "
+        "حوّل الرأي الاستشاري إلى فعل قابل للتسليم مثل 'تصنيف الإيرادات حسب المصدر في جدول موحد'. "
         "كل مهمة إجراء عملي واحد محدد يمكن إتمامه في خمسة أيام عمل، بترتيب الجمع ثم الإعداد ثم المراجعة/الاعتماد المناسب للمخرج. "
         "اختر مؤشرات تقيس إنجاز المخرج خلال هذا السبرينت نفسه، مثل اكتمال البيانات ذات الصلة أو عدد المصادر المصنفة "
         "أو عدد التقارير التي سُلّمت، ولا تستخدم مؤشرات غامضة مثل 'التوصيات المؤثرة' أو 'التوصيات المؤجلة'. "
@@ -592,15 +648,57 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
         "advisors": _meta_context(advisors, opinions),
         "required_output_format": output_rule + "\nMETA_MESSAGE|سبب اختيار البديل بصوت الميتا بالعربية",
     }
+    if kind == "sprint":
+        # Specialist expertise still contributes, but Meta gets only the
+        # substantive advice, not identity slugs or titles. This prevents
+        # advisor orchestration directives from contaminating the task list.
+        task.pop("advisors", None)
+        # Do not feed the old bad task text back to Meta. Its prior references
+        # to advisor slugs and unsupported lookbacks caused the model to echo
+        # the very work items the user is asking to replace. We still compare
+        # against the original old list after generation.
+        task.pop("previous", None)
+        task["previous_tasks_issue"] = (
+            "لا تكرر المهام الحالية؛ المطلوب مهام مختلفة ومباشرة لفريق الجمعية."
+        )
+        task["advisory_insights"] = _task_advisory_insights(opinions)
+        task["task"] = (
+            "أعد كتابة قائمة مهام تنفيذية لفريق الجمعية فقط، وفق reason ومخرج "
+            "السبرينت الحالي. اكتب 3 إلى 5 أفعال واضحة، قابلة للإنجاز خلال "
+            "خمسة أيام، مختلفة عن النص القديم. لا تضف أسماء أدوار استشارية أو "
+            "دعوات لاجتماعات مع خبراء. استعمل أفعالًا مثل جمع وتصنيف وتحليل "
+            "وتوثيق ومراجعة، كلما كانت مناسبة للمخرج. لا تؤلف حقائق."
+        )
+    attempts = 2 if kind == "sprint_indicator" else max(
+        1, min(4, int(os.getenv("ROADMAP_REGEN_TASK_ATTEMPTS", "3")))
+    )
     error = None
-    for attempt in range(2):
+    for attempt in range(attempts):
         candidate = dict(task)
         if error:
-            candidate["repair_instruction"] = f"ردك السابق رُفض: {error}. أعِد الرد بالبروتوكول المطلوب."
+            candidate["repair_instruction"] = (
+                "المحاولة السابقة لم تُقبل: " + error + ". "
+                "ابدأ من جديد تمامًا؛ اكتب 4 مهام جديدة ملموسة يقوم بها موظفو "
+                "الجمعية، كل واحدة فعل يمكن توثيق إنجازه قبل نهاية السبرينت، "
+                "بلا توجيهات للخبراء أو رموز أو مسميات استشارية. "
+                "اتبع البروتوكول TASK|... لكل مهمة وMETA_MESSAGE|... في النهاية."
+                if kind == "sprint" else
+                f"ردك السابق رُفض: {error}. أعِد الرد بالبروتوكول المطلوب."
+            )
         raw = _meta_generate(council, _meta_system(persona), candidate,
                              int(os.getenv("ROADMAP_REGEN_TOKENS", "850")))
         try:
-            suggestion, note = _parse_regeneration(raw, kind, old_names)
+            try:
+                suggestion, note = _parse_regeneration(raw, kind, old_names)
+            except RoadmapError as first_error:
+                if kind != "sprint":
+                    raise
+                # Preserve only genuine executable tasks from Meta's response;
+                # do not fabricate a replacement for failed model generations.
+                try:
+                    suggestion, note = _recover_valid_task_subset(raw, old_names)
+                except RoadmapError:
+                    raise first_error
             if kind == "sprint":
                 _check_historical_lookback({"tasks": suggestion["tasks"]}, sprint)
             else:
@@ -609,8 +707,9 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
             break
         except RoadmapError as exc:
             error = str(exc)
+            print(f"[roadmap] regenerate target={kind} attempt={attempt + 1}/{attempts} rejected: {error}", flush=True)
     else:
-        raise RoadmapError(f"Failed regeneration: {error}")
+        raise RoadmapError(f"Failed regeneration after {attempts} attempts: {error}")
     for model_message in messages:
         _check_council_message(model_message["message"], {a["slug"] for a in advisors})
     return _envelope(opinions, messages, [note], suggestion)
