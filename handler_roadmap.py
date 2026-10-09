@@ -5,6 +5,7 @@ Uses already-loaded Specialist/Meta PEFT adapters via AtharCouncilEngine._genera
 No additional model instance, LoRA, dataset or third-party library required.
 
 Contract: Screen 5 (خارطة الطريق) — AI Contract, 2026-10.
+V7: isolated one-sprint recovery after a failed multi-sprint batch.
 """
 from __future__ import annotations
 
@@ -418,7 +419,16 @@ def _parse_batch(raw: str, numbers: list[int]) -> tuple[list[dict], str]:
         elif key == "TASK":
             current["tasks"].append({"text": val})
         elif key == "INDICATOR":
-            current["indicators"].append(_parse_indicator_line(line))
+            try:
+                current["indicators"].append(_parse_indicator_line(line))
+            except RoadmapError as exc:
+                # Name the exact sprint and offending line in the *repair*
+                # instruction. V6 only forwarded a generic validation error,
+                # which caused the Meta model to repeat the same weak KPI.
+                indicator_name = _text("|".join(line.split("|")[1:-2]), limit=160)
+                raise RoadmapError(
+                    f"Sprint {current['number']} indicator {indicator_name!r}: {exc}"
+                ) from exc
         else:
             raise RoadmapError("Unknown sprint output field")
     if current is not None:
@@ -545,6 +555,9 @@ def _meta_system(persona: str) -> str:
         "كل مهمة إجراء عملي واحد محدد يمكن إتمامه في خمسة أيام عمل، بترتيب الجمع ثم الإعداد ثم المراجعة/الاعتماد المناسب للمخرج. "
         "اختر مؤشرات تقيس إنجاز المخرج خلال هذا السبرينت نفسه، مثل اكتمال البيانات ذات الصلة أو عدد المصادر المصنفة "
         "أو عدد التقارير التي سُلّمت، ولا تستخدم مؤشرات غامضة مثل 'التوصيات المؤثرة' أو 'التوصيات المؤجلة'. "
+        "في سبرينت التقييم أو التقرير الختامي: اختر مقياسًا لعمل موثق، مثل عدد تقارير التقييم المُعدّة، "
+        "نسبة اكتمال التقرير الختامي، عدد الدروس المستفادة الموثقة، أو عدد إجراءات المتابعة المحددة؛ "
+        "لا تكتب عدد التوصيات المؤثرة أو المؤجلة أو تقييمًا انطباعيًا لا يمكن التحقق منه. "
         "يُسمح لك باقتراح مستهدفات target رقمية معقولة حتى بلا Benchmarks، لكنها مقترحات تنفيذية وليست حقائق تاريخية. "
         "لا تفترض توفر عدد سنوات أو سجلات أو نسب فعلية لم يذكرها سياق المخرج أو المنظمة؛ استخدم 'البيانات المتاحة' عند غيابها. "
         "الوحدات المسموحة فقط percent أو number أو multiplier، وpercent من 0 إلى 100 لا 0 إلى 1. "
@@ -561,10 +574,164 @@ def _meta_system(persona: str) -> str:
     )
 
 
+def _indicator_examples_for_output(output: Any) -> list[str]:
+    """Ground repair examples in the assigned output, never in invented facts.
+
+    These are *illustrative strings in the prompt*; we never insert them into
+    the returned JSON. The model must actually generate and pass validation.
+    """
+    title = _text((output or {}).get("text"), limit=500) if isinstance(output, dict) else ""
+    if "ختامي" in title or "متابعة" in title:
+        return [
+            "عدد التقارير الختامية المعدة|number|1",
+            "نسبة اكتمال إعداد خطة المتابعة|percent|100",
+            "عدد إجراءات المتابعة المحددة والموثقة|number|3",
+        ]
+    if "تقييم" in title or "الدروس" in title:
+        return [
+            "عدد تقارير تقييم الإجراءات المعدة|number|1",
+            "نسبة اكتمال توثيق نتائج الإجراءات|percent|100",
+            "عدد الدروس المستفادة الموثقة|number|3",
+        ]
+    if "لوحة" in title or "مؤشر" in title:
+        return [
+            "عدد المؤشرات المعرفة والموثقة|number|3",
+            "نسبة اكتمال إعداد لوحة المؤشرات|percent|100",
+            "عدد مصادر البيانات المربوطة بالمؤشرات|number|2",
+        ]
+    if "تقرير" in title:
+        return [
+            "عدد التقارير المعدة|number|1",
+            "نسبة اكتمال توثيق بيانات التقرير|percent|100",
+            "عدد النتائج المسجلة في التقرير|number|3",
+        ]
+    return [
+        "نسبة اكتمال إعداد المخرج|percent|100",
+        "عدد عناصر المخرج المكتملة|number|3",
+        "عدد العناصر المراجعة والموثقة|number|3",
+    ]
+
+
+def _write_sprint_batch(
+    *,
+    data: dict,
+    council: Any,
+    advisors: list[dict],
+    system: str,
+    opinions: list[dict],
+    rows: list[dict],
+    completed: list[dict],
+    output_by_number: dict[int, Any],
+) -> tuple[list[dict], list[str]]:
+    """Generate a validated batch; isolate failures without returning partials.
+
+    Multi-sprint batches get two attempts. If they still fail, split them and
+    re-generate each failed portion independently. One-sprint batches receive
+    up to three attempts with precise repair guidance. Earlier accepted
+    sprints remain in-memory only until the *entire* request succeeds.
+    """
+    numbers = [x["number"] for x in rows]
+    payload = data["payload"]
+    task = {
+        "task": (
+            "أنشئ سبرينت لكل رقم معتمد أدناه فقط، اعتمادًا على output.text وoutput.results. "
+            "لكل سبرينت عنوان ووصف قصير و3-5 مهام متسلسلة ملموسة لفريق الجمعية و3-5 مؤشرات تقيس إنجاز المخرج. "
+            "اعرض محتوى الإنتاج المطلوب فعليًا، وليس ما ينبغي على المستشارين فعله أو مجرد تلخيص آرائهم. "
+            "لا تنشئ أسماء مستشارين ولا مهام للتواصل معهم. "
+            "كل مؤشر لازم يقيس عنصرًا قابلًا للتوثيق خلال خمسة أيام العمل مثل تقرير مُعد أو نتيجة مُوثّقة. "
+            "لا تكتب مؤشرات غامضة مثل التوصيات المؤثرة أو التوصيات المؤجلة أو التغطية المؤقتة للتمويل. "
+            "المستهدفات أرقام تنفيذية مقترحة لهذا الأسبوع وليست نتائج مسجلة. "
+            "إذا تكرر المخرج في أكثر من سبرينت، طوّر العمل تدريجيًا حسب output_occurrence. "
+            "لا ترجع حقول output/results/phase ولا تضف أو تحذف أرقام السبرينت."
+        ),
+        "context": _context(data),
+        "advisors": _meta_context(advisors, opinions),
+        "previous_sprints_summary": [
+            {"number": x["number"], "title": x["title"],
+             "tasks": [y["text"] for y in x["tasks"]]}
+            for x in completed[-3:]
+        ],
+        "sprints_to_write": rows,
+        "indicator_examples_by_sprint": {
+            str(x["number"]): _indicator_examples_for_output(x["output"])
+            for x in rows
+        },
+        "required_output_format": (
+            f"BEGIN_SPRINT|{rows[0]['number']}\nTITLE|عنوان عربي\nDESCRIPTION|وصف عربي\n"
+            "TASK|مهمة تنفيذية\nTASK|مهمة تنفيذية أخرى\nTASK|مهمة تنفيذية ثالثة\n"
+            "INDICATOR|عدد مخرجات العمل الموثقة|number|1\n"
+            "INDICATOR|نسبة اكتمال توثيق المخرج|percent|100\n"
+            "INDICATOR|عدد العناصر المنجزة|number|3\n"
+            "END_SPRINT\nكرر بنفس الترتيب لكل سبرينت مطلوب، ثم META_MESSAGE|خلاصة قرار المجلس بالعربية"
+        ),
+    }
+    attempts = (2 if len(rows) > 1 else max(
+        1, min(4, int(os.getenv("ROADMAP_SINGLE_SPRINT_ATTEMPTS", "3")))
+    ))
+    error = None
+    for attempt in range(attempts):
+        candidate = dict(task)
+        if error:
+            candidate["repair_instruction"] = (
+                f"المحاولة السابقة رُفضت: {error}. أعد السبرينتات المطلوبة كاملة بالأرقام نفسها، "
+                "واستبدل المؤشر الضعيف بمؤشر يقيس مستندًا أو عنصرًا منجزًا من المخرج المخصص للسبرينت. "
+                "indicator_examples_by_sprint اقتراحات مستهدفات وليست حقائق عن الجمعية. "
+                "أعد كتابة 3-5 مؤشرات سليمة لكل سبرينت ولا تكرر الأسماء داخل السبرينت."
+            )
+        raw = _meta_generate(
+            council, system, candidate,
+            int(os.getenv("ROADMAP_META_TOKENS", "1900")),
+            sample=(attempt > 0),
+            block_non_arabic_scripts=True,
+        )
+        try:
+            _require_generated_arabic_quality(raw)
+            generated, note = _parse_batch(raw, numbers)
+            _check_council_message(note, {a["slug"] for a in advisors})
+            prior_rows = [
+                {**p, "output_key": _output_key(output_by_number[p["number"]])}
+                for p in completed
+            ]
+            for sprint, source in zip(generated, rows):
+                _check_historical_lookback(sprint, {
+                    "output": source["output"],
+                    "organization": payload.get("organization"),
+                    "goal": payload.get("goal"),
+                })
+                current = {**sprint, "output_key": _output_key(source["output"])}
+                _check_recent_history(current, prior_rows)
+                prior_rows.append(current)
+            return generated, [note]
+        except RoadmapError as exc:
+            error = str(exc)
+            print(
+                f"[roadmap] generate batch={numbers} attempt={attempt + 1}/{attempts} "
+                f"rejected: {error}", flush=True,
+            )
+
+    if len(rows) > 1:
+        print(
+            f"[roadmap] batch={numbers} exhausted retries; isolating sprints "
+            "without accepting partial results", flush=True,
+        )
+        mid = len(rows) // 2
+        left, left_notes = _write_sprint_batch(
+            data=data, council=council, advisors=advisors, system=system,
+            opinions=opinions, rows=rows[:mid], completed=completed,
+            output_by_number=output_by_number,
+        )
+        right, right_notes = _write_sprint_batch(
+            data=data, council=council, advisors=advisors, system=system,
+            opinions=opinions, rows=rows[mid:], completed=completed + left,
+            output_by_number=output_by_number,
+        )
+        return left + right, left_notes + right_notes
+    raise RoadmapError(f"Failed sprint batch {numbers} after isolated retries: {error}")
+
+
 def _complete(data: dict, council: Any, advisors: list[dict], persona: str) -> dict:
     payload = data["payload"]
     requested = _validate_generate_request(payload)
-    # An entirely empty case cannot be completed credibly.
     if all(x["output"] is None for x in requested) and not payload.get("goal") and not payload.get("intervention"):
         raise RoadmapError("No outputs, intervention, or goal to ground roadmap")
     opinions, messages = _specialist_messages(council, data, advisors,
@@ -573,76 +740,24 @@ def _complete(data: dict, council: Any, advisors: list[dict], persona: str) -> d
     batch_size = max(1, min(3, int(os.getenv("ROADMAP_BATCH_SIZE", "2"))))
     completed, meta_messages = [], []
     encountered = Counter()
+    output_by_number = {x["number"]: x["output"] for x in requested}
     all_keys = Counter(_output_key(x["output"]) for x in requested)
     for first in range(0, len(requested), batch_size):
-        batch = requested[first:first + batch_size]
+        rows = requested[first:first + batch_size]
         payload_rows = []
-        for row in batch:
+        for row in rows:
             key = _output_key(row["output"])
             encountered[key] += 1
             payload_rows.append({**row,
                                  "output_occurrence": encountered[key],
                                  "output_total_sprints": all_keys[key]})
-        task = {
-            "task": (
-                "أنشئ سبرينت لكل رقم معتمد أدناه فقط، اعتمادًا على output.text وoutput.results. "
-                "لكل سبرينت عنوان ووصف قصير و3-5 مهام متسلسلة ملموسة لفريق الجمعية و3-5 مؤشرات تقيس إنجاز المخرج. "
-                "اعرض محتوى الإنتاج المطلوب فعليًا، وليس ما ينبغي على المستشارين فعله أو مجرد تلخيص آرائهم. "
-                "لا تنشئ أسماء مستشارين ولا مهام للتواصل معهم. "
-                "إذا كان المخرج تقرير تحليل مصادر التمويل، فتتعلق المهام بجمع الإيرادات وتصنيف مصادرها وحساب نسبها وتوثيق التقرير، "
-                "وتقيس المؤشرات البيانات المصنفة والتقرير، لا عدد التوصيات المؤجلة. "
-                "المستهدفات أرقام تنفيذية مقترحة لهذا الأسبوع وليست نتائج مسجلة. "
-                "إذا تكرر المخرج في أكثر من سبرينت، طوّر العمل تدريجيًا حسب output_occurrence. "
-                "لا ترجع حقول output/results/phase ولا تضف أو تحذف أرقام السبرينت."
-            ),
-            "context": _context(data), "advisors": _meta_context(advisors, opinions),
-            "previous_sprints_summary": [{"number": x["number"], "title": x["title"],
-                                           "tasks": [y["text"] for y in x["tasks"]]}
-                                          for x in completed[-3:]],
-            "sprints_to_write": payload_rows,
-            "required_output_format": (
-                f"BEGIN_SPRINT|{batch[0]['number']}\nTITLE|عنوان عربي\nDESCRIPTION|وصف عربي\nTASK|مهمة 1\nTASK|مهمة 2\nTASK|مهمة 3\n"
-                "INDICATOR|اسم مقياس لإنجاز المخرج|number|1\nINDICATOR|اسم مقياس ثان لإنجاز المخرج|percent|100\nINDICATOR|اسم مقياس ثالث لإنجاز المخرج|number|3\n"
-                "END_SPRINT\nكرر بنفس الترتيب لكل سبرينت مطلوب، ثم META_MESSAGE|خلاصة قرار المجلس بالعربية"
-            ),
-        }
-        numbers = [x["number"] for x in batch]
-        error = None
-        for attempt in range(2):
-            candidate = dict(task)
-            if error:
-                candidate["repair_instruction"] = f"الاستجابة السابقة رُفضت: {error}. أعد كل كتل السبرينت لهذه المجموعة كاملة؛ لا تحذف أي سطر."
-            raw = _meta_generate(
-                council, system, candidate,
-                int(os.getenv("ROADMAP_META_TOKENS", "1900")),
-                sample=(attempt > 0),
-                block_non_arabic_scripts=True,
-            )
-            try:
-                _require_generated_arabic_quality(raw)
-                new_sprints, note = _parse_batch(raw, numbers)
-                _check_council_message(note, {a["slug"] for a in advisors})
-                previous_rows = [
-                    {**p, "output_key": _output_key(next(
-                        (r["output"] for r in requested if r["number"] == p["number"]), None
-                    ))} for p in completed
-                ]
-                for sprint, source in zip(new_sprints, batch):
-                    _check_historical_lookback(sprint, {
-                        "output": source["output"],
-                        "organization": payload.get("organization"),
-                        "goal": payload.get("goal"),
-                    })
-                    current = {**sprint, "output_key": _output_key(source["output"])}
-                    _check_recent_history(current, previous_rows)
-                    previous_rows.append(current)
-                break
-            except RoadmapError as exc:
-                error = str(exc)
-        else:
-            raise RoadmapError(f"Failed sprint batch {numbers}: {error}")
+        new_sprints, notes = _write_sprint_batch(
+            data=data, council=council, advisors=advisors, system=system,
+            opinions=opinions, rows=payload_rows, completed=completed,
+            output_by_number=output_by_number,
+        )
         completed.extend(new_sprints)
-        meta_messages.append(note)
+        meta_messages.extend(notes)
     if [x["number"] for x in completed] != [x["number"] for x in requested]:
         raise RoadmapError("Incomplete roadmap: no partial successes allowed")
     for model_message in messages:
