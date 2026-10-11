@@ -5,7 +5,7 @@ Uses already-loaded Specialist/Meta PEFT adapters via AtharCouncilEngine._genera
 No additional model instance, LoRA, dataset or third-party library required.
 
 Contract: Screen 5 (خارطة الطريق) — AI Contract, 2026-10.
-V8: prevents repeated task lists across different outputs and isolates failing sprints.
+V9: focused Meta-only rewrite for cross-sprint task collisions, retaining full-contract validation.
 """
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+ROADMAP_CODE_VERSION = "screen5-v9-targeted-cross-sprint-repair"
 VALID_UNITS = frozenset(("percent", "number", "multiplier"))
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٫", "01234567890123456789.")
 _ARABIC = re.compile(r"[\u0600-\u06FF]")
@@ -633,6 +634,115 @@ def _execution_focus_for_output(output: Any) -> str:
     return "اكتب خطوات واقعية تنتج output.text وتحقق output.results خلال أيام السبرينت الخمسة."
 
 
+def _repair_colliding_tasks(
+    *,
+    council: Any,
+    system: str,
+    data: dict,
+    sprint: dict,
+    source: dict,
+    prior_rows: list[dict],
+    opinions: list[dict],
+    collision: str,
+    repair_budget: dict[int, int],
+) -> tuple[dict, str]:
+    """Ask the *actual Meta model* for only the offending task list.
+
+    Do not expose the full earlier task wording to the model: feeding rejected
+    tasks back as examples made it copy them in earlier builds.  We provide
+    authoritative output/results and previous stage titles, not task text.
+    This operates inside the same job, using the already loaded Meta adapter.
+    No synthetic tasks are inserted, and failed repair cannot be published.
+    """
+    number = sprint["number"]
+    request = {
+        "task": (
+            "أعد صياغة مهام السبرينت المحدد فقط؛ الموديل كرر مهام سبرينت أقدم. "
+            "اكتب 3 إلى 5 مهام جديدة ملموسة، مميزة لهذا السبرينت ومخرجه المحدد من النظام، "
+            "يمكن لفريق الجمعية إنجازها خلال خمسة أيام عمل. "
+            "لا تكتب عنوانًا أو وصفًا أو مؤشرات أو تغيّر المخرج. "
+            "إذا كان المخرج متعلقًا بالتقييم، أنجز تحليل الأدلة والتقييم نفسه. "
+            "إذا كان المخرج تقريرًا ختاميًا، اجمع نتائج التقييم واكتب التقرير وخطة المتابعة. "
+            "اجعل القائمة تنتج artifact ملموسًا مثل مستند أو مصفوفة أو خطة، لا مجرد إعادة جمع عامة. "
+            "تجنب تكرار أعمال السبرينتات السابقة ولا تخترع سجلات أو نتائج غير مذكورة. "
+            "لا تُعيّن مستشارًا للتنفيذ، ولا تستخدم أي أكواد مستشارين في المهام. "
+            "الكتابة بالعربية الفصحى وببروتوكول السطور فقط."
+        ),
+        "collision_diagnostic": collision,
+        "sprint_to_rewrite": {
+            "number": number,
+            "output": source.get("output"),
+            "title": sprint["title"],
+            "description": sprint["description"],
+        },
+        "output_execution_focus": _execution_focus_for_output(source.get("output")),
+        "goal": data["payload"].get("goal"),
+        "intervention": {"title": (data["payload"].get("intervention") or {}).get("title")}
+        if isinstance(data["payload"].get("intervention"), dict) else None,
+        "independent_advisor_insights": _task_advisory_insights(opinions),
+        "prior_stage_headings": [
+            {"number": x["number"], "title": x["title"]}
+            for x in prior_rows
+        ],
+        "required_output_format": (
+            "TASK|مهمة عملية خاصة بمخرج السبرينت\n"
+            "TASK|مهمة لاحقة تكمل الأولى\n"
+            "TASK|مهمة تنتج جزءًا قابلًا للتحقق من المخرج\n"
+            "META_MESSAGE|تفسير عربي موجز للتعديل"
+        ),
+    }
+    max_per_sprint = max(1, min(3, int(os.getenv("ROADMAP_COLLISION_REPAIR_ATTEMPTS", "2"))))
+    remaining = repair_budget.get(number, max_per_sprint)
+    if remaining <= 0:
+        raise RoadmapError(f"Sprint {number} focused repair budget exhausted within this job")
+    attempts = min(2, remaining)
+    last_error = collision
+    for attempt in range(attempts):
+        repair_budget[number] = repair_budget.get(number, max_per_sprint) - 1
+        payload = dict(request)
+        if attempt:
+            payload["repair_instruction"] = (
+                "الصياغة السابقة لم تحقق شرط التميز: " + last_error + ". "
+                "غيّر نوع الأعمال وأفعال التنفيذ واربط كل مهمة مباشرة بإنتاج المخرج، "
+                "ولا تكرر مراحل جمع البيانات العامة من سبرينتات سابقة."
+            )
+        raw = _meta_generate(
+            council, system, payload,
+            int(os.getenv("ROADMAP_REPAIR_TASK_TOKENS", "850")),
+            sample=True,
+            block_non_arabic_scripts=True,
+        )
+        try:
+            _require_generated_arabic_quality(raw)
+            suggestion, note = _parse_regeneration(raw, "sprint", sprint["tasks"])
+            tasks = suggestion["tasks"]
+            if not 3 <= len(tasks) <= 5:
+                raise RoadmapError("Focused repair must return 3-5 tasks")
+            _check_council_message(note, {o["advisor_id"] for o in opinions})
+            repaired = {**sprint, "tasks": tasks}
+            _check_historical_lookback(repaired, {
+                "output": source.get("output"),
+                "organization": data["payload"].get("organization"),
+                "goal": data["payload"].get("goal"),
+            })
+            _check_recent_history(repaired, prior_rows)
+            print(
+                f"[roadmap] focused task repair succeeded for sprint {number} "
+                f"(attempt {attempt + 1}/{attempts})", flush=True,
+            )
+            return repaired, note
+        except RoadmapError as exc:
+            last_error = str(exc)
+            print(
+                f"[roadmap] focused task repair sprint={number} "
+                f"attempt={attempt + 1}/{attempts} rejected: {last_error}",
+                flush=True,
+            )
+    raise RoadmapError(
+        f"Sprint {number} task collision could not be repaired: {last_error}"
+    )
+
+
 def _write_sprint_batch(
     *,
     data: dict,
@@ -643,6 +753,7 @@ def _write_sprint_batch(
     rows: list[dict],
     completed: list[dict],
     output_by_number: dict[int, Any],
+    repair_budget: dict[int, int] | None = None,
 ) -> tuple[list[dict], list[str]]:
     """Generate a validated batch; isolate failures without returning partials.
 
@@ -651,6 +762,8 @@ def _write_sprint_batch(
     up to three attempts with precise repair guidance. Earlier accepted
     sprints remain in-memory only until the *entire* request succeeds.
     """
+    if repair_budget is None:
+        repair_budget = {}
     numbers = [x["number"] for x in rows]
     payload = data["payload"]
     task = {
@@ -672,10 +785,15 @@ def _write_sprint_batch(
         ),
         "context": _context(data),
         "advisors": _meta_context(advisors, opinions),
+        # Prior tasks are used by _check_recent_history, but should NOT be
+        # included verbatim in the prompt: Meta had copied their wording.
         "previous_sprints_summary": [
             {"number": x["number"], "title": x["title"],
-             "tasks": [y["text"] for y in x["tasks"]]}
-            for x in completed[-3:]
+             "output_text": _text(
+                 (output_by_number.get(x["number"]) or {}).get("text"),
+                 limit=260,
+             )}
+            for x in completed[-4:]
         ],
         "sprints_to_write": rows,
         "execution_focus_by_sprint": {
@@ -724,16 +842,33 @@ def _write_sprint_batch(
                 {**p, "output_key": _output_key(output_by_number[p["number"]])}
                 for p in completed
             ]
-            for sprint, source in zip(generated, rows):
+            repair_notes = []
+            for index, (sprint, source) in enumerate(zip(generated, rows)):
                 _check_historical_lookback(sprint, {
                     "output": source["output"],
                     "organization": payload.get("organization"),
                     "goal": payload.get("goal"),
                 })
                 current = {**sprint, "output_key": _output_key(source["output"])}
-                _check_recent_history(current, prior_rows)
+                try:
+                    _check_recent_history(current, prior_rows)
+                except RoadmapError as collision:
+                    # Repair only task duplication. Invalid indicators, missing
+                    # sprints etc. still follow the existing retry/isolation.
+                    if "repeats" not in str(collision) or "sprint tasks" not in str(collision):
+                        raise
+                    repaired, repair_note = _repair_colliding_tasks(
+                        council=council, system=system, data=data,
+                        sprint=sprint, source=source, prior_rows=prior_rows,
+                        opinions=opinions, collision=str(collision),
+                        repair_budget=repair_budget,
+                    )
+                    _check_council_message(repair_note, {a["slug"] for a in advisors})
+                    generated[index] = repaired
+                    current = {**repaired, "output_key": _output_key(source["output"])}
+                    repair_notes.append(repair_note)
                 prior_rows.append(current)
-            return generated, [note]
+            return generated, [note] + repair_notes
         except RoadmapError as exc:
             error = str(exc)
             print(
@@ -750,12 +885,12 @@ def _write_sprint_batch(
         left, left_notes = _write_sprint_batch(
             data=data, council=council, advisors=advisors, system=system,
             opinions=opinions, rows=rows[:mid], completed=completed,
-            output_by_number=output_by_number,
+            output_by_number=output_by_number, repair_budget=repair_budget,
         )
         right, right_notes = _write_sprint_batch(
             data=data, council=council, advisors=advisors, system=system,
             opinions=opinions, rows=rows[mid:], completed=completed + left,
-            output_by_number=output_by_number,
+            output_by_number=output_by_number, repair_budget=repair_budget,
         )
         return left + right, left_notes + right_notes
     raise RoadmapError(f"Failed sprint batch {numbers} after isolated retries: {error}")
@@ -774,6 +909,7 @@ def _complete(data: dict, council: Any, advisors: list[dict], persona: str) -> d
     encountered = Counter()
     output_by_number = {x["number"]: x["output"] for x in requested}
     all_keys = Counter(_output_key(x["output"]) for x in requested)
+    repair_budget: dict[int, int] = {}
     for first in range(0, len(requested), batch_size):
         rows = requested[first:first + batch_size]
         payload_rows = []
@@ -786,7 +922,7 @@ def _complete(data: dict, council: Any, advisors: list[dict], persona: str) -> d
         new_sprints, notes = _write_sprint_batch(
             data=data, council=council, advisors=advisors, system=system,
             opinions=opinions, rows=payload_rows, completed=completed,
-            output_by_number=output_by_number,
+            output_by_number=output_by_number, repair_budget=repair_budget,
         )
         completed.extend(new_sprints)
         meta_messages.extend(notes)
@@ -995,6 +1131,7 @@ def _envelope(opinions: list[dict], messages: list[dict], meta_messages: list[st
 
 def consult_roadmap(council: Any, request: dict) -> dict:
     """Public API. Always returns full contract JSON or FAILED; never partial data."""
+    print(f"[roadmap] code_version={ROADMAP_CODE_VERSION}", flush=True)
     try:
         data = _input(request)
         advisors = _advisor_roster(data["payload"], council)
