@@ -5,7 +5,7 @@ Uses already-loaded Specialist/Meta PEFT adapters via AtharCouncilEngine._genera
 No additional model instance, LoRA, dataset or third-party library required.
 
 Contract: Screen 5 (خارطة الطريق) — AI Contract, 2026-10.
-V7: isolated one-sprint recovery after a failed multi-sprint batch.
+V8: prevents repeated task lists across different outputs and isolates failing sprints.
 """
 from __future__ import annotations
 
@@ -612,6 +612,27 @@ def _indicator_examples_for_output(output: Any) -> list[str]:
     ]
 
 
+def _execution_focus_for_output(output: Any) -> str:
+    """Ground model guidance in the supplied output; do not author tasks ourselves."""
+    title = _text((output or {}).get("text"), limit=500) if isinstance(output, dict) else ""
+    if "ختامي" in title or "خطة متابعة" in title or "متابعة" in title:
+        return (
+            "استفد من التقييم الموجود لإعداد تقرير ختامي وخطة متابعة؛ "
+            "وثّق الإجراءات القادمة ومؤشراتها وآلية المراجعة والاعتماد. "
+            "لا تعُد إلى جمع بيانات التقييم من البداية."
+        )
+    if "تقييم" in title or "دروس" in title or "نتائج" in title:
+        return (
+            "حلّل أدلة التنفيذ والنتائج المتاحة، ووثّق الدروس المستفادة والفجوات "
+            "في تقرير تقييم، ليكون أساسًا للمرحلة الختامية."
+        )
+    if "خطة" in title:
+        return "حوّل البيانات والتحليل إلى خطوات خطة قابلة للمراجعة والاعتماد، ولا تكرر جمع المعلومات دون ضرورة."
+    if "تقرير" in title:
+        return "ركّز على إنتاج التقرير المسمى في output.text مع الأدلة الخاصة به."
+    return "اكتب خطوات واقعية تنتج output.text وتحقق output.results خلال أيام السبرينت الخمسة."
+
+
 def _write_sprint_batch(
     *,
     data: dict,
@@ -641,7 +662,12 @@ def _write_sprint_batch(
             "كل مؤشر لازم يقيس عنصرًا قابلًا للتوثيق خلال خمسة أيام العمل مثل تقرير مُعد أو نتيجة مُوثّقة. "
             "لا تكتب مؤشرات غامضة مثل التوصيات المؤثرة أو التوصيات المؤجلة أو التغطية المؤقتة للتمويل. "
             "المستهدفات أرقام تنفيذية مقترحة لهذا الأسبوع وليست نتائج مسجلة. "
+            "حتى عندما تكون مخرجات السبرينتات مختلفة، ممنوع نسخ قائمة المهام نفسها أو تكرار ثلاث مهام منها. "
+            "مثال: سبرينت تقييم النتائج يحلل أدلة التنفيذ ويصدر تقرير تقييم؛ "
+            "أما سبرينت التقرير الختامي والمتابعة فيحوّل تقييمًا منجزًا إلى تقرير ختامي وخطة إجراءات؛ "
+            "لا يبدأ السبرينت الختامي بجمع نفس البيانات ولا تكرر مهام سبرينت التقييم. "
             "إذا تكرر المخرج في أكثر من سبرينت، طوّر العمل تدريجيًا حسب output_occurrence. "
+            "اقرأ execution_focus_by_sprint لتوضيح التقدم المميز بكل سبرينت. "
             "لا ترجع حقول output/results/phase ولا تضف أو تحذف أرقام السبرينت."
         ),
         "context": _context(data),
@@ -652,6 +678,10 @@ def _write_sprint_batch(
             for x in completed[-3:]
         ],
         "sprints_to_write": rows,
+        "execution_focus_by_sprint": {
+            str(row["number"]): _execution_focus_for_output(row["output"])
+            for row in rows
+        },
         "indicator_examples_by_sprint": {
             str(x["number"]): _indicator_examples_for_output(x["output"])
             for x in rows
@@ -676,6 +706,8 @@ def _write_sprint_batch(
                 f"المحاولة السابقة رُفضت: {error}. أعد السبرينتات المطلوبة كاملة بالأرقام نفسها، "
                 "واستبدل المؤشر الضعيف بمؤشر يقيس مستندًا أو عنصرًا منجزًا من المخرج المخصص للسبرينت. "
                 "indicator_examples_by_sprint اقتراحات مستهدفات وليست حقائق عن الجمعية. "
+                "إذا سبب الرفض هو تكرار المهام مع سبرينت آخر، فأعد كتابة 3-5 مهام مختلفة مرتبطة "
+                "بمخرج كل سبرينت وبخطوة تقدّم جديدة؛ لا تنسخ مهام previous_sprints_summary أو سبرينت آخر في الدفعة. "
                 "أعد كتابة 3-5 مؤشرات سليمة لكل سبرينت ولا تكرر الأسماء داخل السبرينت."
             )
         raw = _meta_generate(
@@ -914,16 +946,34 @@ def _check_historical_lookback(sprint: dict, context: Any) -> None:
 
 
 def _check_recent_history(sprint: dict, previous_sprints: list[dict]) -> None:
-    """Block obvious duplicate task sets in adjacent sprints on the same output."""
+    """Prevent copied task lists across ANY sprint, regardless of output.
+
+    Contract: each five-day sprint must advance its assigned output. V7 only
+    compared sprints with the same output_key, so two distinct outputs could
+    receive the same three tasks and falsely pass as COMPLETED. We reject exact
+    copied task sets throughout the job. A high 3+-task overlap with a recent
+    sprint is likewise not acceptable. A single shared housekeeping action is
+    allowed, because that can legitimately recur across work packages.
+    """
     if not previous_sprints:
         return
-    current_set = {_norm(task["text"]) for task in sprint["tasks"]}
+    current = {_norm(task["text"]) for task in sprint["tasks"]}
     for prior in previous_sprints:
-        if prior["output_key"] != sprint["output_key"]:
-            continue
-        prior_set = {_norm(task["text"]) for task in prior["tasks"]}
-        if current_set == prior_set:
-            raise RoadmapError("Repeated output has identical sprint tasks instead of progression")
+        before = {_norm(task["text"]) for task in prior["tasks"]}
+        shared = current & before
+        same = current == before
+        near_identical = len(shared) >= 3 and (
+            len(shared) / max(1, min(len(current), len(before))) >= 0.80
+        )
+        if same or near_identical:
+            sid = sprint.get("number", "?")
+            pid = prior.get("number", "?")
+            kind = "identical sprint tasks" if same else "near-duplicate sprint tasks"
+            raise RoadmapError(
+                f"Sprint {sid} repeats {kind} from sprint {pid} "
+                f"({len(shared)} common tasks). Write distinct executable tasks "
+                "for this sprint's own output rather than recycling another sprint."
+            )
 
 
 def _envelope(opinions: list[dict], messages: list[dict], meta_messages: list[str], suggestion: dict) -> dict:
