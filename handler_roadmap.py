@@ -5,7 +5,7 @@ Uses already-loaded Specialist/Meta PEFT adapters via AtharCouncilEngine._genera
 No additional model instance, LoRA, dataset or third-party library required.
 
 Contract: Screen 5 (خارطة الطريق) — AI Contract, 2026-10.
-V9: focused Meta-only rewrite for cross-sprint task collisions, retaining full-contract validation.
+V10: deliverable-aligned tasks and specific measurable KPIs with focused quality repairs.
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-ROADMAP_CODE_VERSION = "screen5-v9-targeted-cross-sprint-repair"
+ROADMAP_CODE_VERSION = "screen5-v10-deliverable-quality-focus"
 VALID_UNITS = frozenset(("percent", "number", "multiplier"))
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٫", "01234567890123456789.")
 _ARABIC = re.compile(r"[\u0600-\u06FF]")
@@ -571,67 +571,316 @@ def _meta_system(persona: str) -> str:
         "لا تذكر أي مستشار داخل رسائل المجلس إلا برمز slug صحيح لمستشار وارد في advisors الذين ساهموا، "
         "واكتب صوت الميتا بصيغة meta_advisor؛ لا تختلق مستشارين جدد. "
         "اكتب عربية فصحى سليمة وخالية من الكلمات الكورية والصينية والألفاظ المحرّفة أو الركيكة. "
+        "لا تكتب الحقول الداخلية output.text أو output.results أو outputs/indicators أو رموز track داخل النص العربي. "
+        "ممنوع المؤشرات العامة المنسوخة مثل عدد مخرجات العمل الموثقة أو عدد العناصر المنجزة؛ "
+        "اكتب مؤشرات تحمل اسم الشيء المطلوب في المخرج، ومهمة تنتهي بصياغته أو تسليمه. "
+        "لا تخرج عن مخرج السبرينت المعين من النظام أو توصي بأعمال تتبع مخرجات مختلفة. "
         "تأكد من سلامة المهام وعناوينها وMETA_MESSAGE؛ لا تُخرج JSON. التزم ببروتوكول السطور حرفيًا."
     )
 
 
 def _indicator_examples_for_output(output: Any) -> list[str]:
-    """Ground repair examples in the assigned output, never in invented facts.
-
-    These are *illustrative strings in the prompt*; we never insert them into
-    the returned JSON. The model must actually generate and pass validation.
-    """
-    title = _text((output or {}).get("text"), limit=500) if isinstance(output, dict) else ""
-    if "ختامي" in title or "متابعة" in title:
-        return [
-            "عدد التقارير الختامية المعدة|number|1",
-            "نسبة اكتمال إعداد خطة المتابعة|percent|100",
-            "عدد إجراءات المتابعة المحددة والموثقة|number|3",
-        ]
-    if "تقييم" in title or "الدروس" in title:
-        return [
-            "عدد تقارير تقييم الإجراءات المعدة|number|1",
-            "نسبة اكتمال توثيق نتائج الإجراءات|percent|100",
-            "عدد الدروس المستفادة الموثقة|number|3",
-        ]
-    if "لوحة" in title or "مؤشر" in title:
-        return [
-            "عدد المؤشرات المعرفة والموثقة|number|3",
-            "نسبة اكتمال إعداد لوحة المؤشرات|percent|100",
-            "عدد مصادر البيانات المربوطة بالمؤشرات|number|2",
-        ]
-    if "تقرير" in title:
-        return [
-            "عدد التقارير المعدة|number|1",
-            "نسبة اكتمال توثيق بيانات التقرير|percent|100",
-            "عدد النتائج المسجلة في التقرير|number|3",
-        ]
-    return [
-        "نسبة اكتمال إعداد المخرج|percent|100",
-        "عدد عناصر المخرج المكتملة|number|3",
-        "عدد العناصر المراجعة والموثقة|number|3",
-    ]
+    """Output-specific examples, never generic placeholder KPIs."""
+    profile = _profile_for_output(output)
+    if profile:
+        return profile["examples"]
+    title = _text((output or {}).get("text"), limit=200) if isinstance(output, dict) else ""
+    return [f"عدد بنود «{title}» الموثقة|number|3"] if title else []
 
 
 def _execution_focus_for_output(output: Any) -> str:
-    """Ground model guidance in the supplied output; do not author tasks ourselves."""
-    title = _text((output or {}).get("text"), limit=500) if isinstance(output, dict) else ""
-    if "ختامي" in title or "خطة متابعة" in title or "متابعة" in title:
-        return (
-            "استفد من التقييم الموجود لإعداد تقرير ختامي وخطة متابعة؛ "
-            "وثّق الإجراءات القادمة ومؤشراتها وآلية المراجعة والاعتماد. "
-            "لا تعُد إلى جمع بيانات التقييم من البداية."
-        )
-    if "تقييم" in title or "دروس" in title or "نتائج" in title:
-        return (
-            "حلّل أدلة التنفيذ والنتائج المتاحة، ووثّق الدروس المستفادة والفجوات "
-            "في تقرير تقييم، ليكون أساسًا للمرحلة الختامية."
-        )
-    if "خطة" in title:
-        return "حوّل البيانات والتحليل إلى خطوات خطة قابلة للمراجعة والاعتماد، ولا تكرر جمع المعلومات دون ضرورة."
-    if "تقرير" in title:
-        return "ركّز على إنتاج التقرير المسمى في output.text مع الأدلة الخاصة به."
-    return "اكتب خطوات واقعية تنتج output.text وتحقق output.results خلال أيام السبرينت الخمسة."
+    """Offer grounded, output-type-specific execution guidance."""
+    profile = _profile_for_output(output)
+    if profile:
+        return profile["focus"]
+    name = _text(output.get("text"), limit=180) if isinstance(output, dict) else ""
+    return (f"أنتج المخرج المحدد «{name}» من بيانات الجمعية، واعرض خطوة تسليم واضحة."
+            if name else "نفذ العمل المناسب لهدف الجمعية من دون افتراض مخرجات مفقودة.")
+
+
+# Screen 5 V10: classify only from the Backend-assigned output, never invent
+# a new output, phase or result. The examples are guidance for the Meta model,
+# not hard-coded response content.
+_INTERNAL_LEAK = re.compile(
+    r"(?i)(?:\boutputs?\s*[./]\s*(?:text|results|indicators)\b|"
+    r"\boutput\s*(?:[0-9]+|\.|/)|\bfinancial[-_]sustainability\b|"
+    r"\b(?:payload|indicators|results)\s*[./]\s*(?:text|name|unit|target)\b|"
+    r"\b(?:output|outputs|results|indicators|payload|track)\b)"
+)
+_GENERIC_KPI = frozenset({
+    "عدد مخرجات العمل الموثقة", "نسبة اكتمال توثيق المخرج", "عدد العناصر المنجزة",
+    "نسبة اكتمال إعداد المخرج", "عدد عناصر المخرج المكتملة", "عدد العناصر المراجعة والموثقة",
+    "عدد التقارير المعدة", "عدد النتائج المسجلة في التقرير",
+})
+
+# Priority matters: 'تقرير ختامي' must be classified before 'تقرير'.
+_OUTPUT_PROFILES = (
+    ("final", ("ختامي",), ("تقرير", "ختامي", "متابعة", "خطة"),
+     ("تقرير", "الخطة", "المتابعة", "الختامي"),
+     ("عدد التقارير الختامية المعدة|number|1", "نسبة اكتمال خطة المتابعة|percent|100", "عدد إجراءات المتابعة المجدولة|number|3"),
+     "أنجز التقرير الختامي اعتمادًا على تقييم سابق، واكتب خطة متابعة بإجراءات وآلية مراجعة؛ لا تعد إلى جمع البيانات الأولية."),
+    ("evaluating", ("تقييم",), ("تقييم", "نتائج", "تقرير", "دروس"),
+     ("التقييم", "نتائج", "الأدلة", "الدروس"),
+     ("عدد تقارير تقييم التنفيذ المعدة|number|1", "نسبة توثيق نتائج الإجراءات|percent|100", "عدد الدروس المستفادة المسجلة|number|3"),
+     "وثق الأدلة ونتائج الإجراءات، ثم أعد تقرير تقييم وخلاصة دروس مستفادة."),
+    ("offers", ("عروض", "شراكة"), ("عروض", "عرض", "شراكة", "شركاء"),
+     ("العروض", "عرض", "الشركاء", "الشراكة"),
+     ("عدد عروض الشراكة الجاهزة|number|2", "نسبة اكتمال محتوى عروض الشراكة|percent|100", "عدد عروض الشراكة المراجعة|number|2"),
+     "اجمع عناصر القيمة المقترحة للشريك، وصغ عرضًا قابلًا للتخصيص، ثم راجع حزمة العروض النهائية."),
+    ("dashboard", ("لوحة", "مؤشر"), ("لوحة", "مؤشرات", "بيانات"),
+     ("اللوحة", "المؤشرات", "البيانات"),
+     ("عدد مؤشرات الاستدامة المعرّفة|number|4", "نسبة اكتمال لوحة المتابعة|percent|100", "عدد مصادر بيانات المؤشرات الموثقة|number|3"),
+     "حدّد تعريف كل مؤشر ومصدره وطريقة تحديثه، وصمّم لوحة متابعة قابلة للاستخدام؛ لا تستخدم مؤشرات التقرير الختامي."),
+    ("pilot", ("تجربة",), ("تجربة", "نتائج", "قناة", "اختبار"),
+     ("التجربة", "القناة", "نتائج", "اختبار"),
+     ("عدد التجارب التجريبية المنفذة|number|1", "عدد نتائج اختبار قناة التمويل الموثقة|number|3", "نسبة اكتمال توثيق التجربة|percent|100"),
+     "حدد نطاق تجربة صغيرة لقناة التمويل، نفذ الخطوات الممكنة، وقس النتائج ووثّقها؛ لا تكتف بإعادة كتابة التوصية."),
+    ("guide", ("دليل", "إجراءات"), ("دليل", "إجراءات", "خطوات", "موافقات"),
+     ("الدليل", "الإجراءات", "الخطوات", "الموافقات"),
+     ("عدد إجراءات تنمية الموارد الموثقة|number|5", "نسبة اكتمال مسودة دليل الإجراءات|percent|100", "عدد خطوات الموافقة المراجعة|number|3"),
+     "ارسم تسلسل الإجراءات وحدد النماذج والموافقات والضوابط ثم أعد دليلًا قابلًا للتطبيق."),
+    ("campaign", ("حملة",), ("حملة", "قنوات", "رسائل", "محتوى"),
+     ("الحملة", "القنوات", "الرسائل", "المحتوى"),
+     ("عدد رسائل الحملة التمويلية المُعدّة|number|3", "عدد قنوات الحملة المحددة|number|2", "نسبة اكتمال خطة الحملة الرقمية|percent|100"),
+     "اختر القنوات، وصغ الرسائل والمحتوى، وحدّد جدول الحملة ومؤشرات متابعتها؛ جهّز خطة قابلة للتنفيذ."),
+    ("cashflow", ("تدفقات",), ("نموذج", "تدفقات", "النقدية", "توقع"),
+     ("التدفقات", "النقدية", "النموذج", "التوقع"),
+     ("عدد نماذج توقع التدفقات النقدية المعدة|number|1", "نسبة اكتمال بيانات التدفقات النقدية|percent|100", "عدد فترات التوقع المدرجة|number|3"),
+     "صنّف التدفقات الداخلة والخارجة المتاحة، وابنِ نموذج توقع وراجع الفجوات التمويلية."),
+    ("matrix", ("مصفوفة",), ("مصفوفة", "جدوى", "معايير", "تقييم"),
+     ("المصفوفة", "الجدوى", "المعايير", "التقييم"),
+     ("عدد معايير تقييم الجدوى المحددة|number|4", "عدد مصادر الإيرادات المقيّمة|number|3", "نسبة اكتمال مصفوفة الجدوى|percent|100"),
+     "حدّد معايير الجدوى، وقارن فرص الإيراد، ووثّق ترتيبها في مصفوفة قرار."),
+    ("partnerships", ("فرص", "شراكات"), ("قائمة", "فرص", "شراكات", "تواصل"),
+     ("القائمة", "الفرص", "الشراكات", "الجهات"),
+     ("عدد فرص الشراكات التمويلية المحصورة|number|5", "عدد جهات الشراكة المصنفة|number|3", "نسبة اكتمال قائمة فرص الشراكات|percent|100"),
+     "احصر فرص الشراكات الملائمة وصنّف الجهات، ثم أعد قائمة بالفرص ورسائل تواصل أولية."),
+    ("income_plan", ("خطة", "تنويع"), ("خطة", "تنويع", "دخل", "اعتماد"),
+     ("الخطة", "التنويع", "الدخل", "الاعتماد"),
+     ("عدد مصادر الدخل البديلة المقترحة|number|3", "نسبة اكتمال صياغة خطة التنويع|percent|100", "عدد عناصر خطة الدخل المعتمدة|number|3"),
+     "حوّل التحليل إلى خطة بدائل وأولويات وجدول تنفيذ؛ أضف خطوة مراجعة وعرض للاعتماد عندما يتضمن المخرج ذلك."),
+    ("income_report", ("تقرير", "تحليل"), ("تقرير", "تحليل", "تمويل", "دخل"),
+     ("التقرير", "المصادر", "الدخل", "التمويل"),
+     ("عدد مصادر الدخل المصنفة|number|5", "نسبة اكتمال تحليل مصادر التمويل|percent|100", "عدد تقارير تحليل التمويل المعدة|number|1"),
+     "اجمع السجلات المتاحة وصنّف الإيرادات، ثم أعد تقرير تحليل مصادر التمويل بنفسه."),
+)
+_DELIVERABLE_VERBS = re.compile(
+    r"(?:أعد|اعد|إعداد|انشئ|أنشئ|صمم|صمّم|ابن|ابنِ|بناء|جهز|جهّز|"
+    r"صياغة|صغ|وثق|وثّق|سجّل|سجل|حدّد|حدد|أنجز|أنجز|راجع|اكتب|رتب|رتّب|اعرض|عرض|استكمل)"
+)
+
+
+def _profile_for_output(output: Any) -> dict | None:
+    if not isinstance(output, dict):
+        return None
+    text = _text(output.get("text"), limit=500)
+    if not text:
+        return None
+    ordered = sorted(_OUTPUT_PROFILES, key=lambda p: (p[0] != "matrix", p[0] != "offers"))
+    for name, triggers, artifact, indicator_terms, examples, focus in ordered:
+        if all(t in text for t in triggers):
+            return {"kind": name, "artifact_terms": artifact,
+                    "indicator_terms": indicator_terms, "examples": list(examples),
+                    "focus": focus}
+    return None  # unknown outputs: don't impose arbitrary hard-coded rules
+
+
+def _claims_deliverable_action(task: str, artifact: tuple[str, ...]) -> bool:
+    """A negated mention ('دون تجهيز عرض') is not a deliverable action."""
+    if not _DELIVERABLE_VERBS.search(task) or not any(w in task for w in artifact):
+        return False
+    # Local negation before a production verb invalidates the evidence when
+    # it is the only mention of the deliverable in the task.
+    if re.search(r"(?:دون|بدون|بلا|عدم)\s+(?:\S+\s+){0,3}(?:عرض|عروض|حزمة|تقرير|لوحة|مصفوفة|نموذج|قائمة|دليل|خطة|تجربة)", task):
+        return False
+    if re.search(r"(?:دون|بدون|بلا|عدم)\s+(?:\S+\s+){0,2}(?:تجهيز|إعداد|صياغة|بناء|إنشاء)\s+", task):
+        return False
+    return True
+
+
+def _content_quality_issues(sprint: dict, output: Any, earlier: list[dict]) -> dict[str, str]:
+    """Conservative content checks; repair with Meta instead of changing data.
+
+    Refuse template placeholders, generic recycled KPIs, and absent tangible
+    deliverables for recognized output types. Preserve flexibility for unknown
+    user-authored outputs (including null outputs).
+    """
+    issues = {}
+    heading = sprint["title"] + " " + sprint["description"]
+    if _INTERNAL_LEAK.search(heading):
+        issues["card"] = "Title/description exposes internal JSON field names"
+    task_texts = [x["text"] for x in sprint["tasks"]]
+    if any(_INTERNAL_LEAK.search(x) for x in task_texts):
+        issues["tasks"] = "Task exposes internal JSON field names instead of NGO work"
+    indicators = sprint["indicators"]
+    names = [_norm(x["name"]) for x in indicators]
+    if any(_INTERNAL_LEAK.search(x["name"]) for x in indicators):
+        issues["indicators"] = "Indicator exposes internal JSON field names"
+    if any(name in _GENERIC_KPI for name in names):
+        issues["indicators"] = "Generic KPI repeated across unrelated deliverables"
+
+    profile = _profile_for_output(output)
+    if profile:
+        # One explicit action must result in or directly prepare the actual
+        # named deliverable; generic data gathering alone is not sufficient.
+        artifact = profile["artifact_terms"]
+        if not any(_claims_deliverable_action(task, artifact)
+                   for task in task_texts):
+            issues["tasks"] = f"Sprint tasks never produce the assigned {profile['kind']} deliverable"
+        specific = sum(any(term in name or (term.startswith("ال") and term[2:] in name)
+                           for term in profile["indicator_terms"])
+                       for name in names)
+        if specific < 2:
+            issues["indicators"] = f"At least 2 KPIs must measure the assigned {profile['kind']} deliverable"
+    # Two completely shared KPIs means the cards are substantially templated.
+    for prior in earlier:
+        shared = len(set(names) & {_norm(x["name"]) for x in prior["indicators"]})
+        if shared >= 2:
+            issues["indicators"] = (
+                f"{shared} identical KPIs reused from sprint {prior['number']}; "
+                "indicators must measure this output"
+            )
+            break
+    return issues
+
+
+def _parse_quality_repair(raw: str, fields: set[str], old: dict) -> tuple[dict, str]:
+    if fields == {"card"}:
+        # A full sprint rewrite is necessary to fix a corrupted headline.
+        rows, note = _parse_batch(raw, [old["number"]])
+        return rows[0], note
+    tasks, indicators, notes = [], [], []
+    for line in _lines(raw):
+        if line.startswith("TASK|"):
+            tasks.append({"text": line.partition("|")[2]})
+        elif line.startswith("INDICATOR|"):
+            indicators.append(_parse_indicator_line(line))
+        elif line.startswith("META_MESSAGE|"):
+            notes.append(_text(line.partition("|")[2], limit=900, arabic=True))
+    if not notes or not notes[-1]:
+        raise RoadmapError("Quality repair is missing META_MESSAGE")
+    repaired = dict(old)
+    if "tasks" in fields:
+        repaired["tasks"] = _validate_tasks(tasks, minimum=3)
+        if len(repaired["tasks"]) > 5:
+            raise RoadmapError("Quality repair must return 3-5 tasks")
+    if "indicators" in fields:
+        if not 3 <= len(indicators) <= 5:
+            raise RoadmapError("Quality repair must return 3-5 indicators")
+        if len({_norm(x["name"]) for x in indicators}) != len(indicators):
+            raise RoadmapError("Quality repair repeated the same KPI")
+        repaired["indicators"] = indicators
+    return _validate_sprint(repaired, old["number"]), notes[-1]
+
+
+def _repair_sprint_quality(*, council: Any, system: str, sprint: dict, source: dict,
+                           opinions: list[dict], previous: list[dict],
+                           errors: dict[str, str]) -> tuple[dict, str]:
+    """Targeted same-job Meta repair: preserve valid fields; no template output."""
+    output = source.get("output")
+    profile = _profile_for_output(output)
+    fields = set(errors)
+    if "card" in fields:
+        fields = {"card"}
+    task = {
+        "quality_repair": True,
+        "number": sprint["number"],
+        "target_fields": sorted(fields),
+        "source_output": output,
+        "original_title": sprint["title"] if not _INTERNAL_LEAK.search(sprint["title"]) else None,
+        "original_description": sprint["description"] if not _INTERNAL_LEAK.search(sprint["description"]) else None,
+        # Do not include erroneous prior tasks/KPI labels: the model used to
+        # copy such examples in V8/V9. Preserve them only in Python validation.
+        "why_rejected": errors,
+        "deliverable_execution_focus": profile["focus"] if profile else
+            "أنجز المخرج المحدد في سياق السبرينت، لا مجرد وصف التوصيات.",
+        "specific_indicator_examples": profile["examples"] if profile else [],
+        "previous_stage_headings": [{"number": row["number"], "title": row["title"]}
+                                    for row in previous[-4:]],
+        "advisory_insights": _task_advisory_insights(opinions),
+        "task": ("صحح الحقول المطلوبة فقط. أفعال ملموسة لفريق الجمعية، 3-5 مهام تنتج "
+                 "المخرج المخصص من Backend، و3-5 مؤشرات تقيس جوانبه بدقة. "
+                 "ممنوع مؤشرات القوالب العامة أو حقول برمجية. "
+                 "لا تغير أي حقل آخر ولا تفترض حقائق غير مذكورة. "),
+        "required_output_format": (
+            f"BEGIN_SPRINT|{sprint['number']}\nTITLE|عنوان خاص بالمخرج\nDESCRIPTION|وصف مرتبط بالمخرج\nTASK|مهمة محددة\nINDICATOR|اسم مؤشر خاص بالمخرج|number|1\nEND_SPRINT\nMETA_MESSAGE|ملخص"
+            if fields == {"card"} else
+            ("TASK|مهمة تنفيذية أولى\nTASK|مهمة تنفيذية ثانية\nTASK|مهمة تنفيذية ثالثة\n" if "tasks" in fields else "")
+            + ("INDICATOR|مؤشر أول متعلق بالمخرج|number|1\nINDICATOR|مؤشر ثان متخصص|percent|100\nINDICATOR|مؤشر ثالث متخصص|number|3\n"
+               if "indicators" in fields else "")
+            + "META_MESSAGE|سبب الإصلاح بإيجاز"
+        ),
+    }
+    attempts = max(1, min(3, int(os.getenv("ROADMAP_V10_QUALITY_ATTEMPTS", "2"))))
+    last = errors
+    for attempt in range(attempts):
+        payload = dict(task)
+        if attempt:
+            payload["last_validation_error"] = last
+            payload["task"] += "تأكد أن كل مؤشر خاص بهذا المخرج، وأن مهمة على الأقل تنتج العمل المطلوب نصًا."
+        raw = _meta_generate(council, system, payload,
+                             int(os.getenv("ROADMAP_V10_REPAIR_TOKENS", "1150")),
+                             sample=(attempt > 0), block_non_arabic_scripts=True)
+        try:
+            _require_generated_arabic_quality(raw)
+            repaired, note = _parse_quality_repair(raw, fields, sprint)
+            if _INTERNAL_LEAK.search(note):
+                raise RoadmapError("Meta transcript contains internal JSON identifiers")
+            _check_council_message(note, {o["advisor_id"] for o in opinions})
+            _check_historical_lookback(repaired, {"output": output})
+            remaining = _content_quality_issues(repaired, output, previous)
+            if remaining:
+                raise RoadmapError("; ".join(remaining.values()))
+            _check_recent_history(repaired, previous)
+            print(f"[roadmap] quality repair succeeded sprint={sprint['number']} "
+                  f"fields={','.join(sorted(fields))} attempt={attempt+1}", flush=True)
+            return repaired, note
+        except RoadmapError as exc:
+            last = str(exc)
+            print(f"[roadmap] quality repair rejected sprint={sprint['number']} "
+                  f"attempt={attempt+1}/{attempts}: {last}", flush=True)
+    raise RoadmapError(f"Sprint {sprint['number']} quality repair failed: {last}")
+
+
+_SUSPECT_META_NOTE = re.compile(r"(?:المجالدين|التضاريد|التضاريب)|إال|\bSprint\b", re.I)
+
+
+def _ensure_readable_meta_note(council: Any, system: str, note: str,
+                               sprints: list[dict], opinions: list[dict]) -> str:
+    """Repair only an unreadable internal Meta message, never invent a transcript.
+
+    Do not re-run the whole 12-sprint generation because its admin-only note
+    contained an English template variable or a known corrupted expression.
+    """
+    selected = {x["advisor_id"] for x in opinions}
+    if not _INTERNAL_LEAK.search(note) and not _SUSPECT_META_NOTE.search(note):
+        _check_council_message(note, selected)
+        return note
+    for attempt in range(2):
+        context = {
+            "task": "اكتب رسالة واحدة موجزة بصوت المستشار الأعلى تصف القرارات الحقيقية المبنية على عناوين السبرينتات.",
+            "sprints": [{"number": x["number"], "title": x["title"]} for x in sprints],
+            "reasons": _task_advisory_insights(opinions),
+            "constraints": "عربية فصحى فقط، دون رموز حقول برمجية أو مصطلح Sprint أو كلمات مشوهة أو مستشار غير مختار.",
+            "required_output_format": "META_MESSAGE|شرح عربي موجز لخارطة الطريق",
+        }
+        raw = _meta_generate(council, system, context, 320,
+                             sample=(attempt > 0), block_non_arabic_scripts=True)
+        try:
+            _require_generated_arabic_quality(raw)
+            lines = [line.partition("|")[2] for line in _lines(raw)
+                     if line.startswith("META_MESSAGE|")]
+            if len(lines) != 1:
+                raise RoadmapError("Meta message rewrite must return exactly one line")
+            new = _text(lines[0], limit=900, arabic=True)
+            if not new or _INTERNAL_LEAK.search(new) or _SUSPECT_META_NOTE.search(new):
+                raise RoadmapError("Meta message still contains internal jargon or corrupted wording")
+            _check_council_message(new, selected)
+            print("[roadmap] isolated meta transcript rewrite succeeded", flush=True)
+            return new
+        except RoadmapError as exc:
+            print(f"[roadmap] isolated meta transcript rewrite attempt={attempt+1} rejected: {exc}",flush=True)
+    raise RoadmapError("Cannot produce a readable meta transcript message")
 
 
 def _repair_colliding_tasks(
@@ -807,9 +1056,9 @@ def _write_sprint_batch(
         "required_output_format": (
             f"BEGIN_SPRINT|{rows[0]['number']}\nTITLE|عنوان عربي\nDESCRIPTION|وصف عربي\n"
             "TASK|مهمة تنفيذية\nTASK|مهمة تنفيذية أخرى\nTASK|مهمة تنفيذية ثالثة\n"
-            "INDICATOR|عدد مخرجات العمل الموثقة|number|1\n"
-            "INDICATOR|نسبة اكتمال توثيق المخرج|percent|100\n"
-            "INDICATOR|عدد العناصر المنجزة|number|3\n"
+            "INDICATOR|مؤشر خاص بالمخرج الأول|number|1\n"
+            "INDICATOR|مؤشر مخصص ثان|percent|100\n"
+            "INDICATOR|مؤشر مخصص ثالث|number|3\n"
             "END_SPRINT\nكرر بنفس الترتيب لكل سبرينت مطلوب، ثم META_MESSAGE|خلاصة قرار المجلس بالعربية"
         ),
     }
@@ -867,8 +1116,24 @@ def _write_sprint_batch(
                     generated[index] = repaired
                     current = {**repaired, "output_key": _output_key(source["output"])}
                     repair_notes.append(repair_note)
+                # V10: the model may satisfy the line protocol but still
+                # return unrelated actions or recycled generic indicators.
+                # Repair that one card, not the entire 12-week roadmap.
+                quality_issues = _content_quality_issues(generated[index], source.get("output"), prior_rows)
+                if quality_issues:
+                    repaired, quality_note = _repair_sprint_quality(
+                        council=council, system=system, sprint=generated[index],
+                        source=source, opinions=opinions, previous=prior_rows,
+                        errors=quality_issues,
+                    )
+                    generated[index] = repaired
+                    current = {**repaired, "output_key": _output_key(source["output"])}
+                    repair_notes.append(quality_note)
                 prior_rows.append(current)
-            return generated, [note] + repair_notes
+            all_notes = [note] + repair_notes
+            all_notes = [_ensure_readable_meta_note(council, system, text,
+                         generated, opinions) for text in all_notes]
+            return generated, all_notes
         except RoadmapError as exc:
             error = str(exc)
             print(
@@ -1051,6 +1316,21 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
             else:
                 _check_indicator_follows_reason(suggestion, reason)
             _check_council_message(note, {a["slug"] for a in advisors})
+            if _INTERNAL_LEAK.search(note) or _SUSPECT_META_NOTE.search(note):
+                note = _ensure_readable_meta_note(council, _meta_system(persona), note,
+                           [{"number": sprint.get("number", 1),
+                             "title": sprint.get("title", "العمل المعتمد")}], opinions)
+            if kind == "sprint":
+                if any(_INTERNAL_LEAK.search(x["text"]) for x in suggestion["tasks"]):
+                    raise RoadmapError("Regenerated task contains internal JSON field references")
+                # The request supplies only sprint/output/title/description;
+                # use that authoritative context and do not invent new output.
+                profile = _profile_for_output(sprint.get("output"))
+                if profile and not any(_claims_deliverable_action(t["text"], profile["artifact_terms"])
+                     for t in suggestion["tasks"]):
+                    raise RoadmapError("Regenerated tasks do not produce the assigned sprint output")
+            elif _INTERNAL_LEAK.search(suggestion["name"]):
+                raise RoadmapError("Regenerated indicator contains internal JSON field references")
             break
         except RoadmapError as exc:
             error = str(exc)
