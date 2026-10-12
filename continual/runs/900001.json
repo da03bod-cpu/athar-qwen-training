@@ -1,0 +1,308 @@
+{
+  "schema_version": "athar_continual_run_v2",
+  "run_id": "900001",
+  "created_at": "2026-10-12T10:30:16.309419+00:00",
+  "request": {
+    "consultation_id": 900001,
+    "kind": "generate",
+    "meta_advisor": {
+      "name": "المستشار الأعلى",
+      "slug": "AOS-META-01"
+    },
+    "payload": {
+      "advisors": [
+        {
+          "capabilities": [],
+          "name": "د. عبدالله الراشد",
+          "slug": "AOS-LD-01",
+          "title": "المستشار التنفيذي للقطاع غير الربحي",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "د. نورة السبيعي",
+          "slug": "AOS-LD-02",
+          "title": "مستشار التشخيص والنضج المؤسسي",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "أ. فهد القحطاني",
+          "slug": "AOS-LD-03",
+          "title": "مستشار التحليل الداخلي والخارجي",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "أ. ريم الشهري",
+          "slug": "AOS-LD-04",
+          "title": "مستشار أصحاب المصلحة والشراكات",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "د. خالد العمري",
+          "slug": "AOS-LD-05",
+          "title": "مستشار التحول والتغيير المؤسسي",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "أ. هيفاء الزهراني",
+          "slug": "AOS-LD-06",
+          "title": "مستشار التميز والجودة المؤسسية",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "أ. سلطان الحربي",
+          "slug": "AOS-LD-07",
+          "title": "مستشار إدارة المخاطر واستمرارية الأعمال",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "د. سلمان العتيبي",
+          "slug": "AOS-SP-08",
+          "title": "مستشار التخطيط الاستراتيجي",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "أ. لمى الدوسري",
+          "slug": "AOS-SP-09",
+          "title": "مستشار الهوية والرؤية والرسالة والقيم",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "أ. ماجد الغامدي",
+          "slug": "AOS-SP-10",
+          "title": "مستشار الأهداف والقضايا الاستراتيجية",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "أ. سارة المطيري",
+          "slug": "AOS-SP-11",
+          "title": "مستشار تصميم المبادرات الاستراتيجية",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "أ. تركي الشمري",
+          "slug": "AOS-SP-12",
+          "title": "مستشار التخطيط التشغيلي",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "أ. منيرة العنزي",
+          "slug": "AOS-SP-13",
+          "title": "مستشار المحافظ والبرامج والمشاريع",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "أ. بندر الخالدي",
+          "slug": "AOS-SP-14",
+          "title": "مستشار مؤشرات الأداء ولوحات القيادة",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "د. أمل الجهني",
+          "slug": "AOS-SP-15",
+          "title": "مستشار المتابعة والتقييم والتعلم وقياس الأثر",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "د. عبدالرحمن السديري",
+          "slug": "AOS-FG-16",
+          "title": "مستشار الحوكمة والامتثال",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "أ. ياسر البقمي",
+          "slug": "AOS-FG-17",
+          "title": "المستشار المالي والموازنات",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "أ. الجوهرة الفيصل",
+          "slug": "AOS-FG-18",
+          "title": "مستشار الاستدامة المالية وتنمية الموارد",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "د. إبراهيم الملحم",
+          "slug": "AOS-FG-19",
+          "title": "مستشار الأوقاف والاستثمار الاجتماعي",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "أ. أروى الرشيدي",
+          "slug": "AOS-FG-20",
+          "title": "مستشار الموارد البشرية والتصميم التنظيمي",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "أ. نايف السهلي",
+          "slug": "AOS-FG-21",
+          "title": "مستشار العمليات والإجراءات والتحسين",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "أ. دانة الفهد",
+          "slug": "AOS-FG-22",
+          "title": "مستشار الاتصال المؤسسي والعلامة التنموية",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "أ. رائد الزامل",
+          "slug": "AOS-FG-23",
+          "title": "مستشار التسويق الرقمي وإدارة الحملات",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "د. هند العثمان",
+          "slug": "AOS-FG-24",
+          "title": "مستشار التحول الرقمي والذكاء الاصطناعي",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "أ. عمر البلوي",
+          "slug": "AOS-FG-25",
+          "title": "مستشار البيانات والمعرفة والتقارير",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "أ. غادة الحمدان",
+          "slug": "AOS-SE-26",
+          "title": "مستشار الثقافة والترفيه",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "د. محمد الشهراني",
+          "slug": "AOS-SE-27",
+          "title": "مستشار التعليم والأبحاث",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "د. وفاء اليامي",
+          "slug": "AOS-SE-28",
+          "title": "مستشار الصحة",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "أ. حصة المالكي",
+          "slug": "AOS-SE-29",
+          "title": "مستشار الخدمات الاجتماعية",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "أ. فيصل العسيري",
+          "slug": "AOS-SE-30",
+          "title": "مستشار البيئة",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "م. سعد الدخيل",
+          "slug": "AOS-SE-31",
+          "title": "مستشار التنمية والإسكان",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "أ. مها القرني",
+          "slug": "AOS-SE-32",
+          "title": "مستشار الحقوق والمناصرة والدعم القانوني",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "أ. يوسف الحازمي",
+          "slug": "AOS-SE-33",
+          "title": "مستشار منظمات دعم العمل الخيري والتطوعي",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "الشيخ عبدالعزيز الفوزان",
+          "slug": "AOS-SE-34",
+          "title": "مستشار الدعوة والتعليم الديني وخدمة ضيوف الرحمن",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "أ. أسماء التميمي",
+          "slug": "AOS-SE-35",
+          "title": "مستشار الروابط والجمعيات المهنية",
+          "traits": []
+        }
+      ],
+      "association_scope": "economic",
+      "goal": {
+        "bsc_axis": "financial",
+        "clarity_rating": 4,
+        "social_problem": "تعتمد الجمعية على التبرعات الموسمية بنسبة تتجاوز 80% من دخلها، مما يهدد استمرار برامجها للأسر المحتاجة.",
+        "statement": "رفع نسبة الدخل الذاتي المستدام إلى 40% من إجمالي الإيرادات خلال 12 شهراً.",
+        "target_group": "الأسر المحتاجة المستفيدة من برامج الجمعية",
+        "vision_alignment": "تمكين القطاع غير الربحي ورفع مساهمته في الناتج المحلي."
+      },
+      "impact_drivers": "financial_sustainability",
+      "impact_map": {
+        "association_scope": "economic",
+        "impact_drivers": "financial_sustainability",
+        "social_problem": "تعتمد الجمعية على التبرعات الموسمية بنسبة تتجاوز 80% من دخلها، مما يهدد استمرار برامجها للأسر المحتاجة."
+      },
+      "organization": {
+        "activity_fields": [],
+        "competitive_advantage": null,
+        "detailed_description": null,
+        "important_notes": null,
+        "name": "Al-Rahma Charity Foundation",
+        "sector": null,
+        "short_description": null,
+        "type": null
+      },
+      "programs": [],
+      "social_problem": "تعتمد الجمعية على التبرعات الموسمية بنسبة تتجاوز 80% من دخلها، مما يهدد استمرار برامجها للأسر المحتاجة.",
+      "track": {
+        "id": 1,
+        "name": "مسار الاستدامة المالية",
+        "slug": "financial-sustainability"
+      },
+      "track_id": 1
+    },
+    "reason": null,
+    "run_id": "900001",
+    "topic": "interventions",
+    "type": "advisory_consultation"
+  },
+  "response": {
+    "status": "FAILED",
+    "error": "A consultation may include at most 16 selected advisors."
+  },
+  "quality": {
+    "advisor_reports": [],
+    "meta_grounding_violations": [],
+    "has_quality_warning": false
+  }
+}
