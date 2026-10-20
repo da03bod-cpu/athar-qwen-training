@@ -4016,7 +4016,7 @@ class AtharCouncilEngine:
 
         impact_errors = portfolio_impact_errors(strategy)
         if impact_errors:
-            print("[council] V14 impact-portfolio repair: " + " | ".join(impact_errors[:4]), flush=True)
+            print("[council] V15 impact-portfolio repair: " + " | ".join(impact_errors[:4]), flush=True)
             try:
                 repair_task = dict(strategy_task)
                 repair_task["task"] = (
@@ -4608,6 +4608,8 @@ class AtharCouncilEngine:
                     "Never copy the same TEXT into two sprints.",
                     "Never use placeholders such as 'تحديد مخرج التدخل', 'تنفيذ التدخل', 'استكمال التدخل', or similar filler.",
                     "Do not invent percentages, counts, budgets, dates, partners, staffing, resources, or capacity not present in the authoritative context.",
+                    "Numbers appearing in SPRINT labels, in the 5-working-day schedule, or in the 1-3-format instructions are only PROTOCOL METADATA, NOT evidence for any quantity inside RESULT or TEXT.",
+                    "In RESULT and TEXT use no newly chosen numbers at all, not even counts of indicators, reports, schools, deliverables, or procedures. Unless a source quantity is clearly relevant in the same original context, express the milestone qualitatively and verifiably.",
                     "Historical numbers are evidence, not automatic future targets. Never reuse a source number in a different meaning or denominator.",
                     "If the proposed milestone has no numeric target in the supplied case, write it qualitatively: NO guessed percent sign, percentage, coverage rate, or digit-based milestone.",
                     "Do not introduce a new strategic objective, identity project, governance project, or organizational redesign outside the approved intervention.",
@@ -4708,6 +4710,11 @@ class AtharCouncilEngine:
                 for line in [previous_row["output_text"], *previous_row["expected_results"]]:
                     rejected_numeric_claims.update(unsupported_numbers(line))
 
+            strict_numeric_free = attempt >= 3 and any(
+                "unsupported numbers" in str(message).lower()
+                or "unsupported context" in str(message).lower()
+                for message in validation_errors
+            )
             task_obj = {
                 "role": meta["slug"],
                 "task": (
@@ -4715,6 +4722,7 @@ class AtharCouncilEngine:
                     "Screen-3 intervention. Rewrite the sprint from scratch. "
                     "Do not redesign the intervention."
                 ),
+                "strict_numeric_free_rewrite": strict_numeric_free,
                 **authoritative_context,
                 "approved_intervention": {
                     "title": intervention.get("title"),
@@ -4732,9 +4740,18 @@ class AtharCouncilEngine:
                     "Recreate the SAME intervention deliverable and expected consequence "
                     "without unsupported numeric claims. If a number is not "
                     "documented in authoritative organization/program/goal/impact data, "
-                    "do not use it. Never replace a rejected 70% with another guessed "
-                    "percentage. Qualitative language is required when the baseline or "
-                    "target is absent. No isolated or blank '%' sign."
+                    "do not use it. Never replace a rejected quantity with a DIFFERENT "
+                    "guessed count or percentage. Qualitative language is required when "
+                    "the baseline or target is absent. No isolated or blank '%' sign. "
+                    "Numbers appearing in protocol examples are NOT authoritative facts. "
+                    + (
+                        "STRICT RECOVERY: use no numeral or written-out quantity of ANY kind "
+                        "in RESULT or TEXT, including counts of indicators, documents or reports. "
+                        "The sole permitted numeral is in the mandatory SPRINT= header. "
+                        "Produce a specific and concrete deliverable with qualitative, "
+                        "verifiable outcome; keep it grounded in this intervention."
+                        if strict_numeric_free else ""
+                    )
                 ),
                 "specialist_reasonings": council,
                 "attempt": attempt,
@@ -4758,8 +4775,23 @@ class AtharCouncilEngine:
                     "Use only facts and numbers grounded in the authoritative case or approved intervention.",
                     "Do not invent a new program, partner, percentage, count, budget, staffing assumption, date, or strategic objective.",
                     "If a quantity is missing, remove the entire numerical CLAIM and replace it with a qualitative milestone about this same intervention; do not delete digits alone or fill blank % signs.",
+                    "Numbers in SPRINT labels or JSON fields do not license numeric claims in RESULT or TEXT.",
+                    "In a final strict-numeric-free repair, the SPRINT identifier is the only number allowed; all result and output descriptions must contain no digits or numerical number words." if strict_numeric_free else "Do not select an arbitrary new count of outputs, reports, schools, indicators or activities.",
                 ],
             }
+
+            # Keep protocol SPRINT=n parseable: a banned '3' must not suppress
+            # SPRINT=3 itself. Written-out variants are blocked as well so the
+            # model cannot evade the digit guard with 'ثلاثة'.
+            banned_numeric_phrases: List[str] = []
+            for numeral in sorted(rejected_numeric_claims):
+                if numeral != str(sprint_number):
+                    banned_numeric_phrases.append(numeral)
+                    banned_numeric_phrases.extend(NUMBER_WORD_PATTERNS.get(numeral, ()))
+                else:
+                    # A numeric claim is still rejected by the post-generation
+                    # validator; do not invalidate the mandatory sprint header.
+                    banned_numeric_phrases.extend([f"{numeral}%", f"{numeral}٪"])
 
             raw = self._generate(
                 sprint_writer_adapter,
@@ -4773,7 +4805,7 @@ class AtharCouncilEngine:
                 deterministic=(attempt == 1),
                 repetition_penalty=1.12,
                 no_repeat_ngram_size=7,
-                forbidden_phrases=sorted(rejected_numeric_claims) or None,
+                forbidden_phrases=sorted(set(banned_numeric_phrases)) or None,
             )
             parsed = parse_sprints(raw)
             parsed["outputs"] = [
@@ -5662,74 +5694,121 @@ class AtharCouncilEngine:
                 errors_by_sprint: Dict[int, List[str]] = {}
                 rejected_by_sprint: Dict[int, Dict[str, Any]] = {}
                 previous_raw = None
-                # First attempt generates the chunk, then repair only bad units.
+                # V15: once a sprint is accepted, never ask Qwen to rewrite it.
+                # Rework only missing/invalid numbers; this also prevents a stale
+                # error from Sprint 9 being reported as Sprint 7's failure.
                 for attempt in range(1, 3):
+                    remaining = [n for n in numbers if n not in validated]
+                    if not remaining:
+                        break
                     attempts_total += 1
+                    print(
+                        f"[council] v15 chunk={numbers} remaining={remaining} attempt={attempt}",
+                        flush=True,
+                    )
+                    focused_errors = [
+                        message
+                        for n in remaining
+                        for message in errors_by_sprint.get(n, [])
+                    ]
                     try:
                         candidate = generate_sprint_chunk(
-                            intervention, numbers,
-                            prior_outputs=prior,
-                            repair_errors=(last_errors if attempt > 1 else None),
+                            intervention, remaining,
+                            prior_outputs=prior + [validated[x] for x in numbers if x in validated],
+                            repair_errors=(focused_errors if attempt > 1 else None),
                             previous_output=(previous_raw if attempt > 1 else None),
                             attempt=attempt,
                         )
                     except Exception as exc:
-                        last_errors = [f"generation exception: {type(exc).__name__}: {exc}"]
+                        detail = f"generation exception: {type(exc).__name__}: {exc}"
+                        for n in remaining:
+                            errors_by_sprint[n] = [detail]
                         continue
                     previous_raw = candidate.get("raw")
-                    c_rows = {int(x.get("_sprint") or 0):x for x in candidate.get("outputs") or []}
-                    if not c_rows:
-                        last_errors = [f"Model output contained no parseable sprint records for {numbers}"]
-                    for n in numbers:
+                    c_rows = {
+                        int(x.get("_sprint") or 0): x
+                        for x in candidate.get("outputs") or []
+                        if isinstance(x, dict)
+                    }
+                    for n in remaining:
                         row = c_rows.get(n)
                         if row is None:
+                            errors_by_sprint[n] = [f"Sprint {n} missing or not parseable in requested group {remaining}"]
                             continue
-                        test_plan = {"outputs": [row]}
-                        errors, bad = sprint_quality_errors(test_plan, intervention, expected_numbers=[n])
+                        errors, _ = sprint_quality_errors(
+                            {"outputs": [row]}, intervention,
+                            expected_numbers=[n],
+                        )
                         if not errors:
                             validated[n] = row
+                            errors_by_sprint.pop(n, None)
+                            rejected_by_sprint.pop(n, None)
                         else:
-                            last_errors = errors
                             errors_by_sprint[n] = errors
                             rejected_by_sprint[n] = row
                     if len(validated) == len(numbers):
                         break
-                # Only bad/missing units get their own recovery call, with
-                # accepted units kept intact. No fake output is manufactured.
+
+                # Only bad/missing sprints get their own precision recovery.
+                # A THIRD attempt is reserved exclusively for unsupported
+                # numeric claims and enforces numbers-free RESULT/TEXT.
                 for n in numbers:
                     if n in validated:
                         continue
-                    for single_attempt in range(1, 3):
+                    for single_attempt in range(1, 4):
+                        current_errors = errors_by_sprint.get(n) or [f"Sprint {n} missing"]
+                        if single_attempt == 3 and not any(
+                            "unsupported numbers" in e.lower()
+                            or "unsupported context" in e.lower()
+                            for e in current_errors
+                        ):
+                            break
                         attempts_total += 1
+                        print(
+                            f"[council] v15 focused_repair sprint={n} attempt={single_attempt} "
+                            f"strict_qualitative={single_attempt >= 3}",
+                            flush=True,
+                        )
                         try:
                             proposal = precision_repair_single_sprint(
-                                intervention,n,
+                                intervention, n,
                                 prior_outputs=prior + [validated[x] for x in numbers if x in validated],
                                 faulty_unit=rejected_by_sprint.get(n),
-                                validation_errors=errors_by_sprint.get(n) or last_errors or [f"Sprint {n} missing"],
+                                validation_errors=current_errors,
                                 attempt=single_attempt,
                             )
                         except Exception as exc:
-                            last_errors=[f"single repair exception: {type(exc).__name__}: {exc}"]
+                            errors_by_sprint[n] = [
+                                f"sprint {n} repair exception: {type(exc).__name__}: {exc}"
+                            ]
                             continue
                         rows = proposal.get("outputs") or []
                         if len(rows) != 1:
+                            errors_by_sprint[n] = [f"sprint {n} repair returned no parseable unit"]
                             continue
                         errors, _ = sprint_quality_errors(
-                            {"outputs":rows},intervention,expected_numbers=[n]
+                            {"outputs": rows}, intervention, expected_numbers=[n]
                         )
                         if not errors:
                             validated[n] = rows[0]
+                            print(f"[council] v15 focused_repair succeeded sprint={n}", flush=True)
+                            errors_by_sprint.pop(n, None)
+                            rejected_by_sprint.pop(n, None)
                             break
-                        last_errors=errors
                         errors_by_sprint[n] = errors
                         rejected_by_sprint[n] = rows[0]
                 if len(validated) != len(numbers):
                     missing = [n for n in numbers if n not in validated]
+                    specific_errors = [
+                        f"[sprint {n}] " + " | ".join(
+                            errors_by_sprint.get(n) or ["no valid model output"]
+                        )
+                        for n in missing
+                    ]
                     raise ValueError(
-                        f"V14 model output generation failed for sprints {missing} "
+                        f"V15 model output generation failed for sprints {missing} "
                         f"of intervention '{intervention.get('title')}': "
-                        + " | ".join(last_errors[:5])
+                        + " || ".join(specific_errors[:5])
                     )
                 candidate_full = prior + [validated[n] for n in numbers]
                 cross_errors, cross_bad = sprint_quality_errors(
@@ -5779,14 +5858,14 @@ class AtharCouncilEngine:
                     )
                     if cross_errors:
                         raise ValueError(
-                            "V14 cross-sprint quality check failed for "
+                            "V15 cross-sprint quality check failed for "
                             f"{intervention.get('title')} (sprints {sorted(cross_bad)}): "
                             + " | ".join(cross_errors[:6])
                         )
                 prior = candidate_full
                 details.append({"sprints":numbers,"status":"validated"})
             return {"outputs":prior,"raw":""}, {
-                "architecture":"v14-grounded-model-generated-contextual-outputs",
+                "architecture":"v15-isolated-model-generated-outputs",
                 "model_calls":attempts_total,
                 "archetype":"model_generated_no_templates",
                 "fallback_sprints":[],"fallback_count":0,
@@ -5818,7 +5897,7 @@ class AtharCouncilEngine:
 
             missing_numbers=[n for n in range(1,SPRINT_COUNT+1) if n not in by_sprint]
             if missing_numbers:
-                raise ValueError(f"V14 missing model-generated outputs for sprints {missing_numbers}")
+                raise ValueError(f"V15 missing model-generated outputs for sprints {missing_numbers}")
 
             plan["outputs"] = [
                 by_sprint[n]
@@ -5972,7 +6051,7 @@ class AtharCouncilEngine:
             result["human_escalation"] = escalation
 
         self._last_meta_debug = {
-            "architecture": "screen3-v14-numeric-guard-meta-dna",
+            "architecture": "screen3-v15-numeric-guard-meta-dna",
             "meta_advisor_slug": meta["slug"],
             "meta_advisor_name": meta["name"],
             "meta_prompt_path": meta["prompt_path"],
@@ -5980,11 +6059,13 @@ class AtharCouncilEngine:
             "sprint_units_per_intervention": [len(x["outputs"]) for x in interventions],
             "advisor_ids": involved_ids,
             "plan_quality": plan_debug,
-            "meta_generation_calls_expected": 2,
+            "meta_generation_calls_minimum": 2,
             "sprint_writer": {
-                "mode": "deterministic_artifact_composer_v7_non_fatal",
-                "model_calls_per_intervention": 0,
+                "mode": "base_qwen_contextual_outputs_v15",
+                "model_calls_total": sum(x.get("planning_model_calls", 0) for x in plan_debug),
+                "model_calls_per_intervention": [x.get("planning_model_calls", 0) for x in plan_debug],
                 "max_public_interventions": max_public_interventions,
+                "numeric_recovery_policy": "reject_unsupported; isolated_repair; strict_qualitative_final_attempt",
             },
             "meta_review_phase": {
                 "advisor_count": len(meta_reviews),
@@ -5997,7 +6078,7 @@ class AtharCouncilEngine:
             "strategy_targeted_recovery": strategy_recovery_debug,
             "strategy_selection": strategy_selection_debug,
             "strategy_quality_is_non_fatal": True,
-            "sprint_quality_is_non_fatal": True,
+            "sprint_quality_is_non_fatal": False,
         }
 
         self._validate_screen3_public_response(result)
@@ -7069,7 +7150,7 @@ class AtharCouncilEngine:
             if str(request.get("topic") or "").strip() != "interventions":
                 raise ValueError("topic must be interventions.")
 
-            print("[council] code_version=screen3-v14-grounded-number-targeted-recovery", flush=True)
+            print("[council] code_version=screen3-v15-isolated-numeric-recovery", flush=True)
             kind = str(request.get("kind") or "generate").strip().lower()
             debug = bool(request.get("debug") or self._payload(request).get("debug"))
             total_start = time.perf_counter()
