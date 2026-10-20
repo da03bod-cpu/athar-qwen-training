@@ -2304,7 +2304,7 @@ class AtharCouncilEngine:
         sprint_writer_adapter = "base"
         SPRINT_WRITER_SYSTEM_PROMPT = (
             "أنت محرر تنفيذي عربي دقيق. مهمتك تحويل تدخل استراتيجي معتمد إلى "
-            "نتائج أسبوعية ومخرجات تنفيذية قابلة للإنجاز. لا تغيّر التدخل ولا "
+            "مخرجات أسبوعية ملموسة ونتائج متوقعة مرتبطة بها. لا تغيّر التدخل ولا "
             "تضف برامج أو شركاء أو أرقامًا أو حقائق غير موجودة في البيانات "
             "المعطاة. اكتب عربية فصحى سليمة وطبيعية ومباشرة. التزم حرفيًا "
             "ببروتوكول الإخراج المطلوب ولا تضف شرحًا خارجه."
@@ -3129,6 +3129,7 @@ class AtharCouncilEngine:
                 "Do not replace the stated challenge with a generic identity, governance, structure, strategy, or analysis project unless the request itself makes that issue material.",
                 "The interventions must be materially different from each other and together converge on the same primary 90-day goal.",
                 "Do not invent percentages, counts, budgets, dates, partners, staffing, resources, or capacity.",
+                "Choose confidence=high only where the supplied organizational evidence actually substantiates it; inconclusive evidence requires medium or low.",
                 "REPORTABLE must describe something the organization can verify or report; if no grounded numeric target exists, use a measurable completion/status/quality statement without fabricating a number.",
                 "Do not output REVIEW lines; those were generated in the previous phase.",
                 "Write concise professional Arabic suitable for Saudi nonprofit organizations.",
@@ -3978,6 +3979,46 @@ class AtharCouncilEngine:
             )
         )
 
+        # Enforce the existing social-impact portfolio rule *before* spending
+        # time generating 12 outputs per intervention. In V12 this validator
+        # existed but was never invoked, so two analysis-only enablers passed.
+        def portfolio_impact_errors(current: Dict[str, Any]) -> List[str]:
+            return self._screen3_impact_quality_violations(
+                {"suggestion": {"interventions":current.get("interventions") or []}},
+                request,
+            )
+
+        impact_errors = portfolio_impact_errors(strategy)
+        if impact_errors:
+            print("[council] V13 impact-portfolio repair: " + " | ".join(impact_errors[:4]), flush=True)
+            try:
+                repair_task = dict(strategy_task)
+                repair_task["task"] = (
+                    "Approve a corrected Screen-3 intervention portfolio for DIRECT "
+                    "beneficiary/program impact; the prior portfolio was dominated "
+                    "by analysis/measurement enablers. Preserve the goal/impact "
+                    "scope and the selected advisors, but propose directly "
+                    "actionable programs or service enhancements."
+                )
+                repair_task["previous_interventions"] = strategy.get("interventions")
+                repair_task["portfolio_validation_errors"] = impact_errors[:6]
+                repair_task["required_protocol"] = strategy_protocol
+                repaired_raw = generate_strategy(repair_task)
+                candidate,_ = _stabilize_strategy_portfolio(
+                    repaired_raw,max_interventions=max_public_interventions,
+                )
+                new_errors=portfolio_impact_errors(candidate)
+                if not new_errors:
+                    strategy=candidate
+                    impact_errors=[]
+            except Exception as exc:
+                print(f"[council] Impact-portfolio repair unavailable: {type(exc).__name__}",flush=True)
+        if impact_errors:
+            raise ValueError(
+                "Screen-3 portfolio lacks direct beneficiary/program impact: "
+                + " | ".join(impact_errors[:4])
+            )
+
         strategy_recovery_debug = {
             "mode": "disabled_in_v7_non_fatal",
             "targeted_recovery_used": False,
@@ -4080,10 +4121,16 @@ class AtharCouncilEngine:
                     if cleaned and cleaned not in [x["text"] for x in deliverables]:
                         deliverables.append({"text": cleaned})
 
+                # New Screen-3 contract: output.text is the tangible deliverable;
+                # output.results records the expected outcome, never another task.
+                primary = deliverables[0]["text"] if deliverables else ""
+                secondary = [x["text"].rstrip(" .") for x in deliverables[1:2]]
+                if secondary:
+                    primary = primary.rstrip(" .") + "؛ مع " + secondary[0] + "."
                 candidate = {
                     "_sprint": n,
-                    "text": result_text,
-                    "results": deliverables[:3],
+                    "text": primary,
+                    "results": ([{"text": result_text}] if result_text else []),
                 }
                 existing = by_number.get(n)
                 if existing is None:
@@ -4172,6 +4219,18 @@ class AtharCouncilEngine:
                 if qtokens(result) and not is_anchored(result):
                     errors.append(f"sprint {n} result is not anchored to this intervention/case")
                     bad.add(n)
+                # A named school-transport operations intervention cannot silently
+                # turn into a separate learning-curriculum intervention just because
+                # the NGO itself works in education.
+                context_title = str(intervention.get("title") or "")
+                if (re.search(r"نقل|حافل|مسار", context_title)
+                    and not re.search(r"تعل[يّ]?م|تعلّم|مناهج|تدريس", context_title)
+                    and re.search(r"إطار التعلم للطلبة|الحزمة التعليمية|خريطة التعلم|الأنشطة التعليمية", result)):
+                    errors.append(f"sprint {n} introduces an unrelated education intervention")
+                    bad.add(n)
+                if re.search(r"^(?:إتاحة|توافر) (?:وثيقة|ملف|نسخة|قائمة|جدول).{0,130}(?:الخطوة التالية|التحقق من جاهزيتها)", result):
+                    errors.append(f"sprint {n} has a generic document-availability result")
+                    bad.add(n)
 
                 norm_result = re.sub(r"\s+", " ", result.lower()).strip(" .،؛:-–—")
                 if norm_result:
@@ -4215,6 +4274,11 @@ class AtharCouncilEngine:
                     if qtokens(text_value) and not is_anchored(text_value):
                         errors.append(f"sprint {n} executable text is not anchored to this intervention/case")
                         bad.add(n)
+                    if (re.search(r"نقل|حافل|مسار", str(intervention.get("title") or ""))
+                        and not re.search(r"تعل[يّ]?م|تعلّم|مناهج|تدريس", str(intervention.get("title") or ""))
+                        and re.search(r"إطار التعلم للطلبة|الحزمة التعليمية|خريطة التعلم|الأنشطة التعليمية", text_value)):
+                        errors.append(f"sprint {n} executable output drifts into an unrelated education intervention")
+                        bad.add(n)
 
                     norm_d = re.sub(r"\s+", " ", text_value.lower()).strip(" .،؛:-–—")
                     if norm_d:
@@ -4238,17 +4302,9 @@ class AtharCouncilEngine:
                         errors.append(f"sprints {nx} and {ny} are near-duplicate results")
                         bad.update({nx, ny})
 
-            # If the same generic leading action dominates most of the roadmap,
-            # the model has collapsed into a template rather than a progression.
-            for first, nums in first_word_counts.items():
-                if len(nums) >= 5 and first in {
-                    "تحديد", "إعداد", "اعداد", "مراجعة", "تنفيذ", "متابعة",
-                    "استكمال", "تطوير", "تصميم", "تحليل", "بناء", "إنشاء", "انشاء",
-                }:
-                    errors.append(
-                        f"roadmap overuses the same leading action '{first}' in sprints {nums}"
-                    )
-                    bad.update(nums)
+            # A repeated opening verb (e.g. "إعداد") is not itself proof of
+            # duplicate outputs. Reject actual duplicate/near-duplicate content
+            # above; do not penalize grammatically natural Arabic.
 
             return list(dict.fromkeys(errors)), bad
 
@@ -4482,8 +4538,8 @@ class AtharCouncilEngine:
                     continue
                 prior_compact.append({
                     "sprint": unit.get("_sprint"),
-                    "result": unit.get("text"),
-                    "deliverables": [
+                    "output": unit.get("text"),
+                    "expected_results": [
                         x.get("text")
                         for x in (unit.get("results") or [])
                         if isinstance(x, dict)
@@ -4516,7 +4572,10 @@ class AtharCouncilEngine:
                     "Return ONLY the requested sprint numbers, once each and in ascending order.",
                     "Every RESULT and every TEXT must explicitly contain a concrete concept from the approved intervention title/impact/reportable value OR a named concept/program/goal from the authoritative case.",
                     "Do not use bare generic labels such as intervention, output, action, follow-up, implementation, review, or plan without naming what is being implemented/reviewed.",
-                    "RESULT must describe an achieved state by the end of that week, not an activity label.",
+                    "RESULT is a planned EXPECTED consequence after execution; never assert that it already occurred or has been verified.",
+                    "Exactly one RESULT describes the expected change or useful consequence of the concrete output; do not merely say a document is available for review.",
+                    "TEXT is the deliverable itself (a service, procedure, dataset, pilot, or completed artifact); RESULT is an expected consequence, not a second task.",
+                    "For a transport operations intervention, do not introduce separate educational curricula, student learning frameworks, or school supplies; stay with routes, waiting time, safety, attendance and operational records as appropriate.",
                     "Each sprint must have 1-3 concrete TEXT deliverables executable within 5 working days.",
                     "Each requested sprint must be materially different from the others in this chunk and from accepted_previous_sprints.",
                     "Later sprints must build on accepted_previous_sprints rather than restart analysis.",
@@ -4596,8 +4655,8 @@ class AtharCouncilEngine:
                     continue
                 prior_compact.append({
                     "sprint": unit.get("_sprint"),
-                    "result": unit.get("text"),
-                    "deliverables": [
+                    "output": unit.get("text"),
+                    "expected_results": [
                         x.get("text")
                         for x in (unit.get("results") or [])
                         if isinstance(x, dict)
@@ -4649,8 +4708,8 @@ class AtharCouncilEngine:
                     f"Return ONLY Sprint {sprint_number}; no other sprint number.",
                     "Write complete, natural Modern Standard Arabic with no truncated or corrupted words.",
                     "No square brackets, stray backslashes, pseudo-placeholders, or malformed quotation marks.",
-                    "RESULT must name a specific achieved state tied directly to the approved intervention.",
-                    "Each TEXT must name a concrete artifact, decision, dataset definition, measurement instrument, workflow, evidence record, or verified output that can be completed within 5 working days.",
+                    "RESULT must describe a specific expected consequence of the concrete output, not just availability of a document.",
+                    "Each TEXT must name a concrete deliverable, dataset, procedure, or pilot within 5 working days; no new unrelated initiative.",
                     "Do not use generic filler such as تنفيذ التدخل, متابعة التدخل, مراجعة التدخل, استكمال المخرج, or equivalent.",
                     "Do not copy wording from faulty_previous_sprint.",
                     "Do not repeat accepted_previous_sprints.",
@@ -5443,6 +5502,7 @@ class AtharCouncilEngine:
 
             return anchored
 
+        # Legacy V12 templates retained for audit only: V13 never calls these.
         def deterministic_artifact_plan(
             intervention: Dict[str, Any],
         ) -> tuple[Dict[str, Any], Dict[str, Any]]:
@@ -5542,10 +5602,143 @@ class AtharCouncilEngine:
                 "quality_notes_after_hard_safe": errors,
             }
 
+        # V13: model-produced intervention-specific outputs. Do not replace model
+        # failures with deterministic templates: those were the source of the
+        # unrelated "إطار التعلم" and generic document results in V12.
         def generate_chunked_sprint_plan(
             intervention: Dict[str, Any],
         ) -> tuple[Dict[str, Any], Dict[str, Any]]:
-            return deterministic_artifact_plan(intervention)
+            prior: List[Dict[str, Any]] = []
+            attempts_total = 0
+            details: List[Dict[str, Any]] = []
+            chunks = [list(range(n, min(n+3, 13))) for n in (1, 4, 7, 10)]
+            for numbers in chunks:
+                validated: Dict[int, Dict[str, Any]] = {}
+                last_errors: List[str] = []
+                previous_raw = None
+                # First attempt generates the chunk, then repair only bad units.
+                for attempt in range(1, 3):
+                    attempts_total += 1
+                    try:
+                        candidate = generate_sprint_chunk(
+                            intervention, numbers,
+                            prior_outputs=prior,
+                            repair_errors=(last_errors if attempt > 1 else None),
+                            previous_output=(previous_raw if attempt > 1 else None),
+                        )
+                    except Exception as exc:
+                        last_errors = [f"generation exception: {type(exc).__name__}: {exc}"]
+                        continue
+                    previous_raw = candidate.get("raw")
+                    c_rows = {int(x.get("_sprint") or 0):x for x in candidate.get("outputs") or []}
+                    for n in numbers:
+                        row = c_rows.get(n)
+                        if row is None:
+                            continue
+                        test_plan = {"outputs": [row]}
+                        errors, bad = sprint_quality_errors(test_plan, intervention, expected_numbers=[n])
+                        if not errors:
+                            validated[n] = row
+                        else:
+                            last_errors = errors
+                    if len(validated) == len(numbers):
+                        break
+                # Only bad/missing units get their own recovery call, with
+                # accepted units kept intact. No fake output is manufactured.
+                for n in numbers:
+                    if n in validated:
+                        continue
+                    for single_attempt in range(1, 3):
+                        attempts_total += 1
+                        try:
+                            proposal = precision_repair_single_sprint(
+                                intervention,n,
+                                prior_outputs=prior + [validated[x] for x in numbers if x in validated],
+                                faulty_unit=None,
+                                validation_errors=last_errors or [f"Sprint {n} missing"],
+                                attempt=single_attempt,
+                            )
+                        except Exception as exc:
+                            last_errors=[f"single repair exception: {type(exc).__name__}: {exc}"]
+                            continue
+                        rows = proposal.get("outputs") or []
+                        if len(rows) != 1:
+                            continue
+                        errors, _ = sprint_quality_errors(
+                            {"outputs":rows},intervention,expected_numbers=[n]
+                        )
+                        if not errors:
+                            validated[n] = rows[0]
+                            break
+                        last_errors=errors
+                if len(validated) != len(numbers):
+                    missing = [n for n in numbers if n not in validated]
+                    raise ValueError(
+                        f"V13 model output generation failed for sprints {missing} "
+                        f"of intervention '{intervention.get('title')}': "
+                        + " | ".join(last_errors[:5])
+                    )
+                candidate_full = prior + [validated[n] for n in numbers]
+                cross_errors, cross_bad = sprint_quality_errors(
+                    {"outputs": candidate_full}, intervention,
+                    expected_numbers=list(range(1,len(candidate_full)+1)),
+                )
+                if cross_errors:
+                    # Cross-chunk duplicates: preserve earlier approved outputs
+                    # and attempt to rewrite only the conflicting NEW unit(s).
+                    # No generic/deterministic replacement is ever inserted.
+                    for n in numbers:
+                        if n not in cross_bad:
+                            continue
+                        for repair_attempt in range(1, 3):
+                            attempts_total += 1
+                            reference = [x for x in candidate_full if int(x.get("_sprint") or 0) != n]
+                            try:
+                                proposal = precision_repair_single_sprint(
+                                    intervention,n,
+                                    prior_outputs=reference,
+                                    faulty_unit=validated[n],
+                                    validation_errors=cross_errors,
+                                    attempt=repair_attempt,
+                                )
+                            except Exception:
+                                continue
+                            rows = proposal.get("outputs") or []
+                            if len(rows) != 1:
+                                continue
+                            trial = sorted(reference + rows, key=lambda x:int(x.get("_sprint") or 0))
+                            err, bad = sprint_quality_errors(
+                                {"outputs":trial},intervention,
+                                expected_numbers=list(range(1,len(trial)+1))
+                            )
+                            if n not in bad:
+                                candidate_full = trial
+                                validated[n] = rows[0]
+                                cross_errors, cross_bad = err,bad
+                                break
+                            # May still conflict with another NEW item that will
+                            # be rewritten later; keep the latest error for retry.
+                            cross_errors,cross_bad=err,bad
+                    # Final check is authoritative (no partial success).
+                    cross_errors, cross_bad = sprint_quality_errors(
+                        {"outputs": candidate_full},intervention,
+                        expected_numbers=list(range(1,len(candidate_full)+1)),
+                    )
+                    if cross_errors:
+                        raise ValueError(
+                            "V13 cross-sprint quality check failed for "
+                            f"{intervention.get('title')} (sprints {sorted(cross_bad)}): "
+                            + " | ".join(cross_errors[:6])
+                        )
+                prior = candidate_full
+                details.append({"sprints":numbers,"status":"validated"})
+            return {"outputs":prior,"raw":""}, {
+                "architecture":"v13-model-generated-contextual-outputs",
+                "model_calls":attempts_total,
+                "archetype":"model_generated_no_templates",
+                "fallback_sprints":[],"fallback_count":0,
+                "chunks":details,
+            }
 
         approved = strategy["interventions"]
         interventions: List[Dict[str, Any]] = []
@@ -5570,23 +5763,9 @@ class AtharCouncilEngine:
                 intervention
             )
 
-            for missing_n in range(1, SPRINT_COUNT + 1):
-                if missing_n in by_sprint:
-                    continue
-
-                by_sprint[missing_n] = {
-                    "_sprint": missing_n,
-                    "text": (
-                        f"إعداد ملف تنفيذي موثق ضمن «{compact_guard_anchor}»."
-                    ),
-                    "results": [{
-                        "text": (
-                            "توافر ملف قابل للمراجعة والتحقق يساعد الجمعية "
-                            "في متابعة التدخل المرتبط به."
-                        )
-                    }],
-                    "_hard_safe": True,
-                }
+            missing_numbers=[n for n in range(1,SPRINT_COUNT+1) if n not in by_sprint]
+            if missing_numbers:
+                raise ValueError(f"V13 missing model-generated outputs for sprints {missing_numbers}")
 
             plan["outputs"] = [
                 by_sprint[n]
@@ -5673,6 +5852,39 @@ class AtharCouncilEngine:
             "message": final_strategy_message,
         }
         meta_synthesis = strategy.get("synthesis")
+        if meta_synthesis not in {
+            "CONSENSUS", "COMPLEMENTARY", "TRADE_OFF", "CONFLICT",
+            "EVIDENCE_GAP", "SCOPE_CONFLICT",
+        }:
+            # Do not fabricate Meta's consensus. Ask the REAL Meta adapter
+            # for one of the contract codes if its strategy omitted the label.
+            try:
+                synthesis_task = {
+                    "task": "classify_advisor_synthesis_only",
+                    "council_opinions": council,
+                    "reviewed_meta_opinions": meta_reviews,
+                    "approved_intervention_titles": [i["title"] for i in approved],
+                    "mandatory_rules": [
+                        "Return EXACTLY one line: SYNTHESIS=<CODE>.",
+                        "Choose CODE from CONSENSUS, COMPLEMENTARY, TRADE_OFF, CONFLICT, EVIDENCE_GAP, SCOPE_CONFLICT.",
+                        "Classify evidence and disagreement based only on the provided opinions; do not default to consensus.",
+                        "If evidence is explicitly insufficient to resolve a key uncertainty, use EVIDENCE_GAP.",
+                    ],
+                }
+                synthesis_raw = self._generate(
+                    meta_adapter, meta["prompt"],
+                    json.dumps(synthesis_task,ensure_ascii=False,separators=(",", ":")),
+                    100,deterministic=True,repetition_penalty=1.03,
+                )
+                sm = re.search(
+                    r"(?im)^\s*SYNTHESIS\s*[=:]\s*"
+                    r"(CONSENSUS|COMPLEMENTARY|TRADE_OFF|CONFLICT|EVIDENCE_GAP|SCOPE_CONFLICT)\s*$",
+                    self.clean_model_text(synthesis_raw),
+                )
+                if sm:
+                    meta_synthesis=sm.group(1).upper()
+            except Exception as synthesis_exc:
+                print(f"[council] Meta synthesis tag unavailable: {type(synthesis_exc).__name__}",flush=True)
         if meta_synthesis in {
             "CONSENSUS", "COMPLEMENTARY", "TRADE_OFF", "CONFLICT",
             "EVIDENCE_GAP", "SCOPE_CONFLICT",
@@ -5707,7 +5919,7 @@ class AtharCouncilEngine:
             result["human_escalation"] = escalation
 
         self._last_meta_debug = {
-            "architecture": "screen3-v12-contract-meta-dna",
+            "architecture": "screen3-v13-contextual-outputs-meta-dna",
             "meta_advisor_slug": meta["slug"],
             "meta_advisor_name": meta["name"],
             "meta_prompt_path": meta["prompt_path"],
@@ -6804,7 +7016,7 @@ class AtharCouncilEngine:
             if str(request.get("topic") or "").strip() != "interventions":
                 raise ValueError("topic must be interventions.")
 
-            print("[council] code_version=screen3-v12-new-impact-contract", flush=True)
+            print("[council] code_version=screen3-v13-contextual-outputs-no-static-templates", flush=True)
             kind = str(request.get("kind") or "generate").strip().lower()
             debug = bool(request.get("debug") or self._payload(request).get("debug"))
             total_start = time.perf_counter()
