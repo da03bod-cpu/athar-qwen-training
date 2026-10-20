@@ -1,7 +1,7 @@
 {
   "schema_version": "athar_continual_run_v2",
   "run_id": "screen3-v12-generate-001",
-  "created_at": "2026-10-20T17:25:03.928374+00:00",
+  "created_at": "2026-10-20T20:31:50.057794+00:00",
   "request": {
     "consultation_id": 42,
     "kind": "generate",
@@ -86,7 +86,7 @@
   },
   "response": {
     "status": "FAILED",
-    "error": "V20 model output generation failed for sprints [12] of intervention 'دراسة جوهرية لتقييم فعالية النقل المدرسي التنموي على معدلات التسرب المدرسي': [sprint 12] sprint 12 repair returned no parseable unit"
+    "error": "V21 model output generation failed for sprints [7] of intervention 'تحسين جودة وتشغيل برنامج النقل المدرسي التنموي': [sprint 7] sprint 7 repair returned no parseable unit after multi-format parsing"
   },
   "quality": {
     "advisor_reports": [],
