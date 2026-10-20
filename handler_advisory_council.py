@@ -607,6 +607,91 @@ def _screen3_fieldwise_recovery_v22(
     }
 
 
+
+
+def _screen3_v23_result_collision(candidate: Dict[str, Any], accepted: List[Dict[str, Any]]) -> Optional[int]:
+    """Identify an *older* sprint with identical expected-result text.
+
+    This is used *before* a new sprint is accepted, not after a full
+    intervention has spent many minutes in model generation. No similarity
+    thresholds or facts are relaxed; the existing quality gate remains final.
+    """
+    if not isinstance(candidate, dict):
+        return None
+    current_n = int(candidate.get("_sprint") or 0)
+    earlier: Dict[str, int] = {}
+    for unit in accepted:
+        if not isinstance(unit, dict):
+            continue
+        n = int(unit.get("_sprint") or 0)
+        if not (0 < n < current_n):
+            continue
+        for result in unit.get("results") or []:
+            if isinstance(result, dict):
+                key = re.sub(r"\s+", " ", str(result.get("text") or "").lower()).strip(" .،؛:-–—")
+                if key:
+                    earlier.setdefault(key, n)
+    for result in candidate.get("results") or []:
+        if isinstance(result, dict):
+            key = re.sub(r"\s+", " ", str(result.get("text") or "").lower()).strip(" .،؛:-–—")
+            if key and key in earlier:
+                return earlier[key]
+    return None
+
+
+def _screen3_v23_rewrite_result_only(
+    *, generate, intervention: Dict[str, Any], candidate: Dict[str, Any],
+    previous_outputs: List[Dict[str, Any]], authoritative_context: Dict[str, Any],
+    sprint_purpose: str, cleaner=None,
+) -> Dict[str, Any]:
+    """Rewrite ONE duplicated result while preserving the verified output.
+
+    No sprint labels, JSON fields, or historical observations are requested
+    from the model. Reject blank/ambiguous strings; validation occurs in the
+    caller before acceptance. Never use Python templates as substitute text.
+    """
+    n = int(candidate.get("_sprint") or 0)
+    output = str(candidate.get("text") or "").strip()
+    if not (1 <= n <= SPRINT_COUNT) or not output:
+        return {"outputs": [], "recovery_status": "invalid_existing_output"}
+    old_results = [str(r.get("text") or "").strip() for r in (candidate.get("results") or []) if isinstance(r, dict)]
+    old_normalized = {re.sub(r"\s+", " ", x.lower()).strip(" .،؛:-–—") for x in old_results if x}
+    short_case = {
+        "intervention": {k: intervention.get(k) for k in ("title", "impact_description", "reportable_value")},
+        "goal": authoritative_context.get("goal"),
+        "programs": authoritative_context.get("programs"),
+        "impact_map": authoritative_context.get("impact_map"),
+        "current_output": output,
+        "current_week_purpose": sprint_purpose,
+        "task": "Write ONE new expected RESULT that follows from THIS CURRENT OUTPUT. It must differ meaningfully from previous weekly results, without introducing new projects, measurements or numerical claims.",
+        "requirements": [
+            "Answer in ONE natural Arabic sentence only, no code or labels.",
+            "Do not modify or rewrite the current output; only write the RESULT.",
+            "Describe a specific future verifiable capability or improvement conditional on carrying out the output, not an already-established outcome.",
+            "Do not reuse a general documentation/availability result from earlier weeks.",
+            "Do not invent figures, past data, schools, routes, locations, or causal proof."
+        ],
+    }
+    raw = generate(
+        "base",
+        "اكتب نتيجة مستقبلية قابلة للتحقق ناتجة عن المخرج المحدد. جملة عربية فصحى واحدة فقط، بلا JSON أو وسوم أو أرقام مفترضة. لا تكرر النتائج السابقة.",
+        json.dumps(short_case, ensure_ascii=False, separators=(",", ":")),
+        340,
+        deterministic=False,
+        repetition_penalty=1.08,
+        no_repeat_ngram_size=None,
+    )
+    proposed = _screen3_extract_plain_field_v22(raw, "result")
+    proposed = str(cleaner(proposed) if cleaner and proposed else proposed).strip()
+    key = re.sub(r"\s+", " ", proposed.lower()).strip(" .،؛:-–—")
+    if not proposed or key in old_normalized:
+        return {"outputs": [], "recovery_status": "same_or_unparseable_result"}
+    return {
+        "outputs": [{"_sprint": n, "text": output, "results": [{"text": proposed}]}],
+        "recovery_status": "result_only_candidate_needs_full_quality_check",
+    }
+
+
 class _RegexTokenBlocker(LogitsProcessor):
     """Hard-mask token IDs whose decoded token matches a forbidden regex."""
 
@@ -5171,11 +5256,10 @@ class AtharCouncilEngine:
                 prior_compact.append({
                     "sprint": unit.get("_sprint"),
                     "output": unit.get("text"),
-                    "expected_results": [
-                        x.get("text")
-                        for x in (unit.get("results") or [])
-                        if isinstance(x, dict)
-                    ],
+                    # V23 avoids priming the writer with a previous expected
+                    # result sentence, which often triggered verbatim copying.
+                    # The concrete earlier OUTPUT remains for stage continuity.
+                    "stage_purpose": SPRINT_PURPOSES.get(int(unit.get("_sprint") or 0), ""),
                 })
 
             task_obj = {
@@ -5335,11 +5419,10 @@ class AtharCouncilEngine:
                 prior_compact.append({
                     "sprint": unit.get("_sprint"),
                     "output": unit.get("text"),
-                    "expected_results": [
-                        x.get("text")
-                        for x in (unit.get("results") or [])
-                        if isinstance(x, dict)
-                    ],
+                    # V23 avoids priming the writer with a previous expected
+                    # result sentence, which often triggered verbatim copying.
+                    # The concrete earlier OUTPUT remains for stage continuity.
+                    "stage_purpose": SPRINT_PURPOSES.get(int(unit.get("_sprint") or 0), ""),
                 })
 
             previous_row = None
@@ -6457,6 +6540,50 @@ class AtharCouncilEngine:
                             expected_numbers=[n],
                         )
                         if not errors:
+                            # V23: accepting a sprint in isolation caused a very
+                            # expensive late cross-sprint failure. Validate its
+                            # uniqueness against ALL already accepted outputs now.
+                            reference = prior + [validated[k] for k in sorted(validated)]
+                            if reference:
+                                trial = sorted(reference + [row], key=lambda r: int(r.get("_sprint") or 0))
+                                errors_cross, bad_cross = sprint_quality_errors(
+                                    {"outputs": trial}, intervention,
+                                    expected_numbers=[int(r.get("_sprint") or 0) for r in trial],
+                                )
+                                if n in bad_cross:
+                                    errors = [e for e in errors_cross if re.search(rf"\b(?:sprint\s+{n}\b|sprints\s+\d+\s+and\s+{n}\b|sprints\s+{n}\s+and\s+\d+\b)", e)] or errors_cross
+                        if errors and row is not None:
+                            # V23 fast-path: fix a *duplicate expected RESULT*
+                            # immediately, avoiding a second expensive chunk
+                            # generation when the actual OUTPUT is already good.
+                            reference = prior + [validated[k] for k in sorted(validated)]
+                            owner = _screen3_v23_result_collision(row, reference)
+                            local_issues, _ = sprint_quality_errors(
+                                {"outputs": [row]}, intervention, expected_numbers=[n],
+                            )
+                            if owner is not None and not local_issues:
+                                attempts_total += 1
+                                fix = _screen3_v23_rewrite_result_only(
+                                    generate=self._generate,
+                                    intervention=intervention,
+                                    candidate=row,
+                                    previous_outputs=reference,
+                                    authoritative_context=authoritative_context,
+                                    sprint_purpose=SPRINT_PURPOSES[n],
+                                    cleaner=lambda v: self._clean_meta_public_text(v, request),
+                                )
+                                rows = fix.get("outputs") or []
+                                if len(rows) == 1:
+                                    trial = sorted(reference + rows, key=lambda x: int(x.get("_sprint") or 0))
+                                    fixed_errors, fixed_bad = sprint_quality_errors(
+                                        {"outputs": trial}, intervention,
+                                        expected_numbers=[int(x.get("_sprint") or 0) for x in trial],
+                                    )
+                                    if not fixed_errors:
+                                        row = rows[0]
+                                        errors = []
+                                        print(f"[council] v23 fast_result_repair accepted sprint={n} prior={owner}", flush=True)
+                        if not errors:
                             validated[n] = row
                             errors_by_sprint.pop(n, None)
                             rejected_by_sprint.pop(n, None)
@@ -6478,6 +6605,50 @@ class AtharCouncilEngine:
                                 )
                     if len(validated) == len(numbers):
                         break
+
+                # V23: an otherwise valid OUTPUT must not be thrown away
+                # just because its expected RESULT duplicates an older week.
+                # Try a short single-field rewrite before multi-call precision
+                # repair. Earlier accepted weeks remain immutable.
+                for n in numbers:
+                    if n in validated:
+                        continue
+                    old = rejected_by_sprint.get(n)
+                    if not isinstance(old, dict):
+                        continue
+                    reference = prior + [validated[k] for k in sorted(validated)]
+                    owner = _screen3_v23_result_collision(old, reference)
+                    local_errors, _ = sprint_quality_errors(
+                        {"outputs": [old]}, intervention, expected_numbers=[n]
+                    )
+                    if owner is None or local_errors:
+                        continue
+                    for fix_attempt in range(1, 3):
+                        attempts_total += 1
+                        repair = _screen3_v23_rewrite_result_only(
+                            generate=self._generate,
+                            intervention=intervention,
+                            candidate=old,
+                            previous_outputs=reference,
+                            authoritative_context=authoritative_context,
+                            sprint_purpose=SPRINT_PURPOSES[n],
+                            cleaner=lambda v: self._clean_meta_public_text(v, request),
+                        )
+                        rows = repair.get("outputs") or []
+                        if len(rows) != 1:
+                            continue
+                        trial = sorted(reference + rows, key=lambda r: int(r.get("_sprint") or 0))
+                        err, bad = sprint_quality_errors(
+                            {"outputs": trial}, intervention,
+                            expected_numbers=[int(r.get("_sprint") or 0) for r in trial],
+                        )
+                        if not err:
+                            validated[n] = rows[0]
+                            errors_by_sprint.pop(n, None)
+                            rejected_by_sprint.pop(n, None)
+                            print(f"[council] v23 result_only_repair accepted sprint={n} prior={owner} attempt={fix_attempt}",flush=True)
+                            break
+                        print(f"[council] v23 result_only_repair rejected sprint={n} attempt={fix_attempt} errors={err[:2]!r}",flush=True)
 
                 # Only bad/missing sprints get their own precision recovery.
                 # V16: the THIRD precision attempt is reserved for either an
@@ -6571,6 +6742,36 @@ class AtharCouncilEngine:
                     for n in numbers:
                         if n not in cross_bad:
                             continue
+                        reference = [x for x in candidate_full if int(x.get("_sprint") or 0) != n]
+                        owner = _screen3_v23_result_collision(validated[n], reference)
+                        if owner is not None:
+                            for fix_attempt in range(1, 3):
+                                attempts_total += 1
+                                fix = _screen3_v23_rewrite_result_only(
+                                    generate=self._generate,
+                                    intervention=intervention,
+                                    candidate=validated[n],
+                                    previous_outputs=reference,
+                                    authoritative_context=authoritative_context,
+                                    sprint_purpose=SPRINT_PURPOSES[n],
+                                    cleaner=lambda v: self._clean_meta_public_text(v, request),
+                                )
+                                rows = fix.get("outputs") or []
+                                if len(rows) != 1:
+                                    continue
+                                trial = sorted(reference + rows, key=lambda x: int(x.get("_sprint") or 0))
+                                err, bad = sprint_quality_errors(
+                                    {"outputs": trial}, intervention,
+                                    expected_numbers=[int(x.get("_sprint") or 0) for x in trial],
+                                )
+                                if not err:
+                                    candidate_full = trial
+                                    validated[n] = rows[0]
+                                    cross_errors, cross_bad = err, bad
+                                    print(f"[council] v23 cross_chunk_result_repair accepted sprint={n} prior={owner}",flush=True)
+                                    break
+                            if n not in cross_bad:
+                                continue
                         for repair_attempt in range(1, 3):
                             attempts_total += 1
                             reference = [x for x in candidate_full if int(x.get("_sprint") or 0) != n]
@@ -6607,14 +6808,14 @@ class AtharCouncilEngine:
                     )
                     if cross_errors:
                         raise ValueError(
-                            "V19 cross-sprint quality check failed for "
+                            "V23 cross-sprint quality check failed for "
                             f"{intervention.get('title')} (sprints {sorted(cross_bad)}): "
                             + " | ".join(cross_errors[:6])
                         )
                 prior = candidate_full
                 details.append({"sprints":numbers,"status":"validated"})
             return {"outputs":prior,"raw":""}, {
-                "architecture":"v22-structured-plus-free-text-fieldwise-recovery",
+                "architecture":"v23-early-cross-check-and-result-only-recovery",
                 "model_calls":attempts_total,
                 "archetype":"model_generated_no_templates",
                 "fallback_sprints":[],"fallback_count":0,
@@ -7899,7 +8100,7 @@ class AtharCouncilEngine:
             if str(request.get("topic") or "").strip() != "interventions":
                 raise ValueError("topic must be interventions.")
 
-            print("[council] code_version=screen3-v22-format-independent-recovery", flush=True)
+            print("[council] code_version=screen3-v23-early-dedup-and-result-only-repair", flush=True)
             kind = str(request.get("kind") or "generate").strip().lower()
             debug = bool(request.get("debug") or self._payload(request).get("debug"))
             total_start = time.perf_counter()
