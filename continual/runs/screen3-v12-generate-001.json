@@ -1,7 +1,7 @@
 {
   "schema_version": "athar_continual_run_v2",
   "run_id": "screen3-v12-generate-001",
-  "created_at": "2026-10-20T21:02:47.466706+00:00",
+  "created_at": "2026-10-20T21:45:46.523258+00:00",
   "request": {
     "consultation_id": 42,
     "kind": "generate",
@@ -86,7 +86,7 @@
   },
   "response": {
     "status": "FAILED",
-    "error": "V19 cross-sprint quality check failed for تحسين جودة وموثوقية خطوط النقل المدرسي التنموي (sprints [2, 4]): sprints 2 and 4 repeat the same results[].text"
+    "error": "V22 model output generation failed for sprints [12] of intervention 'بناء شراكات مساندة مع مدرسة واحدة إضافية لتغطية جغرافية مفقودة': [sprint 12] sprint 12 repair failed to produce both output and result (structured + fieldwise recovery)"
   },
   "quality": {
     "advisor_reports": [],
