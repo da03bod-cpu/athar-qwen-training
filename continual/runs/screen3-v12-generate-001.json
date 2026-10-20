@@ -1,7 +1,7 @@
 {
   "schema_version": "athar_continual_run_v2",
   "run_id": "screen3-v12-generate-001",
-  "created_at": "2026-10-20T11:39:03.950969+00:00",
+  "created_at": "2026-10-20T14:37:25.082839+00:00",
   "request": {
     "consultation_id": 42,
     "kind": "generate",
@@ -86,7 +86,7 @@
   },
   "response": {
     "status": "FAILED",
-    "error": "V14 model output generation failed for sprints [7] of intervention 'بناء إطار MEAL لتقييم تأثير مشروع النقل المدرسي التنموي': sprint 9 output text contains unsupported numbers ['3'] | sprint 9 expected result contains unsupported numbers ['3']"
+    "error": "V15 model output generation failed for sprints [2] of intervention 'تحسين جودة وفعالية برنامج النقل المدرسي التنموي': [sprint 2] sprint 2 result is not anchored to this intervention/case"
   },
   "quality": {
     "advisor_reports": [],
