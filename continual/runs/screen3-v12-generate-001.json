@@ -1,7 +1,7 @@
 {
   "schema_version": "athar_continual_run_v2",
   "run_id": "screen3-v12-generate-001",
-  "created_at": "2026-10-20T20:31:50.057794+00:00",
+  "created_at": "2026-10-20T21:02:47.466706+00:00",
   "request": {
     "consultation_id": 42,
     "kind": "generate",
@@ -86,7 +86,7 @@
   },
   "response": {
     "status": "FAILED",
-    "error": "V21 model output generation failed for sprints [7] of intervention 'تحسين جودة وتشغيل برنامج النقل المدرسي التنموي': [sprint 7] sprint 7 repair returned no parseable unit after multi-format parsing"
+    "error": "V19 cross-sprint quality check failed for تحسين جودة وموثوقية خطوط النقل المدرسي التنموي (sprints [2, 4]): sprints 2 and 4 repeat the same results[].text"
   },
   "quality": {
     "advisor_reports": [],
