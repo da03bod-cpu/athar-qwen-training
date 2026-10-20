@@ -284,6 +284,183 @@ def _screen3_v19_portfolio_complementarity_errors(
     return out
 
 
+def _screen3_parse_units_v21(
+    raw: str,
+    *,
+    expected_numbers: Optional[List[int]] = None,
+    normalize_digits=None,
+    clean_text=None,
+    clean_model_text=None,
+) -> Dict[str, Any]:
+    """Parse Screen 3 model-produced output without changing or inventing content.
+
+    Supports the historical SPRINT/RESULT/TEXT protocol, single-output repair
+    WITHOUT a redundant sprint header, Arabic-label repair, and compact JSON.
+    Multiple-unit replies must identify their sprint numbers, so output cannot
+    silently be assigned to the wrong stage. Every unit must still pass the
+    unchanged intervention/fact/Arabic/duplicate validation gates.
+    """
+    raw = str(raw or "")
+    cleaned = clean_model_text(raw) if clean_model_text else raw
+    cleaned = normalize_digits(cleaned) if normalize_digits else cleaned
+    cleaned = re.sub(r"(?:\u200b|\u200c|\ufeff|\u2060)", "", cleaned)
+    cleaned = re.sub(r"(?m)^\s*```(?:json|text|txt)?\s*$", "", cleaned, flags=re.I).strip()
+    expected = sorted(set(int(n) for n in expected_numbers or []))
+    single = len(expected) == 1
+    outputs: List[Dict[str, Any]] = []
+    def safe_clean(value):
+        if value is None or isinstance(value, (dict,list)):
+            return ""
+        value = str(value).strip().strip('"').strip("'")
+        value = re.sub(r"\s+", " ", value).strip(" \n\t،؛")
+        if not value or value.lower() in ("null", "none", "n/a"):
+            return ""
+        return str(clean_text(value) if clean_text else value).strip()
+
+    def add(n, text, result_values):
+        try:
+            n = int(n)
+        except (ValueError, TypeError):
+            return
+        if not (1 <= n <= SPRINT_COUNT):
+            return
+        output = safe_clean(text)
+        results = []
+        for value in result_values:
+            v = safe_clean(value)
+            if v and v not in results:
+                results.append(v)
+        if output or results:
+            outputs.append({"_sprint": n, "text": output,
+                            "results": [{"text": v} for v in results[:3]]})
+
+    def numeric_sprint(row):
+        for key in ("_sprint", "sprint", "sprint_number", "number", "week", "الأسبوع"):
+            v = row.get(key)
+            if isinstance(v, int) or (isinstance(v, str) and v.isdecimal()):
+                return int(v)
+        return expected[0] if single else None
+
+    def load_json(value):
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (ValueError, TypeError):
+                return False
+        if isinstance(value, dict):
+            rows = value.get("outputs", value.get("sprints", value.get("units")))
+            if isinstance(rows, list):
+                value = rows
+            elif ("text" in value or "output" in value or "TEXT" in value):
+                value = [value]
+            else:
+                return False
+        if not isinstance(value, list) or not value:
+            return False
+        candidates = []
+        for row in value:
+            if not isinstance(row, dict):
+                return False
+            n = numeric_sprint(row)
+            if n is None:
+                return False
+            text = row.get("text", row.get("output", row.get("TEXT", "")))
+            results = row.get("results", row.get("result", row.get("RESULT", [])))
+            if isinstance(results, (dict, str)):
+                results = [results]
+            if not isinstance(results, list):
+                results = []
+            result_values = [(r.get("text", r.get("result", "")) if isinstance(r, dict) else r) for r in results]
+            candidates.append((n, text, result_values))
+        for n,text,res in candidates:
+            add(n,text,res)
+        return bool(outputs)
+
+    # 1. Exact or fenced JSON. A model may serialize the response as a JSON
+    # string or a single JSON object; no new sprint IDs are fabricated.
+    if load_json(cleaned):
+        pass
+    else:
+        # 2. Recognizable JSON object wrapped in commentary/thinking text.
+        # Only use it when it parses exactly; never guess missing braces/values.
+        begin, finish = cleaned.find("{"), cleaned.rfind("}")
+        if begin >= 0 and finish > begin:
+            load_json(cleaned[begin:finish + 1])
+
+    if not outputs:
+        # 3. Line protocol, including Arabic names, order changes, broken
+        # END_SPRINT, or a single repair with *no* SPRINT= header.
+        clean = re.sub(
+            r"[ \t]+(?=(?:SPRINT|RESULT|TEXT|OUTPUT|OUTCOME|END_SPRINT)\s*[:=])",
+            "\n", cleaned, flags=re.I,
+        )
+        clean = re.sub(r"[ \t]+(?=(?:المخرج|النتيجة|الأثر المتوقع)\s*[:：])", "\n", clean)
+        pattern = re.compile(
+            r"^\s*(?:SPRINT|WEEK|الأسبوع|السبرينت)\s*(?:[:=\-–—]\s*|\s+)(\d{1,2})\s*[:\-–—]?\s*$",
+            flags=re.I,
+        )
+        value_pattern = re.compile(
+            r"^\s*(RESULT|OUTCOME|EXPECTED_RESULT|TEXT|OUTPUT|DELIVERABLE|المخرج|النتيجة|الأثر المتوقع)\s*[:=：]\s*(.*)$",
+            flags=re.I,
+        )
+        current = None
+        active = None
+        parsed_units = []
+        def close():
+            nonlocal current,active
+            if current is not None:
+                parsed_units.append(current)
+            current = None
+            active = None
+        for original in clean.splitlines():
+            line = re.sub(r"^\s*[-*•]+\s*", "", original).strip()
+            if not line:
+                continue
+            match = pattern.match(line)
+            if match:
+                close()
+                current = {"n": int(match.group(1)), "text": [], "result": []}
+                continue
+            if re.fullmatch(r"END(?:_SPRINT|_WEEK)?|نهاية(?:_السبرينت)?", line, flags=re.I):
+                close()
+                continue
+            match = value_pattern.match(line)
+            if match:
+                if current is None:
+                    # No guessed sprint for multi-output responses.
+                    if not single:
+                        continue
+                    current = {"n": expected[0], "text": [], "result": []}
+                key = match.group(1).lower()
+                active = "result" if key in ("result", "outcome", "expected_result", "النتيجة", "الأثر المتوقع") else "text"
+                value = match.group(2).strip()
+                if value:
+                    current[active].append(value)
+                continue
+            if current is not None and active and not re.match(r"^(?:تفسير|ملاحظة|السبب)\s*[:=]", line):
+                # Only line continuations of an identified field are accepted.
+                if current[active]:
+                    current[active][-1] += " " + line
+        close()
+        for unit in parsed_units:
+            text_parts = unit["text"]
+            # A second TEXT line is an optional sub-deliverable, as in V20.
+            main = text_parts[0] if text_parts else ""
+            if len(text_parts) > 1:
+                main = main.rstrip(" .") + "؛ مع " + text_parts[1].rstrip(" .") + "."
+            add(unit["n"], main, unit["result"])
+
+    best = {}
+    for row in outputs:
+        n = row["_sprint"]
+        old = best.get(n)
+        score = int(bool(row["text"])) + int(bool(row["results"]))
+        if old is None or score > int(bool(old["text"])) + int(bool(old["results"])):
+            best[n] = row
+    return {"outputs": [best[n] for n in sorted(best)], "raw": raw,
+            "parse_status": "parsed" if best else "unparseable"}
+
+
 class _RegexTokenBlocker(LogitsProcessor):
     """Hard-mask token IDs whose decoded token matches a forbidden regex."""
 
@@ -4390,97 +4567,16 @@ class AtharCouncilEngine:
             "Repeat sequentially through SPRINT=12 exactly once each."
         )
 
-        def parse_sprints(raw: str) -> Dict[str, Any]:
-            clean = self._normalize_digits(
-                self.clean_model_text(raw).replace("```", "").strip()
+        def parse_sprints(raw: str, expected_numbers: Optional[List[int]] = None) -> Dict[str, Any]:
+            # V21: normalization and parsing are separated from quality checks.
+            # Parser consumes alternate model formats; validator *still* rejects
+            # invented facts, irrelevant outputs, duplicates and poor Arabic.
+            return _screen3_parse_units_v21(
+                raw, expected_numbers=expected_numbers,
+                normalize_digits=self._normalize_digits,
+                clean_text=lambda x: self._clean_meta_public_text(x, request),
+                clean_model_text=self.clean_model_text,
             )
-            clean = re.sub(
-                r"\s+(?=(?:SPRINT|RESULT|TEXT|END_SPRINT)\s*(?:[:=]|\b))",
-                "\n",
-                clean,
-                flags=re.I,
-            )
-            units: List[Dict[str, Any]] = []
-            current: Optional[Dict[str, Any]] = None
-
-            def finish() -> None:
-                nonlocal current
-                if current is not None:
-                    units.append(current)
-                current = None
-
-            for raw_line in clean.splitlines():
-                line = re.sub(r"^[\-*•]+\s*", "", raw_line.strip())
-                if not line:
-                    continue
-
-                m = re.match(
-                    r"^SPRINT\s*(?:[:=\-–—]\s*|\s+)(\d{1,2})\s*[:\-–—]?\s*$",
-                    line,
-                    flags=re.I,
-                )
-                if m:
-                    finish()
-                    current = {
-                        "number": int(m.group(1)),
-                        "result": "",
-                        "deliverables": [],
-                    }
-                    continue
-
-                if re.fullmatch(r"END_SPRINT", line, flags=re.I):
-                    finish()
-                    continue
-
-                m = re.match(r"^RESULT\s*[:=]\s*(.+)$", line, flags=re.I)
-                if m and current is not None:
-                    current["result"] = m.group(1).strip()
-                    continue
-
-                m = re.match(r"^TEXT\s*[:=]\s*(.+)$", line, flags=re.I)
-                if m and current is not None:
-                    value = m.group(1).strip()
-                    if value:
-                        current["deliverables"].append(value)
-
-            finish()
-
-            by_number: Dict[int, Dict[str, Any]] = {}
-            for unit in units:
-                n = int(unit.get("number") or 0)
-                if not (1 <= n <= SPRINT_COUNT):
-                    continue
-                result_text = self._clean_meta_public_text(unit.get("result"), request)
-                deliverables: List[Dict[str, str]] = []
-                for value in unit.get("deliverables") or []:
-                    cleaned = self._clean_meta_public_text(value, request)
-                    if cleaned and cleaned not in [x["text"] for x in deliverables]:
-                        deliverables.append({"text": cleaned})
-
-                # New Screen-3 contract: output.text is the tangible deliverable;
-                # output.results records the expected outcome, never another task.
-                primary = deliverables[0]["text"] if deliverables else ""
-                secondary = [x["text"].rstrip(" .") for x in deliverables[1:2]]
-                if secondary:
-                    primary = primary.rstrip(" .") + "؛ مع " + secondary[0] + "."
-                candidate = {
-                    "_sprint": n,
-                    "text": primary,
-                    "results": ([{"text": result_text}] if result_text else []),
-                }
-                existing = by_number.get(n)
-                if existing is None:
-                    by_number[n] = candidate
-                else:
-                    old_q = int(bool(existing.get("text"))) + int(bool(existing.get("results")))
-                    new_q = int(bool(candidate.get("text"))) + int(bool(candidate.get("results")))
-                    if new_q > old_q:
-                        by_number[n] = candidate
-
-            return {
-                "outputs": [by_number[n] for n in sorted(by_number)],
-                "raw": raw,
-            }
 
         def sprint_quality_errors(
             plan: Dict[str, Any],
@@ -5037,9 +5133,9 @@ class AtharCouncilEngine:
                 max_tokens,
                 deterministic=(attempt == 1),
                 repetition_penalty=1.10,
-                no_repeat_ngram_size=6,
+                no_repeat_ngram_size=None,  # repeated protocol keys are intentional
             )
-            return parse_sprints(raw)
+            return parse_sprints(raw, expected_numbers=sprint_numbers)
 
         def precision_repair_single_sprint(
             intervention: Dict[str, Any],
@@ -5144,7 +5240,7 @@ class AtharCouncilEngine:
                     + (
                         "STRICT RECOVERY: use no numeral or written-out quantity of ANY kind "
                         "in RESULT or TEXT, including counts of indicators, documents or reports. "
-                        "The sole permitted numeral is in the mandatory SPRINT= header. "
+                        "Do not put a numeral anywhere in the content. "
                         "Produce a specific and concrete deliverable with qualitative, "
                         "verifiable outcome; keep it grounded in this intervention."
                         if strict_numeric_free else ""
@@ -5153,15 +5249,13 @@ class AtharCouncilEngine:
                 "specialist_reasonings": council,
                 "attempt": attempt,
                 "required_protocol": (
-                    f"SPRINT={sprint_number}\n"
-                    "RESULT=<one expected later-verifiable benefit from TEXT; not yet achieved>\n"
-                    "TEXT=<one concrete mandatory deliverable executable within 5 working days>\n"
-                    "[TEXT=<optional second concrete deliverable>]\n"
-                    "[TEXT=<optional third concrete deliverable>]\n"
-                    "END_SPRINT"
+                    "TEXT: <one concrete, actionable deliverable in Arabic>\n"
+                    "RESULT: <one expected, verifiable consequence in Arabic>\n"
+                    "Nothing else; do not include SPRINT identifiers, code fences, or commentary."
                 ),
                 "mandatory_rules": [
-                    f"Return ONLY Sprint {sprint_number}; no other sprint number.",
+                    "Return ONLY the requested output and expected result. "
+                    "The server already knows the sprint number; do not restate it.",
                     "Write complete, natural Modern Standard Arabic with no truncated or corrupted words.",
                     "No square brackets, stray backslashes, pseudo-placeholders, or malformed quotation marks.",
                     "RESULT is the expected FUTURE consequence of TEXT, not the output itself and not a historical accomplishment. It must be specific and tied to the approved intervention (transport when appropriate).",
@@ -5188,18 +5282,12 @@ class AtharCouncilEngine:
                 ],
             }
 
-            # Keep protocol SPRINT=n parseable: a banned '3' must not suppress
-            # SPRINT=3 itself. Written-out variants are blocked as well so the
-            # model cannot evade the digit guard with 'ثلاثة'.
+            # Repair response has no mandatory numeric header. Banning an
+            # unsupported digit cannot corrupt a SPRINT= label anymore.
             banned_numeric_phrases: List[str] = []
             for numeral in sorted(rejected_numeric_claims):
-                if numeral != str(sprint_number):
-                    banned_numeric_phrases.append(numeral)
-                    banned_numeric_phrases.extend(NUMBER_WORD_PATTERNS.get(numeral, ()))
-                else:
-                    # A numeric claim is still rejected by the post-generation
-                    # validator; do not invalidate the mandatory sprint header.
-                    banned_numeric_phrases.extend([f"{numeral}%", f"{numeral}٪"])
+                banned_numeric_phrases.append(numeral)
+                banned_numeric_phrases.extend(NUMBER_WORD_PATTERNS.get(numeral, ()))
 
             # Block any directly reported malformed word on the final recovery;
             # this supplements (never replaces) post-generation quality checks.
@@ -5222,10 +5310,16 @@ class AtharCouncilEngine:
                 620,
                 deterministic=(attempt == 1),
                 repetition_penalty=1.12,
-                no_repeat_ngram_size=7,
+                no_repeat_ngram_size=None,  # protect short structured output labels
                 forbidden_phrases=sorted(set(banned_numeric_phrases + banned_content_phrases)) or None,
             )
-            parsed = parse_sprints(raw)
+            parsed = parse_sprints(raw, expected_numbers=[sprint_number])
+            if not parsed.get("outputs"):
+                # Parser formatting errors are not advisory quality failures.
+                # Log protocol diagnostics without raw private data by default.
+                preview = (repr(raw[:800]) if os.getenv("ATHAR_SCREEN3_DEBUG_RAW", "0") == "1" else "<redacted>")
+                print(f"[council] v21 no_parseable_unit sprint={sprint_number} "
+                      f"chars={len(raw)} raw_preview={preview}", flush=True)
             parsed["outputs"] = [
                 x for x in (parsed.get("outputs") or [])
                 if isinstance(x, dict)
@@ -6226,7 +6320,7 @@ class AtharCouncilEngine:
                             continue
                         rows = proposal.get("outputs") or []
                         if len(rows) != 1:
-                            errors_by_sprint[n] = [f"sprint {n} repair returned no parseable unit"]
+                            errors_by_sprint[n] = [f"sprint {n} repair returned no parseable unit after multi-format parsing"]
                             continue
                         errors, _ = sprint_quality_errors(
                             {"outputs": rows}, intervention, expected_numbers=[n]
@@ -6256,7 +6350,7 @@ class AtharCouncilEngine:
                         for n in missing
                     ]
                     raise ValueError(
-                        f"V20 model output generation failed for sprints {missing} "
+                        f"V21 model output generation failed for sprints {missing} "
                         f"of intervention '{intervention.get('title')}': "
                         + " || ".join(specific_errors[:5])
                     )
@@ -6315,7 +6409,7 @@ class AtharCouncilEngine:
                 prior = candidate_full
                 details.append({"sprints":numbers,"status":"validated"})
             return {"outputs":prior,"raw":""}, {
-                "architecture":"v20-three-sprint-targeted-quality-recovery",
+                "architecture":"v21-contract-first-flexible-parser-targeted-quality-recovery",
                 "model_calls":attempts_total,
                 "archetype":"model_generated_no_templates",
                 "fallback_sprints":[],"fallback_count":0,
@@ -6501,7 +6595,7 @@ class AtharCouncilEngine:
             result["human_escalation"] = escalation
 
         self._last_meta_debug = {
-            "architecture": "screen3-v20-last-sprint-language-and-history-recovery",
+            "architecture": "screen3-v21-structure-separated-from-quality",
             "meta_advisor_slug": meta["slug"],
             "meta_advisor_name": meta["name"],
             "meta_prompt_path": meta["prompt_path"],
@@ -7600,7 +7694,7 @@ class AtharCouncilEngine:
             if str(request.get("topic") or "").strip() != "interventions":
                 raise ValueError("topic must be interventions.")
 
-            print("[council] code_version=screen3-v20-last-sprint-content-recovery", flush=True)
+            print("[council] code_version=screen3-v21-robust-structure-quality-isolation", flush=True)
             kind = str(request.get("kind") or "generate").strip().lower()
             debug = bool(request.get("debug") or self._payload(request).get("debug"))
             total_start = time.perf_counter()
