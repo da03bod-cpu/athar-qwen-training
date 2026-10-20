@@ -1,0 +1,130 @@
+{
+  "schema_version": "athar_continual_run_v2",
+  "run_id": "3",
+  "created_at": "2026-10-20T13:22:09.134909+00:00",
+  "request": {
+    "consultation_id": 1,
+    "kind": "generate",
+    "meta_advisor": {
+      "name": "المستشار الأعلى",
+      "slug": "AOS-META-01"
+    },
+    "payload": {
+      "advisors": [
+        {
+          "capabilities": [],
+          "name": "أ. منيرة العنزي",
+          "slug": "AOS-SP-13",
+          "title": "مستشار المحافظ والبرامج والمشاريع",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "د. أمل الجهني",
+          "slug": "AOS-SP-15",
+          "title": "مستشار المتابعة والتقييم والتعلم وقياس الأثر",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "أ. الجوهرة الفيصل",
+          "slug": "AOS-FG-18",
+          "title": "مستشار الاستدامة المالية وتنمية الموارد",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "د. محمد الشهراني",
+          "slug": "AOS-SE-27",
+          "title": "مستشار التعليم والأبحاث",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "د. وفاء اليامي",
+          "slug": "AOS-SE-28",
+          "title": "مستشار الصحة",
+          "traits": []
+        },
+        {
+          "capabilities": [],
+          "name": "الشيخ عبدالعزيز الفوزان",
+          "slug": "AOS-SE-34",
+          "title": "مستشار الدعوة والتعليم الديني وخدمة ضيوف الرحمن",
+          "traits": []
+        }
+      ],
+      "association_scope": "health",
+      "goal": {
+        "bsc_axis": "المستفيدين واصحاب المصلحة",
+        "clarity_rating": "مؤسسي",
+        "social_problem": null,
+        "statement": "هدف ٢",
+        "target_group": null,
+        "vision_alignment": null
+      },
+      "impact_drivers": "beneficiary_centered_design",
+      "impact_map": {
+        "association_scope": "health",
+        "impact_drivers": "beneficiary_centered_design",
+        "social_problem": null
+      },
+      "organization": {
+        "activity_fields": [
+          "صحي",
+          "تعليمي",
+          "تدريبي",
+          "تنموي",
+          "إغاثي وإنساني",
+          "خيري",
+          "دعوي"
+        ],
+        "competitive_advantage": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "detailed_description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "important_notes": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "name": "مؤسسة الاصلاح",
+        "sector": "غير ربحي",
+        "short_description": "وصف مبسط",
+        "type": "مؤسسة مانحة"
+      },
+      "programs": [
+        {
+          "beneficiary_value": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "delivery_method": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "name": "فتيات القوة",
+          "target_audience": "جمهور",
+          "type": "project"
+        },
+        {
+          "beneficiary_value": null,
+          "delivery_method": null,
+          "description": null,
+          "name": "fnkhl[",
+          "target_audience": null,
+          "type": "project"
+        }
+      ],
+      "social_problem": null,
+      "track": {
+        "id": 4,
+        "name": "مسار الكفاءة التشغيلية",
+        "slug": "operational-efficiency"
+      },
+      "track_id": 4
+    },
+    "reason": null,
+    "run_id": "3",
+    "topic": "interventions",
+    "type": "advisory_consultation"
+  },
+  "response": {
+    "status": "FAILED",
+    "error": "Screen-3 portfolio lacks direct beneficiary/program impact: Screen 3 requires at least one direct beneficiary/program-facing intervention when returning two proposals. | No direct intervention is visibly anchored to an existing program even though programs are provided; strengthen/prioritize a supported existing program instead of returning only internal analysis. | No direct intervention visibly addresses a named impact driver; use the impact drivers as intervention anchors."
+  },
+  "quality": {
+    "advisor_reports": [],
+    "meta_grounding_violations": [],
+    "has_quality_warning": false
+  }
+}
