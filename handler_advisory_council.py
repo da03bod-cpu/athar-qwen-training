@@ -461,6 +461,152 @@ def _screen3_parse_units_v21(
             "parse_status": "parsed" if best else "unparseable"}
 
 
+def _screen3_extract_plain_field_v22(raw: str, field: str) -> str:
+    """Read one free-form model answer without fabricating missing content.
+
+    Used by the last-resort *two-call* recovery, NOT by normal batch parsing.
+    Strictly reject commentary, multiple competing answers, incomplete think
+    tags and empty content. The normal evidence, language, scope and duplicate
+    checks run independently after extraction.
+    """
+    field = str(field).lower()
+    if field not in ("text", "result"):
+        raise ValueError("Unknown plain field")
+    src = str(raw or "").strip()
+    if "<think>" in src.lower():
+        src = re.sub(r"<think>.*?</think>", "", src, flags=re.S | re.I).strip()
+        if re.search(r"<think>", src, flags=re.I):
+            return ""
+    src = re.sub(r"^\s*```(?:json|text|txt)?\s*\n|\n\s*```\s*$", "", src, flags=re.I).strip()
+    if not src:
+        return ""
+
+    # The writer might use a compact JSON scalar/object even after being
+    # asked for plain text. Only accept explicitly supplied field content.
+    try:
+        value = json.loads(src)
+    except (ValueError, TypeError):
+        value = None
+    if isinstance(value, str):
+        src = value.strip()
+    elif isinstance(value, dict):
+        if field == "text":
+            value = value.get("text", value.get("output"))
+        else:
+            value = value.get("result", value.get("results"))
+            if isinstance(value, list):
+                value = value[0] if len(value) == 1 else None
+            if isinstance(value, dict):
+                value = value.get("text")
+        if not isinstance(value, str):
+            return ""
+        src = value.strip()
+    elif isinstance(value, list):
+        return ""
+
+    # Some Qwen generations put TEXT and RESULT on one physical line.
+    # Split only unmistakable protocol keys so neither field swallows the other.
+    src = re.sub(
+        r"[ \t]+(?=(?:TEXT|OUTPUT|DELIVERABLE|RESULT|OUTCOME|EXPECTED_RESULT)\s*[:=：])",
+        "\n", src, flags=re.I,
+    )
+    src = re.sub(
+        r"[ \t]+(?=(?:المخرج|النتيجة|الأثر المتوقع)\s*[:=：])",
+        "\n", src,
+    )
+    # Accept a matching heading or both tagged fields, but never silently
+    # interpret a label describing the *other* field as this field.
+    key = "TEXT|OUTPUT|DELIVERABLE|المخرج" if field == "text" else "RESULT|OUTCOME|EXPECTED_RESULT|النتيجة|الأثر المتوقع"
+    other = "RESULT|OUTCOME|EXPECTED_RESULT|النتيجة|الأثر المتوقع" if field == "text" else "TEXT|OUTPUT|DELIVERABLE|المخرج"
+    both = re.findall(r"(?im)^\s*(?:TEXT|OUTPUT|DELIVERABLE|RESULT|OUTCOME|EXPECTED_RESULT|المخرج|النتيجة|الأثر المتوقع)\s*[:=：]", src)
+    if both:
+        pat = re.compile(rf"(?ims)^\s*(?:{key})\s*[:=：]\s*(.*?)\s*(?=^\s*(?:{other}|{key})\s*[:=：]|\Z)")
+        sections = [m.group(1).strip() for m in pat.finditer(src)]
+        if len(sections) != 1:
+            return ""
+        src = sections[0]
+    else:
+        # Raw free text is allowed only when it is clearly a *single* answer.
+        if re.search(r"(?im)^\s*(?:SPRINT|END_SPRINT|WEEK)\s*[:=]", src):
+            return ""
+
+    src = re.sub(r"^\s*[-•*]\s*", "", src).strip().strip('"').strip("'").strip()
+    if (not (16 <= len(src) <= 850)
+        or len(re.findall(r"[\u0621-\u064a]", src)) < 10
+        or re.search(r"(?i)```|</?think>|\b(?:system|assistant|user)\s*:", src)
+        or re.search(r"(?m)^\s*\d+\s*[.)-]", src)
+        or len(re.findall(r"(?m)^\s*[-*•]\s+", src)) > 1
+        or re.search(r"(?i)^(?:عذر[ًاا]|لا أستطيع|لا يمكنني|إليك|سأقوم)", src)):
+        return ""
+    return re.sub(r"\s+", " ", src)
+
+
+def _screen3_fieldwise_recovery_v22(
+    *, generate, intervention: Dict[str, Any], sprint_number: int,
+    sprint_purpose: str, authoritative_context: Dict[str, Any],
+    previous_outputs: List[Dict[str, Any]], validation_errors: List[str],
+    cleaner=None,
+) -> Dict[str, Any]:
+    """Last-mile recovery that has NO required machine-readable model format.
+
+    Generate one independent OUTPUT then one independent RESULT. Python owns
+    the JSON assembly and known sprint ID. Returns no candidate on blank,
+    ambiguous, or otherwise unparseable text; never manufactures a sentence.
+    The caller MUST apply all content-quality validation gates to the result.
+    """
+    compact = {
+        "intervention": {
+            key: intervention.get(key)
+            for key in ("title", "impact_description", "reportable_value")
+        },
+        "goal": authoritative_context.get("goal"),
+        "programs": authoritative_context.get("programs"),
+        "impact_map": authoritative_context.get("impact_map"),
+        "sprint_number_internal": sprint_number,
+        "sprint_purpose": sprint_purpose,
+        "previous_deliverables": [
+            str(x.get("text") or "")[:220] for x in previous_outputs[-5:]
+            if isinstance(x, dict)
+        ],
+        "repair_issue": [str(e)[:180] for e in validation_errors[:3]],
+    }
+    instructions = (
+        "اكتب جملة عربية فصحى واحدة فقط دون عنوان أو مفتاح JSON أو شرح. "
+        "التزم بالتدخل المذكور وبيانات الجمعية، لا تخترع أرقامًا أو مواقع "
+        "أو نتائج مثبتة أو سجلات تاريخية. لا تعِد صياغة مخرج أسبوع سابق. "
+        "لا تستخدم تسميات SPRINT وTEXT وRESULT."
+    )
+    def invoke(kind: str, extra: Dict[str, Any], max_tokens: int) -> str:
+        raw = generate(
+            "base", instructions,
+            json.dumps({"write": kind, **compact, **extra}, ensure_ascii=False,
+                       separators=(",", ":")),
+            max_tokens,
+            deterministic=False,
+            repetition_penalty=1.04,
+            no_repeat_ngram_size=None,
+        )
+        value = _screen3_extract_plain_field_v22(raw, "text" if kind == "output" else "result")
+        return str(cleaner(value) if cleaner and value else value).strip()
+
+    output_text = invoke("output", {
+        "instruction": "اكتب المخرج التنفيذي الملموس الذي يمكن لفريق الجمعية إنجازه في هذه المرحلة، وليس النتيجة أو نصيحة للمستشار."
+    }, 320)
+    if not output_text:
+        return {"outputs": [], "recovery_status": "no_output_text"}
+    expected_result = invoke("result", {
+        "output_text": output_text,
+        "instruction": "اكتب النتيجة المستقبلية القابلة للتحقق التي قد يتيحها تنفيذ المخرج؛ لا تدّعِ أنها حدثت بالفعل."
+    }, 320)
+    if not expected_result:
+        return {"outputs": [], "recovery_status": "no_expected_result"}
+    return {
+        "outputs": [{"_sprint": int(sprint_number), "text": output_text,
+                     "results": [{"text": expected_result}]}],
+        "recovery_status": "fieldwise_candidate_needs_quality_validation",
+    }
+
+
 class _RegexTokenBlocker(LogitsProcessor):
     """Hard-mask token IDs whose decoded token matches a forbidden regex."""
 
@@ -5137,6 +5283,11 @@ class AtharCouncilEngine:
             )
             return parse_sprints(raw, expected_numbers=sprint_numbers)
 
+        # Bound format fallback to one two-call sequence per sprint. An output
+        # failing quality validation may still use the existing structured
+        # repair attempts, but cannot spawn unbounded free-form generations.
+        fieldwise_attempted_sprints: set[int] = set()
+
         def precision_repair_single_sprint(
             intervention: Dict[str, Any],
             sprint_number: int,
@@ -5146,7 +5297,37 @@ class AtharCouncilEngine:
             validation_errors: List[str],
             attempt: int = 1,
         ) -> Dict[str, Any]:
-            """Repair exactly ONE failed sprint before deterministic fallback."""
+            """Repair one sprint; prefer plain output+result without a model protocol."""
+            # V22 is format-independent by default for individual repairs.
+            # Both fields are generated as ordinary Arabic; Python, not Qwen,
+            # adds the sprint number and JSON keys. No automated content is
+            # accepted until the normal sprint_quality_errors() gates pass.
+            if (attempt == 1 and sprint_number not in fieldwise_attempted_sprints
+                and os.getenv("ATHAR_SCREEN3_FIELDWISE_PRIMARY", "1") == "1"):
+                fieldwise_attempted_sprints.add(sprint_number)
+                try:
+                    direct = _screen3_fieldwise_recovery_v22(
+                        generate=self._generate,
+                        intervention=intervention,
+                        sprint_number=sprint_number,
+                        sprint_purpose=SPRINT_PURPOSES[sprint_number],
+                        authoritative_context=authoritative_context,
+                        previous_outputs=prior_outputs,
+                        validation_errors=validation_errors,
+                        cleaner=lambda text: self._clean_meta_public_text(text, request),
+                    )
+                    if direct.get("outputs"):
+                        print(f"[council] v22 fieldwise_primary_candidate sprint={sprint_number} "
+                              "quality_gate=pending", flush=True)
+                        return direct
+                    print(f"[council] v22 fieldwise_primary_failure sprint={sprint_number} "
+                          f"reason={direct.get('recovery_status')}", flush=True)
+                except Exception as exc:
+                    print(f"[council] v22 fieldwise_primary_exception sprint={sprint_number} "
+                          f"type={type(exc).__name__}", flush=True)
+                # One compact protocol attempt remains available, and further
+                # attempts still follow the pre-existing bounded recovery loop.
+
             prior_compact: List[Dict[str, Any]] = []
             for unit in prior_outputs[-6:]:
                 if not isinstance(unit, dict):
@@ -5315,11 +5496,35 @@ class AtharCouncilEngine:
             )
             parsed = parse_sprints(raw, expected_numbers=[sprint_number])
             if not parsed.get("outputs"):
-                # Parser formatting errors are not advisory quality failures.
-                # Log protocol diagnostics without raw private data by default.
+                # A format error should not force Qwen to regenerate BOTH fields
+                # inside another brittle machine-readable response. Recover by
+                # independently writing ONE Arabic output and ONE Arabic result.
                 preview = (repr(raw[:800]) if os.getenv("ATHAR_SCREEN3_DEBUG_RAW", "0") == "1" else "<redacted>")
-                print(f"[council] v21 no_parseable_unit sprint={sprint_number} "
-                      f"chars={len(raw)} raw_preview={preview}", flush=True)
+                print(f"[council] v22 structured_format_failure sprint={sprint_number} "
+                      f"attempt={attempt} chars={len(raw)} raw_preview={preview}", flush=True)
+                if sprint_number not in fieldwise_attempted_sprints:
+                    fieldwise_attempted_sprints.add(sprint_number)
+                    try:
+                        plain = _screen3_fieldwise_recovery_v22(
+                            generate=self._generate,
+                            intervention=intervention,
+                            sprint_number=sprint_number,
+                            sprint_purpose=SPRINT_PURPOSES[sprint_number],
+                            authoritative_context=authoritative_context,
+                            previous_outputs=prior_outputs,
+                            validation_errors=validation_errors,
+                            cleaner=lambda text: self._clean_meta_public_text(text, request),
+                        )
+                        if plain.get("outputs"):
+                            parsed = plain
+                            print(f"[council] v22 fieldwise_candidate sprint={sprint_number} "
+                                  "quality_gate=pending", flush=True)
+                        else:
+                            print(f"[council] v22 fieldwise_failure sprint={sprint_number} "
+                                  f"reason={plain.get('recovery_status')}", flush=True)
+                    except Exception as exc:
+                        print(f"[council] v22 fieldwise_exception sprint={sprint_number} "
+                              f"type={type(exc).__name__}", flush=True)
             parsed["outputs"] = [
                 x for x in (parsed.get("outputs") or [])
                 if isinstance(x, dict)
@@ -6320,7 +6525,7 @@ class AtharCouncilEngine:
                             continue
                         rows = proposal.get("outputs") or []
                         if len(rows) != 1:
-                            errors_by_sprint[n] = [f"sprint {n} repair returned no parseable unit after multi-format parsing"]
+                            errors_by_sprint[n] = [f"sprint {n} repair failed to produce both output and result (structured + fieldwise recovery)"]
                             continue
                         errors, _ = sprint_quality_errors(
                             {"outputs": rows}, intervention, expected_numbers=[n]
@@ -6350,7 +6555,7 @@ class AtharCouncilEngine:
                         for n in missing
                     ]
                     raise ValueError(
-                        f"V21 model output generation failed for sprints {missing} "
+                        f"V22 model output generation failed for sprints {missing} "
                         f"of intervention '{intervention.get('title')}': "
                         + " || ".join(specific_errors[:5])
                     )
@@ -6409,7 +6614,7 @@ class AtharCouncilEngine:
                 prior = candidate_full
                 details.append({"sprints":numbers,"status":"validated"})
             return {"outputs":prior,"raw":""}, {
-                "architecture":"v21-contract-first-flexible-parser-targeted-quality-recovery",
+                "architecture":"v22-structured-plus-free-text-fieldwise-recovery",
                 "model_calls":attempts_total,
                 "archetype":"model_generated_no_templates",
                 "fallback_sprints":[],"fallback_count":0,
@@ -6595,7 +6800,7 @@ class AtharCouncilEngine:
             result["human_escalation"] = escalation
 
         self._last_meta_debug = {
-            "architecture": "screen3-v21-structure-separated-from-quality",
+            "architecture": "screen3-v22-recovery-format-independent",
             "meta_advisor_slug": meta["slug"],
             "meta_advisor_name": meta["name"],
             "meta_prompt_path": meta["prompt_path"],
@@ -7694,7 +7899,7 @@ class AtharCouncilEngine:
             if str(request.get("topic") or "").strip() != "interventions":
                 raise ValueError("topic must be interventions.")
 
-            print("[council] code_version=screen3-v21-robust-structure-quality-isolation", flush=True)
+            print("[council] code_version=screen3-v22-format-independent-recovery", flush=True)
             kind = str(request.get("kind") or "generate").strip().lower()
             debug = bool(request.get("debug") or self._payload(request).get("debug"))
             total_start = time.perf_counter()
