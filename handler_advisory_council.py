@@ -104,6 +104,72 @@ def _screen3_transport_semantic_anchor(text: Any, approved_title: Any) -> bool:
     return bool(has_operational_effect and (has_transport or has_beneficiary))
 
 
+def _screen3_v18_text_quality_errors(
+    value: Any,
+    *,
+    intervention_title: str = "",
+    authoritative_programs_text: str = "",
+    field: str = "output.text",
+) -> List[str]:
+    """Conservative QA for *observed* Screen-3 production failures.
+
+    This is not a general-purpose Arabic grammar checker. Fail closed on known
+    malformed expressions or contradictions; request model repair of the same
+    sprint rather than silently editing facts or inventing expected results.
+    """
+    raw = str(value or "")
+    if not raw.strip():
+        return []
+    errors: List[str] = []
+    corrupt = (
+        r"\b(?:التحسنيات|التحسيمات|التحسنيات|المستفيذبن|المستفيدبن|الانتظر|النتظر|"
+        r"التوقيط|توقيط|التنمين[يي]|التتنمي|التشغل|التشاغيلية|الحاصلات|"
+        r"الحافولات|الحوافل|الحوافلات|الحافظات|الحواسيب اليومية|الحواسيب التشغيلية|"
+        r"الحاف المدرسية|الحافلات المدرسية التوازي|الحافلات المدرسية التنازي|"
+        r"الحافلات المدرسية التصنيعي|الغيبان|غي المدرسة|الغيب المدرسي|"
+        r"الغي المدرسي|الحض والغياب|نموذه|نموذي|مساث|مصفقة|مصفوق|"
+        r"الطالبين بأمان|الجمع ومشروع|المعاياير|معاياير|"
+        r"التحسيمات|مسارة واحدة|الحاف المدر|المدر التنموي|المسؤلة|قيايس)\b"
+    )
+    m = re.search(corrupt, raw, re.I)
+    if m:
+        errors.append(f"{field} contains corrupted Arabic expression: {m.group(0)!r}")
+    if re.search(r"[\uFFFD\u200B]",raw):
+        errors.append(f"{field} contains replacement or hidden characters")
+    if re.search(r"(?:حواجز|حاصلات|حواسيب)\s+(?:ال)?(?:مسار|نقل|مدرس|حافل)", raw):
+        errors.append(f"{field} confuses buses with unrelated objects")
+
+    # The supplied program describes two routes/lines. 'Three main routes' was
+    # invented in the real V17 output. Test the quantity in TRANSPORT context,
+    # not an unrelated reference to three indicators or three planned tasks.
+    source = str(authoritative_programs_text or "")
+    transport = bool(re.search(r"نقل|حافل|مسار|مدرس", intervention_title))
+    two_lines = bool(re.search(r"(?:خطين|خَطَّيْن|مسارين|خطان|مساران|(?:2|٢)\s*(?:خط|مسار))",source))
+    if transport and two_lines:
+        three = r"(?:ال[ـ\s]*[3٣]|[3٣]|ثلاث(?:ة)?|الثلاث(?:ة)?|ثلاثة)"
+        routes = r"(?:ال)?(?:مسارات|مسار|خطوط|خط)(?:\s+(?:الحافلات|النقل))?"
+        if (re.search(rf"{routes}\s+(?:ال)?(?:رئيسية|أساسية|حالية)?\s*{three}(?:\b|$)",raw)
+            or re.search(rf"{three}\s+(?:ال)?(?:رئيسية|أساسية|حالية)?\s*{routes}\b",raw)):
+            errors.append(f"{field} contradicts documented two transport lines with three routes/lines")
+
+    # We must not represent an unobserved impact as confirmed causality or a
+    # guaranteed effect. Planned benefits can still be expressed conditionally.
+    if field.startswith("results") and re.search(
+        r"(?:تأكيد|إثبات)\s+(?:وجود\s+)?(?:علاقة\s+مباشرة|تحسن|انخفاض|أثر\s+محقق)|"
+        r"(?:تحقيق|تأكيد)\s+تحسن\s+ملموس|"
+        r"(?:ثبت|أثبت|تحقق)\s+(?:بالفعل|أن|بشكل\s+قاطع)",raw
+    ):
+        errors.append(f"{field} presents an unverified effect or causal claim as established")
+
+    # Statements of historic data collection must be sourced rather than
+    # asserting records have already been collected for a specific past window.
+    hist = re.search(r"(?:الأسبوعين|الاسبوعين|الأسابيع|الاسابيع)\s+(?:الماضيين|الماضي|الماضية|الأخيرة|الاخيرة)",raw)
+    if hist and hist.group(0) not in source:
+        errors.append(f"{field} assumes an undocumented historical data window")
+
+    return errors
+
+
 class _RegexTokenBlocker(LogitsProcessor):
     """Hard-mask token IDs whose decoded token matches a forbidden regex."""
 
@@ -4118,7 +4184,7 @@ class AtharCouncilEngine:
 
         impact_errors = portfolio_impact_errors(strategy)
         if impact_errors:
-            print("[council] V17 impact-portfolio repair: " + " | ".join(impact_errors[:4]), flush=True)
+            print("[council] V18 impact-portfolio repair: " + " | ".join(impact_errors[:4]), flush=True)
             try:
                 repair_task = dict(strategy_task)
                 repair_task["task"] = (
@@ -4347,6 +4413,17 @@ class AtharCouncilEngine:
                 result = str(unit.get("text") or "").strip()
                 deliverables = unit.get("results") or []
 
+                for quality_issue in _screen3_v18_text_quality_errors(
+                    result,
+                    intervention_title=str(intervention.get("title") or ""),
+                    authoritative_programs_text=json.dumps(
+                        authoritative_context.get("programs") or [], ensure_ascii=False
+                    ),
+                    field="output.text",
+                ):
+                    errors.append(f"sprint {n} {quality_issue}")
+                    bad.add(n)
+
                 if len(result) < 18 or broken_or_placeholder(result):
                     errors.append(f"sprint {n} output.text is generic, broken, or too short")
                     bad.add(n)
@@ -4411,6 +4488,16 @@ class AtharCouncilEngine:
                     if len(text_value) < 18 or broken_or_placeholder(text_value):
                         errors.append(f"sprint {n} contains generic/broken results[].text")
                         bad.add(n)
+                    for quality_issue in _screen3_v18_text_quality_errors(
+                        text_value,
+                        intervention_title=str(intervention.get("title") or ""),
+                        authoritative_programs_text=json.dumps(
+                            authoritative_context.get("programs") or [], ensure_ascii=False
+                        ),
+                        field="results[].text",
+                    ):
+                        errors.append(f"sprint {n} {quality_issue}")
+                        bad.add(n)
                     if unsupported_numbers(text_value):
                         errors.append(
                             f"sprint {n} results[].text contains unsupported numbers {unsupported_numbers(text_value)}"
@@ -4471,9 +4558,10 @@ class AtharCouncilEngine:
 
         SPRINT_FALLBACK_VERSION = "base-writer-contextual-grounding-v5"
 
+        # Smaller context windows reduce cumulative drift and Arabic corruption
+        # seen in late sprints of the prior six-item batches. More calls/cost.
         SPRINT_CHUNKS: List[List[int]] = [
-            [1, 2, 3, 4, 5, 6],
-            [7, 8, 9, 10, 11, 12],
+            [1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12],
         ]
 
         SPRINT_PURPOSES: Dict[int, str] = {
@@ -4755,6 +4843,9 @@ class AtharCouncilEngine:
                     "If authoritative_context does not provide a quantity, keep the deliverable qualitative rather than inventing a count.",
                     "Write natural, complete Modern Standard Arabic. Never output truncated words, malformed brackets, stray backslashes, broken quotation marks, or pseudo-placeholders.",
                     "Name the actual artifact or decision produced that week instead of repeating generic words such as تنفيذ or مراجعة.",
+                    "Before returning, proofread every RESULT and TEXT for natural Arabic. Avoid mutated words such as التحسنيات/الحواسيب for الحافلات/النتظر; rewrite the whole sentence naturally.",
+                    "A school transport program documented as having two lines cannot suddenly have three routes/lines. Do not invent historical data windows (e.g. records from the past three weeks) absent from the case.",
+                    "Do not claim proven causality or guaranteed measured improvement in RESULT; frame it as a future observable outcome contingent on actual measurement.",
                 ],
             }
 
@@ -4919,6 +5010,9 @@ class AtharCouncilEngine:
                     "If a quantity is missing, remove the entire numerical CLAIM and replace it with a qualitative milestone about this same intervention; do not delete digits alone or fill blank % signs.",
                     "Numbers in SPRINT labels or JSON fields do not license numeric claims in RESULT or TEXT.",
                     "In a final strict-numeric-free repair, the SPRINT identifier is the only number allowed; all result and output descriptions must contain no digits or numerical number words." if strict_numeric_free else "Do not select an arbitrary new count of outputs, reports, schools, indicators or activities.",
+                    "If validation mentions corrupted Arabic, fully rewrite the output and result in correct Modern Standard Arabic instead of changing a single misspelled letter.",
+                    "If validation mentions three routes/lines, retain the verified existing route count from the provided PROGRAMS; do not invent another count or restate an unsupported historical period.",
+                    "If validation mentions an unverified effect, replace confirmation of success/causality with a prospective, measurable result that can be checked after execution.",
                 ],
             }
 
@@ -5845,7 +5939,7 @@ class AtharCouncilEngine:
                         break
                     attempts_total += 1
                     print(
-                        f"[council] v17 chunk={numbers} remaining={remaining} attempt={attempt}",
+                        f"[council] v18 chunk={numbers} remaining={remaining} attempt={attempt}",
                         flush=True,
                     )
                     focused_errors = [
@@ -5918,7 +6012,7 @@ class AtharCouncilEngine:
                             break
                         attempts_total += 1
                         print(
-                            f"[council] v17 focused_repair sprint={n} attempt={single_attempt} "
+                            f"[council] v18 focused_repair sprint={n} attempt={single_attempt} "
                             f"strict_qualitative={single_attempt >= 3 and numeric_error} "
                             f"context_anchor_repair={anchor_error}",
                             flush=True,
@@ -5945,7 +6039,7 @@ class AtharCouncilEngine:
                         )
                         if not errors:
                             validated[n] = rows[0]
-                            print(f"[council] v17 focused_repair succeeded sprint={n}", flush=True)
+                            print(f"[council] v18 focused_repair succeeded sprint={n}", flush=True)
                             errors_by_sprint.pop(n, None)
                             rejected_by_sprint.pop(n, None)
                             break
@@ -5960,7 +6054,7 @@ class AtharCouncilEngine:
                         for n in missing
                     ]
                     raise ValueError(
-                        f"V17 model output generation failed for sprints {missing} "
+                        f"V18 model output generation failed for sprints {missing} "
                         f"of intervention '{intervention.get('title')}': "
                         + " || ".join(specific_errors[:5])
                     )
@@ -6012,14 +6106,14 @@ class AtharCouncilEngine:
                     )
                     if cross_errors:
                         raise ValueError(
-                            "V17 cross-sprint quality check failed for "
+                            "V18 cross-sprint quality check failed for "
                             f"{intervention.get('title')} (sprints {sorted(cross_bad)}): "
                             + " | ".join(cross_errors[:6])
                         )
                 prior = candidate_full
                 details.append({"sprints":numbers,"status":"validated"})
             return {"outputs":prior,"raw":""}, {
-                "architecture":"v17-grounded-impact-model-generated-outputs",
+                "architecture":"v18-three-sprint-coherent-output-generation",
                 "model_calls":attempts_total,
                 "archetype":"model_generated_no_templates",
                 "fallback_sprints":[],"fallback_count":0,
@@ -6051,7 +6145,7 @@ class AtharCouncilEngine:
 
             missing_numbers=[n for n in range(1,SPRINT_COUNT+1) if n not in by_sprint]
             if missing_numbers:
-                raise ValueError(f"V17 missing model-generated outputs for sprints {missing_numbers}")
+                raise ValueError(f"V18 missing model-generated outputs for sprints {missing_numbers}")
 
             plan["outputs"] = [
                 by_sprint[n]
@@ -6205,7 +6299,7 @@ class AtharCouncilEngine:
             result["human_escalation"] = escalation
 
         self._last_meta_debug = {
-            "architecture": "screen3-v17-grounded-impact-dna",
+            "architecture": "screen3-v18-three-sprint-language-grounding",
             "meta_advisor_slug": meta["slug"],
             "meta_advisor_name": meta["name"],
             "meta_prompt_path": meta["prompt_path"],
@@ -7304,7 +7398,7 @@ class AtharCouncilEngine:
             if str(request.get("topic") or "").strip() != "interventions":
                 raise ValueError("topic must be interventions.")
 
-            print("[council] code_version=screen3-v17-grounded-route-meal-arabic", flush=True)
+            print("[council] code_version=screen3-v18-focused-arabic-and-two-line-guard", flush=True)
             kind = str(request.get("kind") or "generate").strip().lower()
             debug = bool(request.get("debug") or self._payload(request).get("debug"))
             total_start = time.perf_counter()
