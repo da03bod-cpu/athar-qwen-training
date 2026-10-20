@@ -64,6 +64,46 @@ CONFIDENCE_LEVELS = {"High", "Medium", "Low"}
 
 
 
+def _screen3_transport_semantic_anchor(text: Any, approved_title: Any) -> bool:
+    """Conservative intervention-specific paraphrase check, not global keyword matching.
+
+    Only applies when the approved intervention is about school transport. It
+    accepts distinct, meaningful transport-service consequences like student
+    waiting times, attendance, routes and safety even when the approved title
+    itself uses different Arabic vocabulary. It does NOT accept an unrelated
+    education curriculum, or isolated vague words such as 'تقرير' or 'تحسين'.
+    All independent numerical, duplication, and outside-program guards still run.
+    """
+    title = str(approved_title or "")
+    if not re.search(r"نقل|حافل|مسار|مواصل", title, re.I):
+        return False
+    value = str(text or "")
+    if not value.strip():
+        return False
+    if re.search(
+        r"إطار التعلم للطلبة|الحزمة التعليمية|خريطة التعلم|"
+        r"الأنشطة التعليمية|مناهج|منهج دراسي|حصص تعليمية|حقائب مدرسية|"
+        r"حقيبة تعليمية|حقيبة مدرسية|محتوى تعليمي|دروس خصوصية",
+        value,
+    ):
+        return False
+    has_transport = bool(re.search(
+        r"نقل|حافل|مسار|خطوط|مواصل|مركب|رحل|موقف|محط|نقطة (?:انطلاق|وصول)",
+        value,
+    ))
+    has_beneficiary = bool(re.search(
+        r"طلاب|طلبة|طالب|تلاميذ|مستفيد|المدارس|مدرسة|المدرسة|أولياء الأمور",
+        value,
+    ))
+    has_operational_effect = bool(re.search(
+        r"انتظار|تأخ|تاخ|غياب|حضور|انتظام|وصول|انطلاق|مواعيد|توقيت|"
+        r"زمن|سلامة|آمن|الآمن|أمان|توقف|سير|انضباط|تغطية|جودة الخدمة|"
+        r"كفاءة التشغيل|استمرارية الخدمة",
+        value,
+    ))
+    return bool(has_operational_effect and (has_transport or has_beneficiary))
+
+
 class _RegexTokenBlocker(LogitsProcessor):
     """Hard-mask token IDs whose decoded token matches a forbidden regex."""
 
@@ -4016,7 +4056,7 @@ class AtharCouncilEngine:
 
         impact_errors = portfolio_impact_errors(strategy)
         if impact_errors:
-            print("[council] V15 impact-portfolio repair: " + " | ".join(impact_errors[:4]), flush=True)
+            print("[council] V16 impact-portfolio repair: " + " | ".join(impact_errors[:4]), flush=True)
             try:
                 repair_task = dict(strategy_task)
                 repair_task["task"] = (
@@ -4203,14 +4243,28 @@ class AtharCouncilEngine:
             approved_tokens = qtokens(approved_intervention_text)
             case_tokens = authoritative_tokens
 
-            def is_anchored(value: Any) -> bool:
+            def is_anchored(value: Any, *, output_context: str = "") -> bool:
                 tokens = qtokens(value)
                 if not tokens:
                     return False
-                # Prefer direct connection to the approved intervention. A line
-                # may also be accepted when it is strongly tied (2+ meaningful
-                # tokens) to authoritative case facts.
-                return bool(tokens & approved_tokens) or len(tokens & case_tokens) >= 2
+                # Lexical anchor in the approved intervention or verified case.
+                if (tokens & approved_tokens) or len(tokens & case_tokens) >= 2:
+                    return True
+                # V16: Transport-only semantic bridge for legitimate Arabic
+                # paraphrases. Do not turn this into a universal bypass: drift,
+                # unsupported numeric claims, duplicates, and generic text are
+                # still rejected by the other quality checks.
+                if _screen3_transport_semantic_anchor(
+                    value, intervention.get("title")
+                ):
+                    return True
+                # An expected consequence may be naturally phrased differently
+                # from the title; it must still connect to the specific output.
+                if output_context:
+                    overlap = tokens & qtokens(output_context)
+                    if len(overlap) >= 2:
+                        return True
+                return False
 
             seen_results: Dict[str, int] = {}
             seen_deliverables: Dict[str, int] = {}
@@ -4225,7 +4279,7 @@ class AtharCouncilEngine:
                 deliverables = unit.get("results") or []
 
                 if len(result) < 18 or broken_or_placeholder(result):
-                    errors.append(f"sprint {n} result is generic, broken, or too short")
+                    errors.append(f"sprint {n} output.text is generic, broken, or too short")
                     bad.add(n)
                 if unsupported_numbers(result):
                     errors.append(
@@ -4234,16 +4288,16 @@ class AtharCouncilEngine:
                     bad.add(n)
                 if number_context_errors(result):
                     errors.append(
-                        f"sprint {n} result reuses grounded numbers in an unsupported context {number_context_errors(result)}"
+                        f"sprint {n} output.text reuses grounded numbers in an unsupported context {number_context_errors(result)}"
                     )
                     bad.add(n)
                 if unsupported_external_assumption(result):
                     errors.append(
-                        f"sprint {n} result introduces unsupported external/program context"
+                        f"sprint {n} output.text introduces unsupported external/program context"
                     )
                     bad.add(n)
                 if qtokens(result) and not is_anchored(result):
-                    errors.append(f"sprint {n} result is not anchored to this intervention/case")
+                    errors.append(f"sprint {n} output.text is not anchored to this intervention/case")
                     bad.add(n)
                 # A named school-transport operations intervention cannot silently
                 # turn into a separate learning-curriculum intervention just because
@@ -4251,11 +4305,11 @@ class AtharCouncilEngine:
                 context_title = str(intervention.get("title") or "")
                 if (re.search(r"نقل|حافل|مسار", context_title)
                     and not re.search(r"تعل[يّ]?م|تعلّم|مناهج|تدريس", context_title)
-                    and re.search(r"إطار التعلم للطلبة|الحزمة التعليمية|خريطة التعلم|الأنشطة التعليمية", result)):
+                    and re.search(r"إطار التعلم للطلبة|الحزمة التعليمية|خريطة التعلم|الأنشطة التعليمية|حقيبة تعليمية|حقيبة مدرسية|محتوى تعليمي|دروس خصوصية", result)):
                     errors.append(f"sprint {n} introduces an unrelated education intervention")
                     bad.add(n)
                 if re.search(r"^(?:إتاحة|توافر) (?:وثيقة|ملف|نسخة|قائمة|جدول).{0,130}(?:الخطوة التالية|التحقق من جاهزيتها)", result):
-                    errors.append(f"sprint {n} has a generic document-availability result")
+                    errors.append(f"sprint {n} output.text is a generic document-availability statement")
                     bad.add(n)
 
                 norm_result = re.sub(r"\s+", " ", result.lower()).strip(" .،؛:-–—")
@@ -4274,36 +4328,36 @@ class AtharCouncilEngine:
                     first_word_counts.setdefault(first, []).append(n)
 
                 if not (1 <= len(deliverables) <= 3):
-                    errors.append(f"sprint {n} requires 1-3 executable texts")
+                    errors.append(f"sprint {n} requires 1-3 expected results (results[].text)")
                     bad.add(n)
 
                 for d in deliverables:
                     text_value = str(d.get("text") or "").strip() if isinstance(d, dict) else ""
                     if len(text_value) < 18 or broken_or_placeholder(text_value):
-                        errors.append(f"sprint {n} contains generic/broken executable text")
+                        errors.append(f"sprint {n} contains generic/broken results[].text")
                         bad.add(n)
                     if unsupported_numbers(text_value):
                         errors.append(
-                            f"sprint {n} expected result contains unsupported numbers {unsupported_numbers(text_value)}"
+                            f"sprint {n} results[].text contains unsupported numbers {unsupported_numbers(text_value)}"
                         )
                         bad.add(n)
                     if number_context_errors(text_value):
                         errors.append(
-                            f"sprint {n} executable text reuses grounded numbers in an unsupported context {number_context_errors(text_value)}"
+                            f"sprint {n} results[].text reuses grounded numbers in an unsupported context {number_context_errors(text_value)}"
                         )
                         bad.add(n)
                     if unsupported_external_assumption(text_value):
                         errors.append(
-                            f"sprint {n} executable text introduces unsupported external/program context"
+                            f"sprint {n} results[].text introduces unsupported external/program context"
                         )
                         bad.add(n)
-                    if qtokens(text_value) and not is_anchored(text_value):
-                        errors.append(f"sprint {n} executable text is not anchored to this intervention/case")
+                    if qtokens(text_value) and not is_anchored(text_value, output_context=result):
+                        errors.append(f"sprint {n} results[].text is not anchored to this intervention/output")
                         bad.add(n)
                     if (re.search(r"نقل|حافل|مسار", str(intervention.get("title") or ""))
                         and not re.search(r"تعل[يّ]?م|تعلّم|مناهج|تدريس", str(intervention.get("title") or ""))
-                        and re.search(r"إطار التعلم للطلبة|الحزمة التعليمية|خريطة التعلم|الأنشطة التعليمية", text_value)):
-                        errors.append(f"sprint {n} executable output drifts into an unrelated education intervention")
+                        and re.search(r"إطار التعلم للطلبة|الحزمة التعليمية|خريطة التعلم|الأنشطة التعليمية|حقيبة تعليمية|حقيبة مدرسية|محتوى تعليمي|دروس خصوصية", text_value)):
+                        errors.append(f"sprint {n} results[].text drifts into an unrelated education intervention")
                         bad.add(n)
 
                     norm_d = re.sub(r"\s+", " ", text_value.lower()).strip(" .،؛:-–—")
@@ -4311,7 +4365,7 @@ class AtharCouncilEngine:
                         if norm_d in seen_deliverables:
                             prev = seen_deliverables[norm_d]
                             errors.append(
-                                f"sprints {prev} and {n} repeat the same executable text"
+                                f"sprints {prev} and {n} repeat the same results[].text"
                             )
                             bad.update({prev, n})
                         else:
@@ -4767,10 +4821,11 @@ class AtharCouncilEngine:
                     f"Return ONLY Sprint {sprint_number}; no other sprint number.",
                     "Write complete, natural Modern Standard Arabic with no truncated or corrupted words.",
                     "No square brackets, stray backslashes, pseudo-placeholders, or malformed quotation marks.",
-                    "RESULT must describe a specific expected consequence of the concrete output, not just availability of a document.",
-                    "Each TEXT must name a concrete deliverable, dataset, procedure, or pilot within 5 working days; no new unrelated initiative.",
+                    "RESULT is the expected future consequence of TEXT, not the output itself. It must be specific and tied to transport operations when the intervention is about transport.",
+                    "TEXT must name a concrete deliverable, dataset, procedure, or pilot within 5 working days; name the service domain explicitly (e.g. مسارات الحافلات, حضور الطلاب, سلامة النقل when it is already in the approved case). No unrelated initiative.",
                     "Do not use generic filler such as تنفيذ التدخل, متابعة التدخل, مراجعة التدخل, استكمال المخرج, or equivalent.",
                     "Do not copy wording from faulty_previous_sprint.",
+                    "If a validation error mentions 'not anchored', rewrite BOTH output and its expected result so they specifically describe the approved intervention's service or verified case facts. For school transport, name a concrete route, bus-operation, waiting-time, safe-arrival, attendance or transport-record concept when supported by the supplied case; do not force generic intervention-title repetition as filler.",
                     "Do not repeat accepted_previous_sprints.",
                     "Use only facts and numbers grounded in the authoritative case or approved intervention.",
                     "Do not invent a new program, partner, percentage, count, budget, staffing assumption, date, or strategic objective.",
@@ -5703,7 +5758,7 @@ class AtharCouncilEngine:
                         break
                     attempts_total += 1
                     print(
-                        f"[council] v15 chunk={numbers} remaining={remaining} attempt={attempt}",
+                        f"[council] v16 chunk={numbers} remaining={remaining} attempt={attempt}",
                         flush=True,
                     )
                     focused_errors = [
@@ -5746,27 +5801,39 @@ class AtharCouncilEngine:
                         else:
                             errors_by_sprint[n] = errors
                             rejected_by_sprint[n] = row
+                            if any("not anchored" in e for e in errors):
+                                print(
+                                    f"[council] v16 anchor rejection sprint={n} "
+                                    f"output={str(row.get('text') or '')[:180]!r} "
+                                    f"expected_results={[(str(x.get('text') or '')[:180]) for x in (row.get('results') or []) if isinstance(x, dict)]!r}",
+                                    flush=True,
+                                )
                     if len(validated) == len(numbers):
                         break
 
                 # Only bad/missing sprints get their own precision recovery.
-                # A THIRD attempt is reserved exclusively for unsupported
-                # numeric claims and enforces numbers-free RESULT/TEXT.
+                # V16: the THIRD precision attempt is reserved for either an
+                # unsupported number or a failed semantic intervention anchor.
+                # Numeric retries become number-free; anchor retries stay strict
+                # on facts while rewriting the domain-specific language.
                 for n in numbers:
                     if n in validated:
                         continue
                     for single_attempt in range(1, 4):
                         current_errors = errors_by_sprint.get(n) or [f"Sprint {n} missing"]
-                        if single_attempt == 3 and not any(
+                        numeric_error = any(
                             "unsupported numbers" in e.lower()
                             or "unsupported context" in e.lower()
                             for e in current_errors
-                        ):
+                        )
+                        anchor_error = any("not anchored" in e.lower() for e in current_errors)
+                        if single_attempt == 3 and not (numeric_error or anchor_error):
                             break
                         attempts_total += 1
                         print(
-                            f"[council] v15 focused_repair sprint={n} attempt={single_attempt} "
-                            f"strict_qualitative={single_attempt >= 3}",
+                            f"[council] v16 focused_repair sprint={n} attempt={single_attempt} "
+                            f"strict_qualitative={single_attempt >= 3 and numeric_error} "
+                            f"context_anchor_repair={anchor_error}",
                             flush=True,
                         )
                         try:
@@ -5791,7 +5858,7 @@ class AtharCouncilEngine:
                         )
                         if not errors:
                             validated[n] = rows[0]
-                            print(f"[council] v15 focused_repair succeeded sprint={n}", flush=True)
+                            print(f"[council] v16 focused_repair succeeded sprint={n}", flush=True)
                             errors_by_sprint.pop(n, None)
                             rejected_by_sprint.pop(n, None)
                             break
@@ -5806,7 +5873,7 @@ class AtharCouncilEngine:
                         for n in missing
                     ]
                     raise ValueError(
-                        f"V15 model output generation failed for sprints {missing} "
+                        f"V16 model output generation failed for sprints {missing} "
                         f"of intervention '{intervention.get('title')}': "
                         + " || ".join(specific_errors[:5])
                     )
@@ -5858,14 +5925,14 @@ class AtharCouncilEngine:
                     )
                     if cross_errors:
                         raise ValueError(
-                            "V15 cross-sprint quality check failed for "
+                            "V16 cross-sprint quality check failed for "
                             f"{intervention.get('title')} (sprints {sorted(cross_bad)}): "
                             + " | ".join(cross_errors[:6])
                         )
                 prior = candidate_full
                 details.append({"sprints":numbers,"status":"validated"})
             return {"outputs":prior,"raw":""}, {
-                "architecture":"v15-isolated-model-generated-outputs",
+                "architecture":"v16-context-anchored-model-generated-outputs",
                 "model_calls":attempts_total,
                 "archetype":"model_generated_no_templates",
                 "fallback_sprints":[],"fallback_count":0,
@@ -5897,7 +5964,7 @@ class AtharCouncilEngine:
 
             missing_numbers=[n for n in range(1,SPRINT_COUNT+1) if n not in by_sprint]
             if missing_numbers:
-                raise ValueError(f"V15 missing model-generated outputs for sprints {missing_numbers}")
+                raise ValueError(f"V16 missing model-generated outputs for sprints {missing_numbers}")
 
             plan["outputs"] = [
                 by_sprint[n]
@@ -6051,7 +6118,7 @@ class AtharCouncilEngine:
             result["human_escalation"] = escalation
 
         self._last_meta_debug = {
-            "architecture": "screen3-v15-numeric-guard-meta-dna",
+            "architecture": "screen3-v16-context-anchor-meta-dna",
             "meta_advisor_slug": meta["slug"],
             "meta_advisor_name": meta["name"],
             "meta_prompt_path": meta["prompt_path"],
@@ -6061,7 +6128,7 @@ class AtharCouncilEngine:
             "plan_quality": plan_debug,
             "meta_generation_calls_minimum": 2,
             "sprint_writer": {
-                "mode": "base_qwen_contextual_outputs_v15",
+                "mode": "base_qwen_contextual_outputs_v16",
                 "model_calls_total": sum(x.get("planning_model_calls", 0) for x in plan_debug),
                 "model_calls_per_intervention": [x.get("planning_model_calls", 0) for x in plan_debug],
                 "max_public_interventions": max_public_interventions,
@@ -7150,7 +7217,7 @@ class AtharCouncilEngine:
             if str(request.get("topic") or "").strip() != "interventions":
                 raise ValueError("topic must be interventions.")
 
-            print("[council] code_version=screen3-v15-isolated-numeric-recovery", flush=True)
+            print("[council] code_version=screen3-v16-transport-context-anchor", flush=True)
             kind = str(request.get("kind") or "generate").strip().lower()
             debug = bool(request.get("debug") or self._payload(request).get("debug"))
             total_start = time.perf_counter()
