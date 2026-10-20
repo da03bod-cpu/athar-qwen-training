@@ -18322,7 +18322,7 @@ def _handler_impl(job):
                 ),
                 "response_contract_version": "impact_challenge_screen_3_new_contract_v12",
                 "screen3_output_generation": "v16-transport-context-anchor",
-                "build_version": "athar-screen3-v18-three-sprint-arabic-grounding-2026-10-20",
+                "build_version": "athar-screen3-v19-portfolio-fact-guards-2026-10-20",
                 "topic": "interventions",
                 "backend_advisor_id_type": "canonical_aos_string",
                 "canonical_advisor_id_format": "AOS-(LD|SP|FG|SE)-NN",

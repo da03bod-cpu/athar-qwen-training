@@ -110,6 +110,7 @@ def _screen3_v18_text_quality_errors(
     intervention_title: str = "",
     authoritative_programs_text: str = "",
     field: str = "output.text",
+    authoritative_case_text: str = "",
 ) -> List[str]:
     """Conservative QA for *observed* Screen-3 production failures.
 
@@ -134,6 +135,45 @@ def _screen3_v18_text_quality_errors(
     m = re.search(corrupt, raw, re.I)
     if m:
         errors.append(f"{field} contains corrupted Arabic expression: {m.group(0)!r}")
+    # V19: production examples from the actual V18 RunPod response. A
+    # conservative dictionary detects known corruptions; it does NOT claim
+    # to be a general Arabic grammar checker. The model must rewrite the text.
+    v19_corrupt = (
+        r"(?:الداخجي|المهدورتين|المهدورتان|الناقل\s+المدرسي|"
+        r"النقال\s+المدرسي|النفال\s+المدرسي|"
+        r"النقل\s+المدرسي\s+التوازي|"
+        r"المدربيان|المدربي\b|المديري\s+التنموي|"
+        r"التقريني|المهات\b|التنموية\s+في\s+القرى\s+غير\s+المخدوم\b|"
+        r"التحليل\s+التشغيلية|المهارة\s+المهدورتين|"
+        r"الناف?ل\s+المدرسي|التشغيـلية|"
+        r"الحضر\s+الفعلي\s+للطلبة|"
+        r"النقل\s+المدرسي\s+التصديعي|الخطين\s+المدرسيين)"
+    )
+    bad_word = re.search(v19_corrupt, raw, re.I)
+    if bad_word:
+        errors.append(f"{field} has an observed malformed Arabic phrase: {bad_word.group(0)!r}")
+
+    # V19: a documented beneficiary age range is not a free numeric pool.
+    # Example: '6-15 سنة' from goal.target_group cannot become '6-5 سنة'.
+    # This checks age ranges in any case, not an NGO-specific hardcoded age.
+    digit_map = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+    age_expr = re.compile(
+        r"(?<!\d)([0-9٠-٩]{1,3})\s*[-–—]\s*([0-9٠-٩]{1,3})"
+        r"\s*(?:سنة|سنوات|عاما|عامًا|عامين|عام)(?![\w])"
+    )
+    case_source = str(authoritative_case_text or "")
+    verified_ages = {
+        tuple(int(n.translate(digit_map)) for n in match.groups())
+        for match in age_expr.finditer(case_source)
+    }
+    for match in age_expr.finditer(raw):
+        age_low, age_high = (int(n.translate(digit_map)) for n in match.groups())
+        if age_low > age_high or (verified_ages and (age_low, age_high) not in verified_ages):
+            errors.append(
+                f"{field} changes a verified beneficiary age range: "
+                f"{age_low}-{age_high}; documented={sorted(verified_ages)}"
+            )
+
     if re.search(r"[\uFFFD\u200B]",raw):
         errors.append(f"{field} contains replacement or hidden characters")
     if re.search(r"(?:حواجز|حاصلات|حواسيب)\s+(?:ال)?(?:مسار|نقل|مدرس|حافل)", raw):
@@ -157,17 +197,70 @@ def _screen3_v18_text_quality_errors(
     if field.startswith("results") and re.search(
         r"(?:تأكيد|إثبات)\s+(?:وجود\s+)?(?:علاقة\s+مباشرة|تحسن|انخفاض|أثر\s+محقق)|"
         r"(?:تحقيق|تأكيد)\s+تحسن\s+ملموس|"
-        r"(?:ثبت|أثبت|تحقق)\s+(?:بالفعل|أن|بشكل\s+قاطع)",raw
+        r"(?:ثبت|أثبت|تحقق)\s+(?:بالفعل|أن|بشكل\s+قاطع)|"
+        r"تسجيل\s+تحسن\s+ملموس|"
+        r"(?:تأكيد|إثبات)\s+انخفاض\s+(?:زمن|معدل|نسبة)",raw
     ):
         errors.append(f"{field} presents an unverified effect or causal claim as established")
 
     # Statements of historic data collection must be sourced rather than
     # asserting records have already been collected for a specific past window.
-    hist = re.search(r"(?:الأسبوعين|الاسبوعين|الأسابيع|الاسابيع)\s+(?:الماضيين|الماضي|الماضية|الأخيرة|الاخيرة)",raw)
+    hist = re.search(r"(?:الأسبوعين|الاسبوعين|الأسابيع|الاسابيع|الأسبوع|الاسبوع)\s+(?:الماضيين|الماضي|الماضية|الأخيرة|الاخيرة)",raw)
     if hist and hist.group(0) not in source:
         errors.append(f"{field} assumes an undocumented historical data window")
 
     return errors
+
+
+def _screen3_v19_portfolio_complementarity_errors(
+    interventions: List[Dict[str, Any]],
+) -> List[str]:
+    """Find a narrow, evidenced portfolio error *before* costly output generation.
+
+    Two routes to the SAME operations improvement (e.g. study the waste vs
+    improve execution) are not two distinct interventions; a direct service
+    improvement paired with a genuinely independent impact-measurement
+    intervention is complementary. Never invent new interventions here.
+    """
+    if len(interventions) < 2:
+        return []
+
+    def specialty(item: Dict[str, Any]) -> str:
+        title = str(item.get("title") or "")
+        if not re.search(r"نقل|حافل|مسار", title):
+            return "other"
+        if re.search(
+            r"قياس\s+(?:ال)?أثر|منهجية\s+قياس|تقييم\s+(?:ال)?أثر|"
+            r"رصد\s+وتقييم|منظومة\s+المتابعة\s+والتقييم|"
+            r"مؤشرات\s+قياس\s+(?:ال)?أثر", title
+        ):
+            return "transport-measurement"
+        # Safety and physical access may legitimately be separate from a
+        # route-efficiency initiative. Only flag the SAME operational theme.
+        if re.search(r"سلامة|آمن|أمان|حماية\s+الطلاب", title):
+            return "transport-safety"
+        if re.search(r"توسيع\s+التغطية|إتاحة\s+النقل|وصول\s+الخدمة", title):
+            return "transport-access"
+        if re.search(
+            r"هدر|تشغيل|تشغيلي|تنفيذ|تحسين|كفاء|جودة|جدول|"
+            r"إدارة\s+مسارات|خدمة\s+النقل", title
+        ):
+            return "transport-operations"
+        return "transport-other"
+
+    kinds = [specialty(row) for row in interventions]
+    out: List[str] = []
+    for i in range(len(kinds)):
+        for j in range(i + 1, len(kinds)):
+            if kinds[i] == kinds[j] and kinds[i] in {
+                "transport-operations", "transport-measurement"
+            }:
+                out.append(
+                    f"Interventions {i+1} and {j+1} duplicate the same "
+                    f"{kinds[i]} specialty; choose materially distinct council "
+                    "interventions before producing twelve outputs each"
+                )
+    return out
 
 
 class _RegexTokenBlocker(LogitsProcessor):
@@ -3594,6 +3687,16 @@ class AtharCouncilEngine:
                 nums = unsupported_numbers(value)
                 if nums:
                     errors.append(f"{key} contains unsupported numbers {nums}")
+                for issue in _screen3_v18_text_quality_errors(
+                    value,
+                    intervention_title=str(item.get("title") or ""),
+                    authoritative_programs_text=json.dumps(
+                        authoritative_context.get("programs") or [], ensure_ascii=False
+                    ),
+                    authoritative_case_text=json.dumps(authoritative_context, ensure_ascii=False),
+                    field=f"intervention.{key}",
+                ):
+                    errors.append(issue)
 
             confidence = str(item.get("confidence_level") or "").lower()
             if confidence not in {"high", "medium", "low"}:
@@ -4177,14 +4280,17 @@ class AtharCouncilEngine:
         # time generating 12 outputs per intervention. In V12 this validator
         # existed but was never invoked, so two analysis-only enablers passed.
         def portfolio_impact_errors(current: Dict[str, Any]) -> List[str]:
-            return self._screen3_impact_quality_violations(
-                {"suggestion": {"interventions":current.get("interventions") or []}},
-                request,
+            rows = current.get("interventions") or []
+            return (
+                self._screen3_impact_quality_violations(
+                    {"suggestion": {"interventions": rows}}, request,
+                )
+                + _screen3_v19_portfolio_complementarity_errors(rows)
             )
 
         impact_errors = portfolio_impact_errors(strategy)
         if impact_errors:
-            print("[council] V18 impact-portfolio repair: " + " | ".join(impact_errors[:4]), flush=True)
+            print("[council] V19 portfolio-complementarity repair: " + " | ".join(impact_errors[:4]), flush=True)
             try:
                 repair_task = dict(strategy_task)
                 repair_task["task"] = (
@@ -4196,6 +4302,14 @@ class AtharCouncilEngine:
                 )
                 repair_task["previous_interventions"] = strategy.get("interventions")
                 repair_task["portfolio_validation_errors"] = impact_errors[:6]
+                repair_task["non_overlap_requirement"] = (
+                    "The previous intervention portfolio covered the same operational "
+                    "domain twice. Replace one specialty with a genuinely distinct "
+                    "dimension supported by the user-selected advisors and the goal "
+                    "(e.g. beneficiary transport SERVICE vs monitoring/evaluation). "
+                    "Do NOT rename the same operational activity to hide duplication. "
+                    "Never invent new services, partner capacity, or financial claims."
+                )
                 repair_task["must_be_directly_beneficiary_facing"] = (
                     "At least one intervention must OPERATE or materially improve an existing "
                     "service for the target beneficiaries, not merely study waste, prepare "
@@ -4420,6 +4534,9 @@ class AtharCouncilEngine:
                         authoritative_context.get("programs") or [], ensure_ascii=False
                     ),
                     field="output.text",
+                    authoritative_case_text=json.dumps(
+                        authoritative_context, ensure_ascii=False
+                    ),
                 ):
                     errors.append(f"sprint {n} {quality_issue}")
                     bad.add(n)
@@ -4495,6 +4612,9 @@ class AtharCouncilEngine:
                             authoritative_context.get("programs") or [], ensure_ascii=False
                         ),
                         field="results[].text",
+                        authoritative_case_text=json.dumps(
+                            authoritative_context, ensure_ascii=False
+                        ),
                     ):
                         errors.append(f"sprint {n} {quality_issue}")
                         bad.add(n)
@@ -4845,6 +4965,8 @@ class AtharCouncilEngine:
                     "Name the actual artifact or decision produced that week instead of repeating generic words such as تنفيذ or مراجعة.",
                     "Before returning, proofread every RESULT and TEXT for natural Arabic. Avoid mutated words such as التحسنيات/الحواسيب for الحافلات/النتظر; rewrite the whole sentence naturally.",
                     "A school transport program documented as having two lines cannot suddenly have three routes/lines. Do not invent historical data windows (e.g. records from the past three weeks) absent from the case.",
+                    "Copy beneficiary age ranges from goal.target_group EXACTLY if mentioned; do not shorten, reinterpret or transpose any bound. Do not use age ranges in examples as case evidence.",
+                    "Do not confuse a separate operations analysis with another operations implementation intervention; stay strictly within the approved intervention specialty.",
                     "Do not claim proven causality or guaranteed measured improvement in RESULT; frame it as a future observable outcome contingent on actual measurement.",
                 ],
             }
@@ -5011,6 +5133,8 @@ class AtharCouncilEngine:
                     "Numbers in SPRINT labels or JSON fields do not license numeric claims in RESULT or TEXT.",
                     "In a final strict-numeric-free repair, the SPRINT identifier is the only number allowed; all result and output descriptions must contain no digits or numerical number words." if strict_numeric_free else "Do not select an arbitrary new count of outputs, reports, schools, indicators or activities.",
                     "If validation mentions corrupted Arabic, fully rewrite the output and result in correct Modern Standard Arabic instead of changing a single misspelled letter.",
+                    "If validation mentions a verified beneficiary age range, refer to the exact age bounds in goal.target_group, or omit the age range; never guess or alter bounds.",
+                    "If validation mentions a malformed Arabic phrase, rewrite both the output and expected outcome in natural Arabic without paraphrasing the error.",
                     "If validation mentions three routes/lines, retain the verified existing route count from the provided PROGRAMS; do not invent another count or restate an unsupported historical period.",
                     "If validation mentions an unverified effect, replace confirmation of success/causality with a prospective, measurable result that can be checked after execution.",
                 ],
@@ -5939,7 +6063,7 @@ class AtharCouncilEngine:
                         break
                     attempts_total += 1
                     print(
-                        f"[council] v18 chunk={numbers} remaining={remaining} attempt={attempt}",
+                        f"[council] v19 chunk={numbers} remaining={remaining} attempt={attempt}",
                         flush=True,
                     )
                     focused_errors = [
@@ -6012,7 +6136,7 @@ class AtharCouncilEngine:
                             break
                         attempts_total += 1
                         print(
-                            f"[council] v18 focused_repair sprint={n} attempt={single_attempt} "
+                            f"[council] v19 focused_repair sprint={n} attempt={single_attempt} "
                             f"strict_qualitative={single_attempt >= 3 and numeric_error} "
                             f"context_anchor_repair={anchor_error}",
                             flush=True,
@@ -6039,7 +6163,7 @@ class AtharCouncilEngine:
                         )
                         if not errors:
                             validated[n] = rows[0]
-                            print(f"[council] v18 focused_repair succeeded sprint={n}", flush=True)
+                            print(f"[council] v19 focused_repair succeeded sprint={n}", flush=True)
                             errors_by_sprint.pop(n, None)
                             rejected_by_sprint.pop(n, None)
                             break
@@ -6054,7 +6178,7 @@ class AtharCouncilEngine:
                         for n in missing
                     ]
                     raise ValueError(
-                        f"V18 model output generation failed for sprints {missing} "
+                        f"V19 model output generation failed for sprints {missing} "
                         f"of intervention '{intervention.get('title')}': "
                         + " || ".join(specific_errors[:5])
                     )
@@ -6106,14 +6230,14 @@ class AtharCouncilEngine:
                     )
                     if cross_errors:
                         raise ValueError(
-                            "V18 cross-sprint quality check failed for "
+                            "V19 cross-sprint quality check failed for "
                             f"{intervention.get('title')} (sprints {sorted(cross_bad)}): "
                             + " | ".join(cross_errors[:6])
                         )
                 prior = candidate_full
                 details.append({"sprints":numbers,"status":"validated"})
             return {"outputs":prior,"raw":""}, {
-                "architecture":"v18-three-sprint-coherent-output-generation",
+                "architecture":"v19-three-sprint-grounded-output-generation",
                 "model_calls":attempts_total,
                 "archetype":"model_generated_no_templates",
                 "fallback_sprints":[],"fallback_count":0,
@@ -6145,7 +6269,7 @@ class AtharCouncilEngine:
 
             missing_numbers=[n for n in range(1,SPRINT_COUNT+1) if n not in by_sprint]
             if missing_numbers:
-                raise ValueError(f"V18 missing model-generated outputs for sprints {missing_numbers}")
+                raise ValueError(f"V19 missing model-generated outputs for sprints {missing_numbers}")
 
             plan["outputs"] = [
                 by_sprint[n]
@@ -6299,7 +6423,7 @@ class AtharCouncilEngine:
             result["human_escalation"] = escalation
 
         self._last_meta_debug = {
-            "architecture": "screen3-v18-three-sprint-language-grounding",
+            "architecture": "screen3-v19-portfolio-fact-guards",
             "meta_advisor_slug": meta["slug"],
             "meta_advisor_name": meta["name"],
             "meta_prompt_path": meta["prompt_path"],
@@ -7398,7 +7522,7 @@ class AtharCouncilEngine:
             if str(request.get("topic") or "").strip() != "interventions":
                 raise ValueError("topic must be interventions.")
 
-            print("[council] code_version=screen3-v18-focused-arabic-and-two-line-guard", flush=True)
+            print("[council] code_version=screen3-v19-portfolio-and-fact-guards", flush=True)
             kind = str(request.get("kind") or "generate").strip().lower()
             debug = bool(request.get("debug") or self._payload(request).get("debug"))
             total_start = time.perf_counter()
