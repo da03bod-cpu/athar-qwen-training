@@ -2326,8 +2326,11 @@ class AtharCouncilEngine:
         source_numbers = self._extract_number_tokens(
             self._normalize_digits(authoritative_text)
         )
-        # Product-level timeboxes are system facts, not invented NPO targets.
-        allowed_system_numbers = {"5", "12", "90"}
+        # Only 5 working days / 12 weekly outputs are protocol facts. They
+        # cannot be reinterpreted as beneficiary counts or outcome percentages.
+        # '90' is NOT an approved Screen-3 target merely because Athar's Meta
+        # DNA describes an optional 90-day execution planning framework.
+        allowed_system_numbers = {"5", "12"}
         allowed_numbers = source_numbers | allowed_system_numbers
 
         quality_stop = {
@@ -2428,8 +2431,19 @@ class AtharCouncilEngine:
         allowed_claim_numbers = source_claim_numbers | allowed_system_numbers
 
         def unsupported_numbers(value: Any) -> List[str]:
-            nums = _claim_numbers(value)
-            return sorted(n for n in nums if n not in allowed_claim_numbers)
+            raw = self._normalize_digits(str(value or ""))
+            nums = _claim_numbers(raw)
+            bad = {n for n in nums if n not in allowed_claim_numbers}
+            # Product scheduling constants (5 days / 12 outputs) do NOT
+            # authorize new impact percentages such as "12% coverage".
+            # A percentage must be documented as a percentage in the source;
+            # allowing a number because it appears in the timebox is unsound.
+            for match in re.finditer(r"(?<![\w])\d+(?:[.,]\d+)?\s*[%٪]", raw):
+                claim = match.group(0)
+                number = next(iter(self._extract_number_tokens(claim)), None)
+                if number in allowed_system_numbers and number not in source_claim_numbers:
+                    bad.add(number)
+            return sorted(bad)
 
         def _number_source_contexts(number: str) -> List[set[str]]:
             contexts: List[set[str]] = []
@@ -2576,6 +2590,11 @@ class AtharCouncilEngine:
                 return True
 
             if "\\" in raw or "[" in raw or "]" in raw:
+                return True
+            # A dangling percent sign (e.g. "لتغطية % من المستفيدين")
+            # is a missing metric, not an acceptable numeric claim. Normal
+            # claims such as "60%" and "60 %" remain valid.
+            if re.search(r"(?<!\d)(?<!\d\s)[%٪]", raw):
                 return True
 
             corruption_patterns = (
@@ -3315,6 +3334,13 @@ class AtharCouncilEngine:
                     after, removed = _strip_unsupported_strategy_numbers(
                         normalized_before
                     )
+                    # V14: A percentage removed as unsupported can leave an
+                    # empty qualifier in the title, e.g. "لتغطية % من المستفيدين".
+                    # Drop that incomplete qualifier, never infer its value.
+                    after = re.sub(
+                        r"\s+(?:لتغطية|لتحقيق|لخدمة)\s*[%٪]\s*(?:من\s+[^،؛.]+)?$",
+                        "", after,
+                    ).strip(" ،؛:.–—")
                     intervention[field] = after
 
                     if removed or after != before:
@@ -3990,7 +4016,7 @@ class AtharCouncilEngine:
 
         impact_errors = portfolio_impact_errors(strategy)
         if impact_errors:
-            print("[council] V13 impact-portfolio repair: " + " | ".join(impact_errors[:4]), flush=True)
+            print("[council] V14 impact-portfolio repair: " + " | ".join(impact_errors[:4]), flush=True)
             try:
                 repair_task = dict(strategy_task)
                 repair_task["task"] = (
@@ -4203,7 +4229,7 @@ class AtharCouncilEngine:
                     bad.add(n)
                 if unsupported_numbers(result):
                     errors.append(
-                        f"sprint {n} result contains unsupported numbers {unsupported_numbers(result)}"
+                        f"sprint {n} output text contains unsupported numbers {unsupported_numbers(result)}"
                     )
                     bad.add(n)
                 if number_context_errors(result):
@@ -4258,7 +4284,7 @@ class AtharCouncilEngine:
                         bad.add(n)
                     if unsupported_numbers(text_value):
                         errors.append(
-                            f"sprint {n} executable text contains unsupported numbers {unsupported_numbers(text_value)}"
+                            f"sprint {n} expected result contains unsupported numbers {unsupported_numbers(text_value)}"
                         )
                         bad.add(n)
                     if number_context_errors(text_value):
@@ -4583,6 +4609,7 @@ class AtharCouncilEngine:
                     "Never use placeholders such as 'تحديد مخرج التدخل', 'تنفيذ التدخل', 'استكمال التدخل', or similar filler.",
                     "Do not invent percentages, counts, budgets, dates, partners, staffing, resources, or capacity not present in the authoritative context.",
                     "Historical numbers are evidence, not automatic future targets. Never reuse a source number in a different meaning or denominator.",
+                    "If the proposed milestone has no numeric target in the supplied case, write it qualitatively: NO guessed percent sign, percentage, coverage rate, or digit-based milestone.",
                     "Do not introduce a new strategic objective, identity project, governance project, or organizational redesign outside the approved intervention.",
                     "Do not invent a program, campaign, benchmark organization, comparison group, partner, stakeholder group, or external dataset that is absent from authoritative_context.",
                     "If authoritative_context does not provide a quantity, keep the deliverable qualitative rather than inventing a count.",
@@ -4616,6 +4643,7 @@ class AtharCouncilEngine:
             prior_outputs: Optional[List[Dict[str, Any]]] = None,
             repair_errors: Optional[List[str]] = None,
             previous_output: Optional[str] = None,
+            attempt: int = 1,
         ) -> Dict[str, Any]:
             max_tokens = 2100
             raw = self._generate(
@@ -4633,7 +4661,7 @@ class AtharCouncilEngine:
                     separators=(",", ":"),
                 ),
                 max_tokens,
-                deterministic=True,
+                deterministic=(attempt == 1),
                 repetition_penalty=1.10,
                 no_repeat_ngram_size=6,
             )
@@ -4664,16 +4692,21 @@ class AtharCouncilEngine:
                 })
 
             previous_row = None
+            rejected_numeric_claims: set[str] = set()
             if isinstance(faulty_unit, dict):
                 previous_row = {
                     "sprint": faulty_unit.get("_sprint"),
-                    "result": faulty_unit.get("text"),
-                    "deliverables": [
+                    "output_text": faulty_unit.get("text"),
+                    "expected_results": [
                         x.get("text")
                         for x in (faulty_unit.get("results") or [])
                         if isinstance(x, dict)
                     ],
                 }
+                # Unsupported numbers discovered from the MODEL's output,
+                # never from system protocol IDs like SPRINT=12.
+                for line in [previous_row["output_text"], *previous_row["expected_results"]]:
+                    rejected_numeric_claims.update(unsupported_numbers(line))
 
             task_obj = {
                 "role": meta["slug"],
@@ -4694,6 +4727,15 @@ class AtharCouncilEngine:
                 "accepted_previous_sprints": prior_compact,
                 "faulty_previous_sprint": previous_row,
                 "validation_errors": validation_errors[:12],
+                "rejected_unsupported_numbers": sorted(rejected_numeric_claims),
+                "numeric_repair_instructions": (
+                    "Recreate the SAME intervention deliverable and expected consequence "
+                    "without unsupported numeric claims. If a number is not "
+                    "documented in authoritative organization/program/goal/impact data, "
+                    "do not use it. Never replace a rejected 70% with another guessed "
+                    "percentage. Qualitative language is required when the baseline or "
+                    "target is absent. No isolated or blank '%' sign."
+                ),
                 "specialist_reasonings": council,
                 "attempt": attempt,
                 "required_protocol": (
@@ -4715,6 +4757,7 @@ class AtharCouncilEngine:
                     "Do not repeat accepted_previous_sprints.",
                     "Use only facts and numbers grounded in the authoritative case or approved intervention.",
                     "Do not invent a new program, partner, percentage, count, budget, staffing assumption, date, or strategic objective.",
+                    "If a quantity is missing, remove the entire numerical CLAIM and replace it with a qualitative milestone about this same intervention; do not delete digits alone or fill blank % signs.",
                 ],
             }
 
@@ -4727,9 +4770,10 @@ class AtharCouncilEngine:
                     separators=(",", ":"),
                 ),
                 620,
-                deterministic=True,
+                deterministic=(attempt == 1),
                 repetition_penalty=1.12,
                 no_repeat_ngram_size=7,
+                forbidden_phrases=sorted(rejected_numeric_claims) or None,
             )
             parsed = parse_sprints(raw)
             parsed["outputs"] = [
@@ -5615,6 +5659,8 @@ class AtharCouncilEngine:
             for numbers in chunks:
                 validated: Dict[int, Dict[str, Any]] = {}
                 last_errors: List[str] = []
+                errors_by_sprint: Dict[int, List[str]] = {}
+                rejected_by_sprint: Dict[int, Dict[str, Any]] = {}
                 previous_raw = None
                 # First attempt generates the chunk, then repair only bad units.
                 for attempt in range(1, 3):
@@ -5625,12 +5671,15 @@ class AtharCouncilEngine:
                             prior_outputs=prior,
                             repair_errors=(last_errors if attempt > 1 else None),
                             previous_output=(previous_raw if attempt > 1 else None),
+                            attempt=attempt,
                         )
                     except Exception as exc:
                         last_errors = [f"generation exception: {type(exc).__name__}: {exc}"]
                         continue
                     previous_raw = candidate.get("raw")
                     c_rows = {int(x.get("_sprint") or 0):x for x in candidate.get("outputs") or []}
+                    if not c_rows:
+                        last_errors = [f"Model output contained no parseable sprint records for {numbers}"]
                     for n in numbers:
                         row = c_rows.get(n)
                         if row is None:
@@ -5641,6 +5690,8 @@ class AtharCouncilEngine:
                             validated[n] = row
                         else:
                             last_errors = errors
+                            errors_by_sprint[n] = errors
+                            rejected_by_sprint[n] = row
                     if len(validated) == len(numbers):
                         break
                 # Only bad/missing units get their own recovery call, with
@@ -5654,8 +5705,8 @@ class AtharCouncilEngine:
                             proposal = precision_repair_single_sprint(
                                 intervention,n,
                                 prior_outputs=prior + [validated[x] for x in numbers if x in validated],
-                                faulty_unit=None,
-                                validation_errors=last_errors or [f"Sprint {n} missing"],
+                                faulty_unit=rejected_by_sprint.get(n),
+                                validation_errors=errors_by_sprint.get(n) or last_errors or [f"Sprint {n} missing"],
                                 attempt=single_attempt,
                             )
                         except Exception as exc:
@@ -5671,10 +5722,12 @@ class AtharCouncilEngine:
                             validated[n] = rows[0]
                             break
                         last_errors=errors
+                        errors_by_sprint[n] = errors
+                        rejected_by_sprint[n] = rows[0]
                 if len(validated) != len(numbers):
                     missing = [n for n in numbers if n not in validated]
                     raise ValueError(
-                        f"V13 model output generation failed for sprints {missing} "
+                        f"V14 model output generation failed for sprints {missing} "
                         f"of intervention '{intervention.get('title')}': "
                         + " | ".join(last_errors[:5])
                     )
@@ -5726,14 +5779,14 @@ class AtharCouncilEngine:
                     )
                     if cross_errors:
                         raise ValueError(
-                            "V13 cross-sprint quality check failed for "
+                            "V14 cross-sprint quality check failed for "
                             f"{intervention.get('title')} (sprints {sorted(cross_bad)}): "
                             + " | ".join(cross_errors[:6])
                         )
                 prior = candidate_full
                 details.append({"sprints":numbers,"status":"validated"})
             return {"outputs":prior,"raw":""}, {
-                "architecture":"v13-model-generated-contextual-outputs",
+                "architecture":"v14-grounded-model-generated-contextual-outputs",
                 "model_calls":attempts_total,
                 "archetype":"model_generated_no_templates",
                 "fallback_sprints":[],"fallback_count":0,
@@ -5765,7 +5818,7 @@ class AtharCouncilEngine:
 
             missing_numbers=[n for n in range(1,SPRINT_COUNT+1) if n not in by_sprint]
             if missing_numbers:
-                raise ValueError(f"V13 missing model-generated outputs for sprints {missing_numbers}")
+                raise ValueError(f"V14 missing model-generated outputs for sprints {missing_numbers}")
 
             plan["outputs"] = [
                 by_sprint[n]
@@ -5919,7 +5972,7 @@ class AtharCouncilEngine:
             result["human_escalation"] = escalation
 
         self._last_meta_debug = {
-            "architecture": "screen3-v13-contextual-outputs-meta-dna",
+            "architecture": "screen3-v14-numeric-guard-meta-dna",
             "meta_advisor_slug": meta["slug"],
             "meta_advisor_name": meta["name"],
             "meta_prompt_path": meta["prompt_path"],
@@ -7016,7 +7069,7 @@ class AtharCouncilEngine:
             if str(request.get("topic") or "").strip() != "interventions":
                 raise ValueError("topic must be interventions.")
 
-            print("[council] code_version=screen3-v13-contextual-outputs-no-static-templates", flush=True)
+            print("[council] code_version=screen3-v14-grounded-number-targeted-recovery", flush=True)
             kind = str(request.get("kind") or "generate").strip().lower()
             debug = bool(request.get("debug") or self._payload(request).get("debug"))
             total_start = time.perf_counter()

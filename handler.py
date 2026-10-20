@@ -18321,8 +18321,8 @@ def _handler_impl(job):
                     CONTINUAL_LEARNING_ENABLED
                 ),
                 "response_contract_version": "impact_challenge_screen_3_new_contract_v12",
-                "screen3_output_generation": "v13-model-generated-batches-no-static-templates",
-                "build_version": "athar-screen3-v13-model-generated-outputs-2026-10-20",
+                "screen3_output_generation": "v14-grounded-numeric-targeted-recovery",
+                "build_version": "athar-screen3-v14-grounded-numeric-recovery-2026-10-20",
                 "topic": "interventions",
                 "backend_advisor_id_type": "canonical_aos_string",
                 "canonical_advisor_id_format": "AOS-(LD|SP|FG|SE)-NN",
