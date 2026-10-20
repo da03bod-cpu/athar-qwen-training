@@ -2276,11 +2276,11 @@ class AtharCouncilEngine:
         The split keeps the full selected Meta persona/Expert DNA on every call,
         while Python owns parsing, grounding and quality validation.
 
-        Backend compatibility:
-            the confirmed API remains intervention -> outputs[] -> results[].
-            ``outputs[0:12]`` are the twelve ordered weekly Result units;
-            ``output.text`` is the Result statement and ``output.results`` are
-            its 1-3 mandatory 5-day executable texts.
+        Screen 3 contract:
+            intervention -> outputs[] -> results[]; exactly 12 outputs.
+            output.text names the concrete output delivered at that stage,
+            output.results list its expected consequences (not action tasks).
+            Screen 5 will plan actionable Sprint tasks around these outputs.
         """
         payload = self._payload(request)
         meta = self._resolve_meta_advisor(request)
@@ -3099,14 +3099,16 @@ class AtharCouncilEngine:
         # ------------------------------------------------------------------
         strategy_protocol = (
             "Return ONLY this plain-text protocol; no JSON or Markdown.\n"
-            "Return exactly 2 or 3 approved intervention headers:\n"
+            "Return 2 to 4 approved intervention headers (default 2 to 3 when sufficient):\n"
             "BEGIN_INTERVENTION\n"
             "TITLE=<specific Arabic intervention title grounded in the case>\n"
             "CONFIDENCE=<high|medium|low>\n"
             "IMPACT=<specific link to the social problem / goal / impact driver>\n"
             "REPORTABLE=<measurable reportable value without invented numbers>\n"
             "END_INTERVENTION\n"
-            "After the last block: FINAL=<brief synthesis explaining why these interventions together form the 90-day route>"
+            "After the last block: FINAL=<brief synthesis explaining why the interventions fit>\n"
+            "SYNTHESIS=<CONSENSUS|COMPLEMENTARY|TRADE_OFF|CONFLICT|EVIDENCE_GAP|SCOPE_CONFLICT> "
+            "(choose only when genuinely supported by the Specialist opinions; otherwise omit)"
         )
 
         strategy_task = {
@@ -3122,7 +3124,7 @@ class AtharCouncilEngine:
             "meta_reviews": meta_reviews,
             "required_protocol": strategy_protocol,
             "mandatory_rules": [
-                "Approve exactly 2 interventions by default; approve a third only when it adds an independent strategic path that the first two do not cover.",
+                "Approve 2 to 4 interventions. Prefer 2 when sufficient; add a third or fourth only when each adds a materially different, evidence-grounded strategic path.",
                 "Every intervention must directly anchor to the stated 90-day goal, social problem, named impact drivers, target group, organizational notes, or an existing program/project.",
                 "Do not replace the stated challenge with a generic identity, governance, structure, strategy, or analysis project unless the request itself makes that issue material.",
                 "The interventions must be materially different from each other and together converge on the same primary 90-day goal.",
@@ -3138,7 +3140,7 @@ class AtharCouncilEngine:
                 self.clean_model_text(raw).replace("```", "").strip()
             )
             clean = re.sub(
-                r"\s+(?=(?:BEGIN_INTERVENTION|END_INTERVENTION|TITLE|CONFIDENCE|IMPACT|REPORTABLE|FINAL|REVIEW)\s*(?:[:=]|\b))",
+                r"\s+(?=(?:BEGIN_INTERVENTION|END_INTERVENTION|TITLE|CONFIDENCE|IMPACT|REPORTABLE|FINAL|SYNTHESIS|REVIEW)\s*(?:[:=]|\b))",
                 "\n",
                 clean,
                 flags=re.I,
@@ -3147,6 +3149,7 @@ class AtharCouncilEngine:
             interventions: List[Dict[str, Any]] = []
             current: Optional[Dict[str, Any]] = None
             final = ""
+            synthesis = ""
 
             def finish() -> None:
                 nonlocal current
@@ -3180,6 +3183,15 @@ class AtharCouncilEngine:
                     m = re.match(r"^FINAL\s*[:=]\s*(.+)$", line, flags=re.I)
                     if m:
                         final = self._clean_meta_public_text(m.group(1), request)
+                        continue
+                    m = re.match(r"^SYNTHESIS\s*[:=]\s*(.+)$", line, flags=re.I)
+                    if m:
+                        code = m.group(1).strip().upper().replace("-", "_").replace(" ", "_")
+                        if code in {
+                            "CONSENSUS", "COMPLEMENTARY", "TRADE_OFF",
+                            "CONFLICT", "EVIDENCE_GAP", "SCOPE_CONFLICT",
+                        }:
+                            synthesis = code
                     continue
 
                 for key, public_key in (
@@ -3203,8 +3215,9 @@ class AtharCouncilEngine:
 
             return {
                 "reviews": reviews,
-                "interventions": interventions[:3],
+                "interventions": interventions[:4],
                 "final": final,
+                "synthesis": synthesis,
                 "raw": raw,
             }
 
@@ -3319,8 +3332,8 @@ class AtharCouncilEngine:
             errors: List[str] = []
 
             interventions = parsed.get("interventions") or []
-            if not (2 <= len(interventions) <= 3):
-                errors.append(f"strategy must approve exactly 2-3 interventions, got {len(interventions)}")
+            if not (2 <= len(interventions) <= 4):
+                errors.append(f"strategy must approve 2-4 interventions, got {len(interventions)}")
 
             strategy_texts: List[str] = []
             for idx, item in enumerate(interventions, start=1):
@@ -3905,11 +3918,12 @@ class AtharCouncilEngine:
                     len(selected),
                 )
 
-            selected = selected[:max(2, min(3, max_interventions))]
+            selected = selected[:max(2, min(4, max_interventions))]
 
             stabilized = {
                 "interventions": selected,
                 "final": _deterministic_strategy_final(selected),
+                "synthesis": raw_strategy.get("synthesis"),
                 "raw": raw_strategy.get("raw"),
                 "_numeric_sanitizations": raw_strategy.get(
                     "_numeric_sanitizations",
@@ -3948,13 +3962,13 @@ class AtharCouncilEngine:
 
         try:
             max_public_interventions = int(
-                os.getenv("SCREEN3_MAX_INTERVENTIONS", "2")
+                os.getenv("SCREEN3_MAX_INTERVENTIONS", "3")
             )
         except Exception:
-            max_public_interventions = 2
+            max_public_interventions = 3
         max_public_interventions = max(
             2,
-            min(3, max_public_interventions),
+            min(4, max_public_interventions),
         )
 
         strategy, strategy_stabilization_debug = (
@@ -4916,14 +4930,28 @@ class AtharCouncilEngine:
             result: str,
             *deliverables: str,
         ) -> Dict[str, Any]:
+            """Screen 3 contract: output.text = actual artifact; results = consequences.
+
+            The original deterministic composer accidentally reversed these.
+            The FIRST concrete deliverable is the actual output for this week,
+            and the achieved state is the expected outcome (not a completed fact).
+            A secondary deliverable becomes part of the output specification,
+            NOT an incorrectly-labelled 'result'.
+            """
+            cleaned_deliverables = [
+                _normalize_strategy_arabic(x)
+                for x in deliverables
+                if _normalize_strategy_arabic(x)
+            ]
+            if not cleaned_deliverables:
+                raise ValueError(f"Sprint {sprint_number} has no artifact to deliver")
+            output_text = cleaned_deliverables[0].rstrip(" .")
+            if len(cleaned_deliverables) > 1:
+                output_text += "؛ مع " + cleaned_deliverables[1].rstrip(" .")
             return {
                 "_sprint": sprint_number,
-                "text": _normalize_strategy_arabic(result),
-                "results": [
-                    {"text": _normalize_strategy_arabic(x)}
-                    for x in deliverables
-                    if _normalize_strategy_arabic(x)
-                ][:3],
+                "text": output_text + ".",
+                "results": [{"text": _normalize_strategy_arabic(result)}],
                 "_composer": True,
             }
 
@@ -5478,24 +5506,15 @@ class AtharCouncilEngine:
                         unit = {
                             "_sprint": n,
                             "text": (
-                                f"اكتمل {artifact} الخاص بـ«{compact}» وأصبح "
-                                "قابلًا للاستخدام والتحقق."
+                                f"إعداد {artifact} وربطه بالبيانات المتاحة "
+                                f"ضمن «{compact}»."
                             ),
-                            "results": [
-                                {
-                                    "text": (
-                                        f"إعداد {artifact} وربطه مباشرة "
-                                        f"بـ«{compact}» وبالمعطيات المتاحة "
-                                        "في الحالة."
-                                    )
-                                },
-                                {
-                                    "text": (
-                                        f"توثيق دليل التحقق والمسؤولية "
-                                        f"المرتبطة بـ{artifact} ضمن «{compact}»."
-                                    )
-                                },
-                            ],
+                            "results": [{
+                                "text": (
+                                    f"إتاحة {artifact} لفريق الجمعية لمراجعة "
+                                    "الخطوة التالية والتحقق من جاهزيتها."
+                                )
+                            }],
                             "_composer": True,
                             "_hard_safe": True,
                         }
@@ -5558,17 +5577,14 @@ class AtharCouncilEngine:
                 by_sprint[missing_n] = {
                     "_sprint": missing_n,
                     "text": (
-                        f"اكتمل مخرج تنفيذي موثق ضمن "
-                        f"«{compact_guard_anchor}» وأصبح قابلًا للتحقق."
+                        f"إعداد ملف تنفيذي موثق ضمن «{compact_guard_anchor}»."
                     ),
-                    "results": [
-                        {
-                            "text": (
-                                f"إعداد مخرج تنفيذي موثق وربطه "
-                                f"بـ«{compact_guard_anchor}»."
-                            )
-                        }
-                    ],
+                    "results": [{
+                        "text": (
+                            "توافر ملف قابل للمراجعة والتحقق يساعد الجمعية "
+                            "في متابعة التدخل المرتبط به."
+                        )
+                    }],
                     "_hard_safe": True,
                 }
 
@@ -5621,6 +5637,10 @@ class AtharCouncilEngine:
                 "sequence": sequence,
                 "from": aid,
                 "message": reasonings_by_id[aid],
+                "evidence": {
+                    "class": "I2",
+                    "description": "تحليل المستشار من سياق الجمعية؛ لا يُعد إثباتًا مستقلًا لتنفيذ أو نتيجة.",
+                },
             })
             sequence += 1
             transcript.append({
@@ -5647,11 +5667,18 @@ class AtharCouncilEngine:
                 + ". وسيُبنى التنفيذ الأسبوعي لكل تدخل على مخرجات قابلة للتحقق دون إضافة افتراضات غير مدعومة."
             )
 
-        transcript.append({
+        final_chat_entry = {
             "sequence": sequence,
             "from": "meta_advisor",
             "message": final_strategy_message,
-        })
+        }
+        meta_synthesis = strategy.get("synthesis")
+        if meta_synthesis in {
+            "CONSENSUS", "COMPLEMENTARY", "TRADE_OFF", "CONFLICT",
+            "EVIDENCE_GAP", "SCOPE_CONFLICT",
+        }:
+            final_chat_entry["synthesis"] = meta_synthesis
+        transcript.append(final_chat_entry)
 
         result = {
             "involved_advisor_ids": involved_ids,
@@ -5659,9 +5686,28 @@ class AtharCouncilEngine:
             "transcript": transcript,
             "suggestion": {"interventions": interventions},
         }
+        # A strategy portfolio is a material advisory decision, but not proof
+        # of organizational approval or completed execution.
+        goal = payload.get("goal") or {}
+        impact_map = payload.get("impact_map") or {}
+        issue = (
+            (goal.get("statement") if isinstance(goal, dict) else "")
+            or (impact_map.get("social_problem") if isinstance(impact_map, dict) else "")
+            or "تحديد تدخلات خريطة الأثر الملائمة للجهة"
+        )
+        result["decision_memory"] = {
+            "status": "APPROVED WITH CONDITIONS",
+            "issue": str(issue).strip(),
+            "decision": "يقترح المجلس دراسة التدخلات التالية تمهيدًا لاعتماد الجهة: " +
+                        "؛ ".join(x["title"] for x in interventions),
+            "outcome": "مقترح استشاري ينتظر مراجعة الجهة؛ لم يُعتمد أو يُنفذ بعد.",
+        }
+        escalation = self._optional_human_escalation(request)
+        if escalation is not None:
+            result["human_escalation"] = escalation
 
         self._last_meta_debug = {
-            "architecture": "bounded_meta_candidates_plus_non_fatal_composer_v7",
+            "architecture": "screen3-v12-contract-meta-dna",
             "meta_advisor_slug": meta["slug"],
             "meta_advisor_name": meta["name"],
             "meta_prompt_path": meta["prompt_path"],
@@ -5923,26 +5969,105 @@ class AtharCouncilEngine:
         if not isinstance(transcript, list) or not transcript:
             raise ValueError("transcript must be a non-empty list.")
         allowed_from = {"meta_advisor", *involved_ids}
-        expected_sequence = 1
+        allowed_synthesis = {
+            "CONSENSUS", "COMPLEMENTARY", "TRADE_OFF", "CONFLICT",
+            "EVIDENCE_GAP", "SCOPE_CONFLICT",
+        }
+        allowed_evidence = {"E1", "E2", "E3", "I1", "I2", "A1", "U"}
         for idx, row in enumerate(transcript):
-            if not isinstance(row, dict) or set(row.keys()) != {"sequence", "from", "message"}:
-                raise ValueError(f"transcript[{idx}] fields are invalid.")
-            if row.get("sequence") != expected_sequence:
+            if not isinstance(row, dict) or not {"sequence", "from", "message"} <= row.keys():
+                raise ValueError(f"transcript[{idx}] has missing fields.")
+            if row.get("sequence") != idx + 1:
                 raise ValueError("transcript sequence must be contiguous starting at 1.")
             sender = str(row.get("from") or "").strip()
             message = str(row.get("message") or "").strip()
-            if sender not in allowed_from:
-                raise ValueError(f"transcript[{idx}].from is not an involved advisor or meta_advisor.")
-            if not message:
-                raise ValueError(f"transcript[{idx}].message is required.")
-            expected_sequence += 1
+            if sender not in allowed_from or not message:
+                raise ValueError(f"transcript[{idx}] sender/message invalid.")
+            if set(row) - {"sequence", "from", "message", "synthesis", "evidence"}:
+                raise ValueError(f"transcript[{idx}] has unsupported keys.")
+            if "synthesis" in row:
+                if sender != "meta_advisor" or row["synthesis"] not in allowed_synthesis:
+                    raise ValueError(f"transcript[{idx}] synthesis invalid or misplaced.")
+            if "evidence" in row:
+                evidence = row["evidence"]
+                if (sender == "meta_advisor" or not isinstance(evidence, dict)
+                        or evidence.get("class") not in allowed_evidence
+                        or set(evidence) - {"class", "description"}):
+                    raise ValueError(f"transcript[{idx}] evidence invalid or misplaced.")
+                if "description" in evidence and not isinstance(evidence["description"], str):
+                    raise ValueError(f"transcript[{idx}] evidence.description must be text.")
+
+    @staticmethod
+    def _validate_optional_governance(result: Dict[str, Any]) -> None:
+        dm = result.get("decision_memory")
+        if dm is not None:
+            if (not isinstance(dm, dict) or
+                dm.get("status") not in {
+                    "APPROVED", "APPROVED WITH CONDITIONS", "PILOT FIRST",
+                    "NEEDS MORE EVIDENCE", "ESCALATE", "DO NOT PROCEED",
+                } or not str(dm.get("issue") or "").strip()
+                or not str(dm.get("decision") or "").strip()
+                or set(dm) - {"status", "issue", "decision", "owner", "outcome"}):
+                raise ValueError("decision_memory does not follow Screen 3 contract.")
+        esc = result.get("human_escalation")
+        if esc is not None:
+            if (not isinstance(esc, dict) or
+                esc.get("type") not in {
+                    "BINDING_LEGAL_OPINION", "MEDICAL_DECISION",
+                    "REGULATED_INVESTMENT", "FORMAL_ACCOUNTING_OPINION",
+                    "SENSITIVE_HR_DECISION", "HIGH_RISK_CYBERSECURITY",
+                    "CONTRACTUAL_COMMITMENT", "SENSITIVE_PERSONAL_DATA",
+                    "BOARD_OR_ASSEMBLY_EXCLUSIVE",
+                } or esc.get("status") not in {
+                    "APPROVED", "APPROVED WITH CONDITIONS", "PILOT FIRST",
+                    "NEEDS MORE EVIDENCE", "ESCALATE", "DO NOT PROCEED",
+                } or not str(esc.get("reason") or "").strip()
+                or set(esc) - {"type", "status", "reason"}):
+                raise ValueError("human_escalation does not follow Screen 3 contract.")
+
+    @staticmethod
+    def _optional_human_escalation(request: Dict[str, Any]) -> Optional[Dict[str, str]]:
+        """Only flag EXPLICIT reserved human decisions, not ordinary domain work."""
+        payload = request.get("payload") or {}
+        fragments = [str(request.get("reason") or "")]
+        # A generate's stated goal is the only authoritative decision request.
+        if str(request.get("kind") or "generate") == "generate":
+            goal = payload.get("goal") or {}
+            if isinstance(goal, dict):
+                fragments.append(str(goal.get("statement") or ""))
+        text = " ".join(fragments)
+        patterns = [
+            (r"(?:إصدار|اصدار|تقديم|طلب).{0,20}(?:رأي قانوني ملزم|فتوى قانونية)", "BINDING_LEGAL_OPINION", "رأي قانوني ملزم"),
+            (r"(?:تشخيص طبي|قرار علاجي|وصفة طبية)", "MEDICAL_DECISION", "قرار طبي"),
+            (r"(?:توصية استثمارية ملزمة|إدارة محفظة استثمارية مرخصة)", "REGULATED_INVESTMENT", "قرار استثماري منظم"),
+            (r"(?:تقرير مراجعة حسابات رسمي|رأي محاسبي معتمد)", "FORMAL_ACCOUNTING_OPINION", "رأي محاسبي رسمي"),
+            (r"(?:قرار فصل موظف محدد|فصل موظف بعينه)", "SENSITIVE_HR_DECISION", "قرار موارد بشرية حساس"),
+            (r"(?:تنفيذ هجوم سيبراني|اختبار اختراق عالي المخاطر)", "HIGH_RISK_CYBERSECURITY", "أمن سيبراني عالي المخاطر"),
+            (r"(?:توقيع عقد ملزم|إبرام عقد ملزم)", "CONTRACTUAL_COMMITMENT", "التزام تعاقدي"),
+            (r"(?:نشر بيانات شخصية حساسة|تسليم بيانات شخصية حساسة)", "SENSITIVE_PERSONAL_DATA", "بيانات شخصية حساسة"),
+            (r"(?:قرار حصري لمجلس الإدارة|تصويت الجمعية العمومية الملزم)", "BOARD_OR_ASSEMBLY_EXCLUSIVE", "قرار حصري لصاحب الصلاحية"),
+        ]
+        for pattern, code, description in patterns:
+            if re.search(pattern, text, flags=re.I):
+                return {
+                    "type": code,
+                    "status": "ESCALATE",
+                    "reason": (
+                        f"الطلب يتضمن {description} خارج صلاحية المجلس الآلي؛ "
+                        "تستلزم هذه الجزئية مراجعة واعتماد المختص البشري المرخص أو صاحب الصلاحية. "
+                        "التوصيات الآلية إن وجدت استرشادية فقط وغير ملزمة."
+                    ),
+                }
+        return None
 
     @classmethod
     def _validate_screen3_public_response(cls, result: Dict[str, Any]) -> None:
-        if set(result.keys()) != {
-            "involved_advisor_ids", "advisor_reasonings", "transcript", "suggestion"
+        if set(result) - {
+            "involved_advisor_ids", "advisor_reasonings", "transcript",
+            "suggestion", "decision_memory", "human_escalation",
         }:
             raise ValueError("Screen 3 response has unexpected top-level fields.")
+        cls._validate_optional_governance(result)
 
         ids = result.get("involved_advisor_ids")
         if (
@@ -5958,8 +6083,8 @@ class AtharCouncilEngine:
         if not isinstance(suggestion, dict) or set(suggestion.keys()) != {"interventions"}:
             raise ValueError("Generate suggestion must contain interventions only.")
         interventions = suggestion.get("interventions")
-        if not isinstance(interventions, list) or not (2 <= len(interventions) <= 3):
-            raise ValueError("Screen 3 generate requires exactly 2 to 3 interventions.")
+        if not isinstance(interventions, list) or not (2 <= len(interventions) <= 4):
+            raise ValueError("Screen 3 generate requires 2 to 4 interventions.")
 
         required = {
             "title", "confidence_level", "impact_description",
@@ -5976,10 +6101,9 @@ class AtharCouncilEngine:
             }:
                 raise ValueError(f"interventions[{i}].confidence_level must be high/medium/low.")
 
-            # Product rule: exactly 12 ordered weekly Sprint units per intervention.
-            # Backend shape remains outputs[] -> results[]. Each output is one
-            # Sprint unit; output.text is its Result and results[] are the 1-3
-            # executable deliverables for that 5-working-day sprint.
+            # Exactly 12 sequential actual OUTPUTS per intervention.
+            # results[] are consequences/expected outcomes of that output,
+            # NOT the executable output itself. Screen 5 plans one Sprint per output.
             outputs = intervention.get("outputs")
             if not isinstance(outputs, list) or len(outputs) != 12:
                 raise ValueError(f"interventions[{i}].outputs must contain exactly 12 sprint units.")
@@ -5989,9 +6113,9 @@ class AtharCouncilEngine:
                 if not isinstance(output.get("text"), str) or not output["text"].strip():
                     raise ValueError(f"interventions[{i}].outputs[{j}].text is required.")
                 results = output.get("results")
-                if not isinstance(results, list) or not (1 <= len(results) <= 3):
+                if not isinstance(results, list) or not results:
                     raise ValueError(
-                        f"interventions[{i}].outputs[{j}].results must contain 1 to 3 executable texts."
+                        f"interventions[{i}].outputs[{j}].results must have at least one result."
                     )
                 for k, result_item in enumerate(results):
                     if (
@@ -6006,14 +6130,15 @@ class AtharCouncilEngine:
 
     @classmethod
     def _validate_screen3_regenerate_response(cls, result: Dict[str, Any]) -> None:
-        if set(result.keys()) != {
-            "involved_advisor_ids", "advisor_reasonings", "transcript", "suggestion"
+        if set(result) - {
+            "involved_advisor_ids", "advisor_reasonings", "transcript",
+            "suggestion", "decision_memory", "human_escalation",
         }:
             raise ValueError("Regenerate response has unexpected top-level fields.")
+        cls._validate_optional_governance(result)
         ids = result.get("involved_advisor_ids")
         if (
             not isinstance(ids, list)
-            or not ids
             or any(not isinstance(x, str) or not x.strip() for x in ids)
             or len(ids) != len(set(ids))
         ):
@@ -6031,8 +6156,8 @@ class AtharCouncilEngine:
         ):
             raise ValueError("Regenerated output text must be non-empty when present.")
         results = suggestion.get("results")
-        if not isinstance(results, list) or not (1 <= len(results) <= 3):
-            raise ValueError("Regenerate suggestion.results must contain 1 to 3 executable texts.")
+        if not isinstance(results, list) or not results:
+            raise ValueError("Regenerate suggestion.results must contain at least one result.")
         for idx, row in enumerate(results):
             if (
                 not isinstance(row, dict)
@@ -6543,50 +6668,61 @@ class AtharCouncilEngine:
         ][:3]
 
         if not rewritten_results:
-            rewritten_results = existing_results[:3]
+            raise ValueError(
+                "Regeneration model supplied no usable results; old results were preserved."
+            )
 
-        # If model output is byte-for-byte unchanged, make the rewrite visibly
-        # honor common "specific/actionable/measurable" requests without inventing
-        # a quantity. This is deterministic and artifact-based.
         if (
             rewritten_text == existing_text
             and rewritten_results == existing_results[:3]
         ):
-            reason_lower = reason.lower()
+            raise ValueError("Regeneration returned the unchanged output and results.")
 
-            if any(
-                key in reason_lower
-                for key in (
-                    "تحديد", "محدد", "أكثر تحديد", "قابل للتنفيذ",
-                    "عملي", "واضح",
-                )
-            ):
-                rewritten_text = (
-                    f"توثيق وتنفيذ «{existing_text.rstrip(' .')}» "
-                    "بصياغة واضحة تحدد المخرج المطلوب ودليل التحقق منه."
-                )
-
-            if any(
-                key in reason_lower
-                for key in (
-                    "قابل للعد", "قابل للقياس", "قياس", " measurable",
-                )
-            ):
-                rewritten_results = [
-                    (
-                        "توثيق إنجاز المخرج في سجل أو تقرير قابل للتحقق "
-                        "يربط التنفيذ بالنتيجة المستهدفة."
-                    )
-                ]
-
-        final_note = str(parsed.get("note") or "").strip()
+        # The Specialist and base rewrite writer are NOT the Meta Advisor.
+        # Require the actual full Meta DNA + Meta adapter to adjudicate the
+        # proposed rewrite before publishing it as the council's decision.
+        # This adds one bounded call, never a fake deterministic "approval".
+        meta_persona = self._resolve_meta_advisor(request)
+        meta_task = {
+            "task": "review_intervention_output_regeneration",
+            "reason": reason,
+            "intervention": intervention,
+            "impact_map": impact_map,
+            "previous": {"text": existing_text, "results": existing_results},
+            "proposed": {"text": rewritten_text, "results": rewritten_results},
+            "selected_advisor_reasonings": advisor_reasonings,
+            "rules": [
+                "Review the rewrite for faithfulness to the user reason and intervention.",
+                "Never approve a new ungrounded fact, number, percent, or outcome.",
+                "Never approve an output whose results contradict the output.",
+                "Approve an unchanged output only if results materially improved.",
+                "Return VERDICT=APPROVE or VERDICT=REJECT and REASON=<one Arabic sentence>.",
+                "Optionally add SYNTHESIS=CONSENSUS|COMPLEMENTARY|TRADE_OFF|CONFLICT|EVIDENCE_GAP|SCOPE_CONFLICT if supported by the council voices.",
+            ],
+        }
+        meta_raw = self._generate(
+            "meta" if COUNCIL_META_MODE == "adapter" else "base",
+            meta_persona["prompt"],
+            json.dumps(meta_task, ensure_ascii=False, separators=(",", ":")),
+            360,
+            deterministic=True,
+            repetition_penalty=1.07,
+        )
+        approval = re.search(r"(?:^|\n)\s*VERDICT\s*[:=]\s*(APPROVE|REJECT)\b", meta_raw, flags=re.I)
+        if not approval:
+            raise ValueError("Meta Advisor did not provide a parseable regeneration verdict.")
+        if approval.group(1).upper() != "APPROVE":
+            raise ValueError("Meta Advisor rejected the proposed output regeneration.")
+        justification = re.search(r"(?:^|\n)\s*REASON\s*[:=]\s*(.+)", meta_raw, flags=re.I)
+        final_note = (
+            self._clean_meta_public_text(justification.group(1), request)
+            if justification else ""
+        )
         if not final_note:
-            final_note = (
-                "اعتمدت إعادة الصياغة بما يطابق طلب المستخدم ويحافظ على "
-                "اتساق المخرج مع التدخل وخريطة الأثر."
-            )
+            raise ValueError("Meta Advisor approval is missing its Arabic reasoning.")
 
-        # Transcript is deterministic and contract-safe; no separate Meta call.
+        # Council transcript contains the specialist's actual opinion and
+        # the Meta Advisor's actual final review, not an invented Meta verdict.
         transcript: List[Dict[str, Any]] = []
         sequence = 1
 
@@ -6607,14 +6743,25 @@ class AtharCouncilEngine:
                 "sequence": sequence,
                 "from": aid,
                 "message": reasonings_by_id[aid],
+                "evidence": {
+                    "class": "I2",
+                    "description": "اجتهاد مهني مبني على المعطيات المتاحة وليس واقعة مثبتة مستقلة.",
+                },
             })
             sequence += 1
 
-        transcript.append({
+        final_message = {
             "sequence": sequence,
             "from": "meta_advisor",
             "message": final_note,
-        })
+        }
+        synthesis_match = re.search(
+            r"(?:^|\n)\s*SYNTHESIS\s*[:=]\s*(CONSENSUS|COMPLEMENTARY|TRADE_OFF|CONFLICT|EVIDENCE_GAP|SCOPE_CONFLICT)\b",
+            meta_raw, flags=re.I,
+        )
+        if synthesis_match:
+            final_message["synthesis"] = synthesis_match.group(1).upper()
+        transcript.append(final_message)
 
         public = {
             "involved_advisor_ids": involved_ids,
@@ -6628,14 +6775,18 @@ class AtharCouncilEngine:
                 ],
             },
         }
+        escalation = self._optional_human_escalation(request)
+        if escalation is not None:
+            public["human_escalation"] = escalation
 
         self._validate_screen3_regenerate_response(public)
 
         self._last_meta_debug = {
-            "architecture": "bounded_regenerate_v8",
+            "architecture": "screen3-v12-regenerate",
             "writer_adapter": "base",
             "specialist_count": len(involved_ids),
             "rewrite_model_calls": 1 if not writer_error else 0,
+            "meta_review_model_calls": 1,
             "rewrite_repair_calls": 0,
             "writer_error_fallback": writer_error or None,
             "source_number_count": len(allowed_digit_numbers),
@@ -6653,6 +6804,7 @@ class AtharCouncilEngine:
             if str(request.get("topic") or "").strip() != "interventions":
                 raise ValueError("topic must be interventions.")
 
+            print("[council] code_version=screen3-v12-new-impact-contract", flush=True)
             kind = str(request.get("kind") or "generate").strip().lower()
             debug = bool(request.get("debug") or self._payload(request).get("debug"))
             total_start = time.perf_counter()
@@ -6683,6 +6835,9 @@ class AtharCouncilEngine:
                 mode = "generate"
 
             elif kind == "regenerate":
+                # Validate the configured leadership DNA/slug; no silent default
+                # persona substitution when the platform selected another Meta.
+                self._resolve_meta_advisor(request)
                 payload = self._payload(request)
                 if str(payload.get("target") or "").strip() != "intervention_output":
                     raise ValueError(

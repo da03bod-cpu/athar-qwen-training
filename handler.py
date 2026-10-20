@@ -18320,8 +18320,8 @@ def _handler_impl(job):
                 "continual_learning_enabled": (
                     CONTINUAL_LEARNING_ENABLED
                 ),
-                "response_contract_version": "impact_challenge_screen_3_v8_generate_regenerate",
-                "build_version": "athar-screen3-generate-v7-regenerate-v8-2026-10-08",
+                "response_contract_version": "impact_challenge_screen_3_new_contract_v12",
+                "build_version": "athar-screen3-v12-new-contract-2026-10-20",
                 "topic": "interventions",
                 "backend_advisor_id_type": "canonical_aos_string",
                 "canonical_advisor_id_format": "AOS-(LD|SP|FG|SE)-NN",
