@@ -1872,7 +1872,7 @@ class AtharCouncilEngine:
         # A title led by these concepts is a support/enabler proposal, not a
         # beneficiary/program-facing intervention for a social-impact Screen 3.
         support_terms = (
-            "تحليل", "تقييم", "مراجعة", "قياس", "منهجية", "إطار", "مؤشر", "مؤشرات",
+            "دراسة", "تحليل", "تقييم", "مراجعة", "قياس", "منهجية", "إطار", "مؤشر", "مؤشرات",
             "تمويل", "مالي", "مالية", "موارد", "مانح", "مانحين", "استدامة مالية", "حوكمة",
             "محفظة", "أولويات", "جدوى", "لوحة", "بيانات", "متابعة", "تعلم", "استراتيجية مانحين",
             "استراتيجية موارد", "إدارة الموارد", "الشراكات المؤسسية",
@@ -2343,7 +2343,10 @@ class AtharCouncilEngine:
         # Meta LoRA degrading Arabic fluency during long sprint generation.
         sprint_writer_adapter = "base"
         SPRINT_WRITER_SYSTEM_PROMPT = (
-            "أنت محرر تنفيذي عربي دقيق. مهمتك تحويل تدخل استراتيجي معتمد إلى "
+            "أنت محرر تنفيذي عربي دقيق. كل اسم علم أو مكان أو مسار يجب أن "
+            "يكون موجودًا حرفيًا في بيانات الجمعية. لا تخترع أسماء قرى أو خطوط "
+            "ولا تصف نتائج لم تتحقق على أنها حقائق منجزة. راجع كل كلمة عربية. "
+            "مهمتك تحويل تدخل استراتيجي معتمد إلى "
             "مخرجات أسبوعية ملموسة ونتائج متوقعة مرتبطة بها. لا تغيّر التدخل ولا "
             "تضف برامج أو شركاء أو أرقامًا أو حقائق غير موجودة في البيانات "
             "المعطاة. اكتب عربية فصحى سليمة وطبيعية ومباشرة. التزم حرفيًا "
@@ -2578,6 +2581,48 @@ class AtharCouncilEngine:
 
             return errors
 
+        # V17: do not confuse semantic relevance with documented evidence.
+        # V16 accepted a fictional named bus route ("القرية الشمالية") because
+        # the word "مسار" was transport-related. Only the case payload can
+        # establish actual route/village/school names.
+        def unsupported_named_location(value: Any) -> bool:
+            raw = str(value or "")
+            # Named route/school/village in quotes; the name must occur in
+            # authoritative organization / program / goal / impact data.
+            for match in re.finditer(
+                r'(?:مسار|خط|قرية|القرية|مدرسة|المدرسة|مركز|حي)\s*'
+                r'(?:«([^»]{3,80})»|"([^"]{3,80})"|“([^”]{3,80})”)',
+                raw,
+            ):
+                label = next((x for x in match.groups() if x), "").strip()
+                if label and label not in authoritative_text:
+                    return True
+            # Also handle unquoted invented compass-labelled route names.
+            for match in re.finditer(
+                r'(?:مسار|خط|قرية)\s+(?:القرية\s+)?'
+                r'(?:الشمالي(?:ة)?|الجنوبي(?:ة)?|الشرقي(?:ة)?|الغربي(?:ة)?)',
+                raw,
+            ):
+                if match.group(0) not in authoritative_text:
+                    return True
+            return False
+
+        def non_meal_scope_in_meal_intervention(value: Any, title: Any) -> bool:
+            t = str(title or "")
+            if not re.search(r"قياس|تقييم|مسار التأثير|MEAL|رصد الأثر|منهجية الأثر", t, re.I):
+                return False
+            raw = str(value or "")
+            # A measurement intervention may record and evaluate a schedule,
+            # but should not replace the separate operational intervention by
+            # creating route-management guides or deploying new bus systems.
+            return bool(re.search(
+                r"(?:إعداد|تصميم|تطوير|تحديث|إنتاج|تطبيق|إطلاق)\s+"
+                r"(?:دليل(?:\s+عملي|\s+تشغيلي)?|نظام|خطة)\s+"
+                r".{0,100}(?:إدارة\s+مسارات|تشغيل\s+الحافلات|تعديل\s+الجداول|"
+                r"جدولة\s+الحافلات|تتبع\s+الحافلات)",
+                raw,
+            ))
+
         def unsupported_external_assumption(value: Any) -> bool:
             raw = re.sub(r"\s+", " ", str(value or "")).strip().lower()
             if not raw:
@@ -2662,6 +2707,22 @@ class AtharCouncilEngine:
                 r"\bالتكالم\b",
                 r"\bأصحاب\s+المصلح\b",
                 r"\bالمؤثمة\b",
+                r"\bنموذي\b",
+                r"\bنموذ[يى]\b",
+                r"\bالتحسيمات\b",
+                r"\bالمسرية\b",
+                r"\bمصفقة\b",
+                r"\bمصفوق\b",
+                r"\bالحافظات\b",
+                r"\bالتشاغيلية\b",
+                r"\bو?البشراني(?:ة)?\b",
+                r"\bالتنم[وو]\b",
+                r"\bالمستهددة\b",
+                r"\bالمنقلين\b",
+                r"\bمعاياير\b",
+                r"\bالمسؤلة\b",
+                r"\bقيايس\b",
+                r"\bالتنفيذي والأثر\b",
                 r"\bالمتوافقتة\b",
                 r"\bأداية\b",
                 r"\bالعتماديات\b",
@@ -3187,6 +3248,7 @@ class AtharCouncilEngine:
                 "Every intervention must directly anchor to the stated 90-day goal, social problem, named impact drivers, target group, organizational notes, or an existing program/project.",
                 "Do not replace the stated challenge with a generic identity, governance, structure, strategy, or analysis project unless the request itself makes that issue material.",
                 "The interventions must be materially different from each other and together converge on the same primary 90-day goal.",
+                "For a SOCIAL-IMPACT track, at least ONE approved intervention must directly deliver or improve an actual beneficiary-facing service from the case. A study of waste, a MEAL framework, and an internal evaluation are support activities, not standalone direct service interventions. Do not return two analysis-only proposals.",
                 "Do not invent percentages, counts, budgets, dates, partners, staffing, resources, or capacity.",
                 "Choose confidence=high only where the supplied organizational evidence actually substantiates it; inconclusive evidence requires medium or low.",
                 "REPORTABLE must describe something the organization can verify or report; if no grounded numeric target exists, use a measurable completion/status/quality statement without fabricating a number.",
@@ -4056,7 +4118,7 @@ class AtharCouncilEngine:
 
         impact_errors = portfolio_impact_errors(strategy)
         if impact_errors:
-            print("[council] V16 impact-portfolio repair: " + " | ".join(impact_errors[:4]), flush=True)
+            print("[council] V17 impact-portfolio repair: " + " | ".join(impact_errors[:4]), flush=True)
             try:
                 repair_task = dict(strategy_task)
                 repair_task["task"] = (
@@ -4068,6 +4130,13 @@ class AtharCouncilEngine:
                 )
                 repair_task["previous_interventions"] = strategy.get("interventions")
                 repair_task["portfolio_validation_errors"] = impact_errors[:6]
+                repair_task["must_be_directly_beneficiary_facing"] = (
+                    "At least one intervention must OPERATE or materially improve an existing "
+                    "service for the target beneficiaries, not merely study waste, prepare "
+                    "measurement frameworks, or write internal evaluation reports. "
+                    "Do not claim implementation already happened. Keep the named "
+                    "program, actual known beneficiaries and evidence constraints."
+                )
                 repair_task["required_protocol"] = strategy_protocol
                 repaired_raw = generate_strategy(repair_task)
                 candidate,_ = _stabilize_strategy_portfolio(
@@ -4296,6 +4365,12 @@ class AtharCouncilEngine:
                         f"sprint {n} output.text introduces unsupported external/program context"
                     )
                     bad.add(n)
+                if unsupported_named_location(result):
+                    errors.append(f"sprint {n} output.text invents an unverified named route/place")
+                    bad.add(n)
+                if non_meal_scope_in_meal_intervention(result, intervention.get("title")):
+                    errors.append(f"sprint {n} output.text performs transport operations outside this MEAL intervention")
+                    bad.add(n)
                 if qtokens(result) and not is_anchored(result):
                     errors.append(f"sprint {n} output.text is not anchored to this intervention/case")
                     bad.add(n)
@@ -4350,6 +4425,12 @@ class AtharCouncilEngine:
                         errors.append(
                             f"sprint {n} results[].text introduces unsupported external/program context"
                         )
+                        bad.add(n)
+                    if unsupported_named_location(text_value):
+                        errors.append(f"sprint {n} results[].text invents an unverified named route/place")
+                        bad.add(n)
+                    if non_meal_scope_in_meal_intervention(text_value, intervention.get("title")):
+                        errors.append(f"sprint {n} results[].text performs transport operations outside this MEAL intervention")
                         bad.add(n)
                     if qtokens(text_value) and not is_anchored(text_value, output_context=result):
                         errors.append(f"sprint {n} results[].text is not anchored to this intervention/output")
@@ -4668,6 +4749,9 @@ class AtharCouncilEngine:
                     "If the proposed milestone has no numeric target in the supplied case, write it qualitatively: NO guessed percent sign, percentage, coverage rate, or digit-based milestone.",
                     "Do not introduce a new strategic objective, identity project, governance project, or organizational redesign outside the approved intervention.",
                     "Do not invent a program, campaign, benchmark organization, comparison group, partner, stakeholder group, or external dataset that is absent from authoritative_context.",
+                    "Never give a geographic route, village, school or bus stop a specific proper name unless that EXACT name occurs in the supplied organization/program/goal/impact data; use 'أحد المسارات الحالية' otherwise.",
+                    "If the intervention is an impact-measurement/MEAL initiative, deliver measurement tools, baselines and evaluation findings; do NOT execute redesign of bus routes or create operational management guides belonging to another intervention.",
+                    "Re-read every Arabic sentence to eliminate incomplete/corrupt words. Never invent a verified improvement or claim an observed impact; results are expected future outcomes conditional on evidence.",
                     "If authoritative_context does not provide a quantity, keep the deliverable qualitative rather than inventing a count.",
                     "Write natural, complete Modern Standard Arabic. Never output truncated words, malformed brackets, stray backslashes, broken quotation marks, or pseudo-placeholders.",
                     "Name the actual artifact or decision produced that week instead of repeating generic words such as تنفيذ or مراجعة.",
@@ -4829,6 +4913,9 @@ class AtharCouncilEngine:
                     "Do not repeat accepted_previous_sprints.",
                     "Use only facts and numbers grounded in the authoritative case or approved intervention.",
                     "Do not invent a new program, partner, percentage, count, budget, staffing assumption, date, or strategic objective.",
+                    "Do not invent names of villages, school sites, routes, or bus stops. If not expressly present in authoritative data, use a generic description of an existing route.",
+                    "Preserve the APPROVED INTERVENTION scope. A MEAL intervention measures outcomes; it must not quietly turn into an operational route reorganization or a new bus tracking system.",
+                    "Read Arabic word by word before returning. Avoid corrupted spellings and statements that falsely imply outcomes already achieved.",
                     "If a quantity is missing, remove the entire numerical CLAIM and replace it with a qualitative milestone about this same intervention; do not delete digits alone or fill blank % signs.",
                     "Numbers in SPRINT labels or JSON fields do not license numeric claims in RESULT or TEXT.",
                     "In a final strict-numeric-free repair, the SPRINT identifier is the only number allowed; all result and output descriptions must contain no digits or numerical number words." if strict_numeric_free else "Do not select an arbitrary new count of outputs, reports, schools, indicators or activities.",
@@ -5758,7 +5845,7 @@ class AtharCouncilEngine:
                         break
                     attempts_total += 1
                     print(
-                        f"[council] v16 chunk={numbers} remaining={remaining} attempt={attempt}",
+                        f"[council] v17 chunk={numbers} remaining={remaining} attempt={attempt}",
                         flush=True,
                     )
                     focused_errors = [
@@ -5831,7 +5918,7 @@ class AtharCouncilEngine:
                             break
                         attempts_total += 1
                         print(
-                            f"[council] v16 focused_repair sprint={n} attempt={single_attempt} "
+                            f"[council] v17 focused_repair sprint={n} attempt={single_attempt} "
                             f"strict_qualitative={single_attempt >= 3 and numeric_error} "
                             f"context_anchor_repair={anchor_error}",
                             flush=True,
@@ -5858,7 +5945,7 @@ class AtharCouncilEngine:
                         )
                         if not errors:
                             validated[n] = rows[0]
-                            print(f"[council] v16 focused_repair succeeded sprint={n}", flush=True)
+                            print(f"[council] v17 focused_repair succeeded sprint={n}", flush=True)
                             errors_by_sprint.pop(n, None)
                             rejected_by_sprint.pop(n, None)
                             break
@@ -5873,7 +5960,7 @@ class AtharCouncilEngine:
                         for n in missing
                     ]
                     raise ValueError(
-                        f"V16 model output generation failed for sprints {missing} "
+                        f"V17 model output generation failed for sprints {missing} "
                         f"of intervention '{intervention.get('title')}': "
                         + " || ".join(specific_errors[:5])
                     )
@@ -5925,14 +6012,14 @@ class AtharCouncilEngine:
                     )
                     if cross_errors:
                         raise ValueError(
-                            "V16 cross-sprint quality check failed for "
+                            "V17 cross-sprint quality check failed for "
                             f"{intervention.get('title')} (sprints {sorted(cross_bad)}): "
                             + " | ".join(cross_errors[:6])
                         )
                 prior = candidate_full
                 details.append({"sprints":numbers,"status":"validated"})
             return {"outputs":prior,"raw":""}, {
-                "architecture":"v16-context-anchored-model-generated-outputs",
+                "architecture":"v17-grounded-impact-model-generated-outputs",
                 "model_calls":attempts_total,
                 "archetype":"model_generated_no_templates",
                 "fallback_sprints":[],"fallback_count":0,
@@ -5964,7 +6051,7 @@ class AtharCouncilEngine:
 
             missing_numbers=[n for n in range(1,SPRINT_COUNT+1) if n not in by_sprint]
             if missing_numbers:
-                raise ValueError(f"V16 missing model-generated outputs for sprints {missing_numbers}")
+                raise ValueError(f"V17 missing model-generated outputs for sprints {missing_numbers}")
 
             plan["outputs"] = [
                 by_sprint[n]
@@ -6118,7 +6205,7 @@ class AtharCouncilEngine:
             result["human_escalation"] = escalation
 
         self._last_meta_debug = {
-            "architecture": "screen3-v16-context-anchor-meta-dna",
+            "architecture": "screen3-v17-grounded-impact-dna",
             "meta_advisor_slug": meta["slug"],
             "meta_advisor_name": meta["name"],
             "meta_prompt_path": meta["prompt_path"],
@@ -7217,7 +7304,7 @@ class AtharCouncilEngine:
             if str(request.get("topic") or "").strip() != "interventions":
                 raise ValueError("topic must be interventions.")
 
-            print("[council] code_version=screen3-v16-transport-context-anchor", flush=True)
+            print("[council] code_version=screen3-v17-grounded-route-meal-arabic", flush=True)
             kind = str(request.get("kind") or "generate").strip().lower()
             debug = bool(request.get("debug") or self._payload(request).get("debug"))
             total_start = time.perf_counter()
