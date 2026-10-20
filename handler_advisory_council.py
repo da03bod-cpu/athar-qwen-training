@@ -104,6 +104,27 @@ def _screen3_transport_semantic_anchor(text: Any, approved_title: Any) -> bool:
     return bool(has_operational_effect and (has_transport or has_beneficiary))
 
 
+def _screen3_v20_repair_profile(validation_errors: List[str]) -> Dict[str, bool]:
+    """Classify validation failures without modifying or inventing response text.
+
+    This intentionally does not mark a proposed outcome as established, or
+    waive validation. It only controls one additional model-only repair attempt.
+    """
+    joined = " | ".join(str(x or "").lower() for x in validation_errors)
+    return {
+        "corrupt_arabic": any(x in joined for x in (
+            "corrupted arabic", "malformed arabic", "hidden characters")),
+        "unsupported_history": "undocumented historical data window" in joined,
+        "wrong_transport_noun": "confuses buses with unrelated objects" in joined,
+        "unsupported_number": any(x in joined for x in (
+            "unsupported numbers", "unsupported context", "age range", "two transport lines")),
+        "semantic_anchor": "not anchored" in joined,
+        "other_quality": any(x in joined for x in (
+            "unverified effect", "repeats", "generic", "unrelated", "unsupported external",
+            "invent", "scope", "invalid", "missing", "not parseable")),
+    }
+
+
 def _screen3_v18_text_quality_errors(
     value: Any,
     *,
@@ -4361,7 +4382,7 @@ class AtharCouncilEngine:
         sprint_protocol = (
             "Return ONLY this protocol for ONE approved intervention; no JSON or Markdown.\n"
             "SPRINT=1\n"
-            "RESULT=<distinct achieved state/milestone by the end of this 5-day sprint>\n"
+            "RESULT=<expected verifiable change after execution, not a proven change>\n"
             "TEXT=<mandatory concrete deliverable/action executable within 5 working days>\n"
             "[TEXT=<optional second 5-day deliverable>]\n"
             "[TEXT=<optional third 5-day deliverable>]\n"
@@ -4891,7 +4912,7 @@ class AtharCouncilEngine:
                 + "\n".join(
                     [
                         f"SPRINT={n}\n"
-                        "RESULT=<specific achieved state/milestone for this intervention>\n"
+                        "RESULT=<expected later-verifiable benefit or capability from TEXT; not yet achieved>\n"
                         "TEXT=<specific mandatory deliverable executable within 5 working days>\n"
                         "[TEXT=<optional second deliverable>]\n"
                         "[TEXT=<optional third deliverable>]\n"
@@ -5066,6 +5087,28 @@ class AtharCouncilEngine:
                 or "unsupported context" in str(message).lower()
                 for message in validation_errors
             )
+            repair_profile = _screen3_v20_repair_profile(validation_errors)
+            # V20: the last model attempt is available for Arabic/semantic/historical
+            # defects too, not just number or lexical-anchor errors. On that last
+            # attempt, do not put rejected text back into the model context.
+            strict_content_rewrite = attempt >= 3 and any(repair_profile.values())
+            if strict_content_rewrite:
+                readable_issues = [
+                    label for label, active in repair_profile.items() if active
+                ]
+            else:
+                readable_issues = validation_errors[:12]
+            quality_repair_instructions = [
+                "Write exactly one new OUTPUT (TEXT) and its EXPECTED RESULT for this intervention.",
+                "Use clean standard Arabic; every noun referring to the bus service must mean actual buses, routes, stops, journeys or passengers. Do not use an unrelated object as a substitute for a bus.",
+                "Do not assert any historical observations, dated logs, or multi-week records unless the organization explicitly supplied them. If records are unavailable, propose to create a record from the start of implementation; do not imply it exists already.",
+                "RESULT describes an expected, later-verifiable change or capability, NOT an impact already proven and NOT a copied task.",
+                "Remain specific to the approved intervention and distinguish the final weekly deliverable from the other accepted weeks.",
+            ]
+            if sprint_number == 12:
+                quality_repair_instructions.append(
+                    "This is the last weekly output: produce a concrete final handover, evaluation or follow-up deliverable grounded in the intervention, rather than inventing a new historical evaluation window or claiming success in advance."
+                )
             task_obj = {
                 "role": meta["slug"],
                 "task": (
@@ -5074,6 +5117,9 @@ class AtharCouncilEngine:
                     "Do not redesign the intervention."
                 ),
                 "strict_numeric_free_rewrite": strict_numeric_free,
+                "strict_content_rewrite": strict_content_rewrite,
+                "repair_profile": repair_profile,
+                "quality_repair_instructions": quality_repair_instructions,
                 **authoritative_context,
                 "approved_intervention": {
                     "title": intervention.get("title"),
@@ -5084,8 +5130,8 @@ class AtharCouncilEngine:
                 "requested_sprint": sprint_number,
                 "sprint_purpose": SPRINT_PURPOSES[sprint_number],
                 "accepted_previous_sprints": prior_compact,
-                "faulty_previous_sprint": previous_row,
-                "validation_errors": validation_errors[:12],
+                "faulty_previous_sprint": None if strict_content_rewrite else previous_row,
+                "validation_errors": readable_issues,
                 "rejected_unsupported_numbers": sorted(rejected_numeric_claims),
                 "numeric_repair_instructions": (
                     "Recreate the SAME intervention deliverable and expected consequence "
@@ -5108,7 +5154,7 @@ class AtharCouncilEngine:
                 "attempt": attempt,
                 "required_protocol": (
                     f"SPRINT={sprint_number}\n"
-                    "RESULT=<one specific achieved state by end of this week>\n"
+                    "RESULT=<one expected later-verifiable benefit from TEXT; not yet achieved>\n"
                     "TEXT=<one concrete mandatory deliverable executable within 5 working days>\n"
                     "[TEXT=<optional second concrete deliverable>]\n"
                     "[TEXT=<optional third concrete deliverable>]\n"
@@ -5118,7 +5164,7 @@ class AtharCouncilEngine:
                     f"Return ONLY Sprint {sprint_number}; no other sprint number.",
                     "Write complete, natural Modern Standard Arabic with no truncated or corrupted words.",
                     "No square brackets, stray backslashes, pseudo-placeholders, or malformed quotation marks.",
-                    "RESULT is the expected future consequence of TEXT, not the output itself. It must be specific and tied to transport operations when the intervention is about transport.",
+                    "RESULT is the expected FUTURE consequence of TEXT, not the output itself and not a historical accomplishment. It must be specific and tied to the approved intervention (transport when appropriate).",
                     "TEXT must name a concrete deliverable, dataset, procedure, or pilot within 5 working days; name the service domain explicitly (e.g. مسارات الحافلات, حضور الطلاب, سلامة النقل when it is already in the approved case). No unrelated initiative.",
                     "Do not use generic filler such as تنفيذ التدخل, متابعة التدخل, مراجعة التدخل, استكمال المخرج, or equivalent.",
                     "Do not copy wording from faulty_previous_sprint.",
@@ -5137,6 +5183,8 @@ class AtharCouncilEngine:
                     "If validation mentions a malformed Arabic phrase, rewrite both the output and expected outcome in natural Arabic without paraphrasing the error.",
                     "If validation mentions three routes/lines, retain the verified existing route count from the provided PROGRAMS; do not invent another count or restate an unsupported historical period.",
                     "If validation mentions an unverified effect, replace confirmation of success/causality with a prospective, measurable result that can be checked after execution.",
+                    "Do not refer to data from last week, past weeks, or an earlier reporting window unless that exact historical window appears in the supplied records. A prospective log to be started later is acceptable.",
+                    "Avoid malformed bus-related nouns: use الحافلات for buses, خطوط النقل for routes, and سجلات الرحلات for logs. Rebuild both Arabic sentences rather than copying the rejected sentence.",
                 ],
             }
 
@@ -5153,6 +5201,16 @@ class AtharCouncilEngine:
                     # validator; do not invalidate the mandatory sprint header.
                     banned_numeric_phrases.extend([f"{numeral}%", f"{numeral}٪"])
 
+            # Block any directly reported malformed word on the final recovery;
+            # this supplements (never replaces) post-generation quality checks.
+            banned_content_phrases: List[str] = []
+            if strict_content_rewrite and repair_profile["corrupt_arabic"]:
+                for message in validation_errors:
+                    if "corrupted Arabic expression" in message or "malformed Arabic phrase" in message:
+                        banned_content_phrases.extend(re.findall(r"'([^']{2,80})'", message))
+            if strict_content_rewrite and repair_profile["wrong_transport_noun"]:
+                banned_content_phrases.extend(["الحواسيب", "الحوافلات", "الحاصلات", "الحافظات", "الحواجز"])
+
             raw = self._generate(
                 sprint_writer_adapter,
                 SPRINT_WRITER_SYSTEM_PROMPT,
@@ -5165,7 +5223,7 @@ class AtharCouncilEngine:
                 deterministic=(attempt == 1),
                 repetition_penalty=1.12,
                 no_repeat_ngram_size=7,
-                forbidden_phrases=sorted(set(banned_numeric_phrases)) or None,
+                forbidden_phrases=sorted(set(banned_numeric_phrases + banned_content_phrases)) or None,
             )
             parsed = parse_sprints(raw)
             parsed["outputs"] = [
@@ -6106,6 +6164,12 @@ class AtharCouncilEngine:
                         else:
                             errors_by_sprint[n] = errors
                             rejected_by_sprint[n] = row
+                            print(
+                                f"[council] v20 chunk_rejection sprint={n} "
+                                f"output_text={str(row.get('text') or '')[:200]!r} "
+                                f"results={[(str(r.get('text') or '')[:200]) for r in (row.get('results') or []) if isinstance(r, dict)]!r} "
+                                f"errors={errors[:4]!r}", flush=True,
+                            )
                             if any("not anchored" in e for e in errors):
                                 print(
                                     f"[council] v16 anchor rejection sprint={n} "
@@ -6132,13 +6196,19 @@ class AtharCouncilEngine:
                             for e in current_errors
                         )
                         anchor_error = any("not anchored" in e.lower() for e in current_errors)
-                        if single_attempt == 3 and not (numeric_error or anchor_error):
+                        # V19 accidentally skipped attempt 3 for language,
+                        # unsupported-history and wrong-object failures. That is
+                        # exactly the failure reported for the last sprint.
+                        if single_attempt == 3 and not any(
+                            _screen3_v20_repair_profile(current_errors).values()
+                        ):
                             break
                         attempts_total += 1
                         print(
-                            f"[council] v19 focused_repair sprint={n} attempt={single_attempt} "
+                            f"[council] v20 focused_repair sprint={n} attempt={single_attempt} "
                             f"strict_qualitative={single_attempt >= 3 and numeric_error} "
-                            f"context_anchor_repair={anchor_error}",
+                            f"content_rescue={single_attempt >= 3} "
+                            f"repair_profile={_screen3_v20_repair_profile(current_errors)}",
                             flush=True,
                         )
                         try:
@@ -6169,6 +6239,14 @@ class AtharCouncilEngine:
                             break
                         errors_by_sprint[n] = errors
                         rejected_by_sprint[n] = rows[0]
+                        # The exact candidate is visible in private worker logs
+                        # for diagnosis, not returned as a partial suggestion.
+                        print(
+                            f"[council] v20 rejection sprint={n} repair_attempt={single_attempt} "
+                            f"output_text={str(rows[0].get('text') or '')[:240]!r} "
+                            f"results={[(str(r.get('text') or '')[:240]) for r in (rows[0].get('results') or []) if isinstance(r, dict)]!r} "
+                            f"errors={errors[:5]!r}", flush=True,
+                        )
                 if len(validated) != len(numbers):
                     missing = [n for n in numbers if n not in validated]
                     specific_errors = [
@@ -6178,7 +6256,7 @@ class AtharCouncilEngine:
                         for n in missing
                     ]
                     raise ValueError(
-                        f"V19 model output generation failed for sprints {missing} "
+                        f"V20 model output generation failed for sprints {missing} "
                         f"of intervention '{intervention.get('title')}': "
                         + " || ".join(specific_errors[:5])
                     )
@@ -6237,7 +6315,7 @@ class AtharCouncilEngine:
                 prior = candidate_full
                 details.append({"sprints":numbers,"status":"validated"})
             return {"outputs":prior,"raw":""}, {
-                "architecture":"v19-three-sprint-grounded-output-generation",
+                "architecture":"v20-three-sprint-targeted-quality-recovery",
                 "model_calls":attempts_total,
                 "archetype":"model_generated_no_templates",
                 "fallback_sprints":[],"fallback_count":0,
@@ -6423,7 +6501,7 @@ class AtharCouncilEngine:
             result["human_escalation"] = escalation
 
         self._last_meta_debug = {
-            "architecture": "screen3-v19-portfolio-fact-guards",
+            "architecture": "screen3-v20-last-sprint-language-and-history-recovery",
             "meta_advisor_slug": meta["slug"],
             "meta_advisor_name": meta["name"],
             "meta_prompt_path": meta["prompt_path"],
@@ -7522,7 +7600,7 @@ class AtharCouncilEngine:
             if str(request.get("topic") or "").strip() != "interventions":
                 raise ValueError("topic must be interventions.")
 
-            print("[council] code_version=screen3-v19-portfolio-and-fact-guards", flush=True)
+            print("[council] code_version=screen3-v20-last-sprint-content-recovery", flush=True)
             kind = str(request.get("kind") or "generate").strip().lower()
             debug = bool(request.get("debug") or self._payload(request).get("debug"))
             total_start = time.perf_counter()
