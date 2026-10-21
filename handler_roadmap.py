@@ -7,7 +7,9 @@ No additional model instance, LoRA, dataset or third-party library required.
 Contract: Screen 5 (خارطة الطريق) — AI Contract, 2026-10.
 V11 core preserved: deliverable completion checks, focused repairs and transcript checks.
 V12 contract bridge: planned_percent, Screen 3 result shape, and optional
-Meta decision/synthesis/evidence metadata. No changes to model routing or batching.
+Meta decision/synthesis/evidence metadata.
+V12.1: isolate Arabic corruption in publishable fields; repair meta note
+separately without discarding a valid sprint. Restore V11 TASK|text prompts.
 """
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-ROADMAP_CODE_VERSION = "screen5-v12-v11-preserved-contract-bridge"
+ROADMAP_CODE_VERSION = "screen5-v12.1-v11-preserved-field-isolation"
 VALID_UNITS = frozenset(("percent", "number", "multiplier"))
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٫", "01234567890123456789.")
 _ARABIC = re.compile(r"[\u0600-\u06FF]")
@@ -85,6 +87,41 @@ def _require_generated_arabic_quality(raw: str) -> None:
             "Generated Arabic contains corrupted or ungrammatical wording. "
             "Rewrite all tasks and META_MESSAGE in clear Modern Standard Arabic."
         )
+
+
+def _arabic_field_error(value: str) -> str | None:
+    """Check only the field that may enter the published result.
+
+    V11/V12's whole-raw guard rejected a *valid* sprint when an unrelated
+    META_MESSAGE contained a known typo. Do not silently autocorrect model
+    content: repair the exact field with the existing Meta adapter instead.
+    """
+    if _INVALID_SCRIPTS.search(value):
+        return "contains non-Arabic-script text"
+    match = _SUSPECT_ARABIC.search(value)
+    if match:
+        return f"contains suspect Arabic expression {match.group(0)!r}"
+    return None
+
+
+def _sprint_arabic_issues(sprint: dict) -> dict[str, str]:
+    issues: dict[str, str] = {}
+    for key in ("title", "description"):
+        problem = _arabic_field_error(str(sprint.get(key, "")))
+        if problem:
+            issues["card"] = f"Sprint {sprint.get('number')} {key} {problem}"
+            break
+    for row in sprint.get("tasks", []):
+        problem = _arabic_field_error(str(row.get("text", "")))
+        if problem:
+            issues["tasks"] = f"Sprint {sprint.get('number')} task {problem}"
+            break
+    for row in sprint.get("indicators", []):
+        problem = _arabic_field_error(str(row.get("name", "")))
+        if problem:
+            issues["indicators"] = f"Sprint {sprint.get('number')} KPI {problem}"
+            break
+    return issues
 
 
 def _text(value: Any, *, limit: int = 1000, arabic: bool = False) -> str:
@@ -621,9 +658,6 @@ def _meta_system(persona: str) -> str:
         "لا تكتب عدد التوصيات المؤثرة أو المؤجلة أو تقييمًا انطباعيًا لا يمكن التحقق منه. "
         "يُسمح لك باقتراح مستهدفات target رقمية معقولة حتى بلا Benchmarks، لكنها مقترحات تنفيذية وليست حقائق تاريخية. "
         "لا تفترض توفر عدد سنوات أو سجلات أو نسب فعلية لم يذكرها سياق المخرج أو المنظمة؛ استخدم 'البيانات المتاحة' عند غيابها. "
-        "كل مهمة لها planned_percent بين صفر ومئة: اكتب TASK|نص المهمة|100 عند إتمامها خلال السبرينت، "
-        "أو TASK|نص المهمة|40 إذا كان جزءا مخططا عمدا ويمتد لسبرينت آخر. "
-        "المخطط ليس المنجز ولا تصف نسبة فعلية. يمكن قبول صيغة TASK|نص المهمة القديمة للتوافق. "
         "الوحدات المسموحة فقط percent أو number أو multiplier، وpercent من 0 إلى 100 لا 0 إلى 1. "
         "كل مؤشر يبدأ بكلمة نسبة يجب أن تكون وحدته percent، ويبدأ بعدد يجب أن تكون وحدته number. "
         "لا تستخدم عددًا لتمثيل نسبة حتى لو ذكر المستهدف 10%. لا تغيّر معنى المؤشر أو وحدته دون تطابق دقيق. "
@@ -948,8 +982,10 @@ def _repair_sprint_quality(*, council: Any, system: str, sprint: dict, source: d
                              int(os.getenv("ROADMAP_V10_REPAIR_TOKENS", "1150")),
                              sample=(attempt > 0), block_non_arabic_scripts=True)
         try:
-            _require_generated_arabic_quality(raw)
             repaired, note = _parse_quality_repair(raw, fields, sprint)
+            field_issues = _sprint_arabic_issues(repaired)
+            if field_issues:
+                raise RoadmapError("; ".join(field_issues.values()))
             if _INTERNAL_LEAK.search(note):
                 raise RoadmapError("Meta transcript contains internal JSON identifiers")
             _check_council_message(note, {o["advisor_id"] for o in opinions})
@@ -982,7 +1018,7 @@ def _ensure_readable_meta_note(council: Any, system: str, note: str,
     contained an English template variable or a known corrupted expression.
     """
     selected = {x["advisor_id"] for x in opinions}
-    if not _INTERNAL_LEAK.search(note) and not _SUSPECT_META_NOTE.search(note):
+    if not _INTERNAL_LEAK.search(note) and not _SUSPECT_META_NOTE.search(note) and not _arabic_field_error(note):
         _check_council_message(note, selected)
         return note
     for attempt in range(2):
@@ -1002,7 +1038,7 @@ def _ensure_readable_meta_note(council: Any, system: str, note: str,
             if len(lines) != 1:
                 raise RoadmapError("Meta message rewrite must return exactly one line")
             new = _text(lines[0], limit=900, arabic=True)
-            if not new or _INTERNAL_LEAK.search(new) or _SUSPECT_META_NOTE.search(new):
+            if not new or _INTERNAL_LEAK.search(new) or _SUSPECT_META_NOTE.search(new) or _arabic_field_error(new):
                 raise RoadmapError("Meta message still contains internal jargon or corrupted wording")
             _check_council_message(new, selected)
             print("[roadmap] isolated meta transcript rewrite succeeded", flush=True)
@@ -1091,9 +1127,11 @@ def _repair_colliding_tasks(
             block_non_arabic_scripts=True,
         )
         try:
-            _require_generated_arabic_quality(raw)
+            # Preserve valid tasks if only the admin-only note has a typo.
             suggestion, note = _parse_regeneration(raw, "sprint", sprint["tasks"])
             tasks = suggestion["tasks"]
+            for task_row in tasks:
+                _require_generated_arabic_quality(task_row["text"])
             if not 3 <= len(tasks) <= 5:
                 raise RoadmapError("Focused repair must return 3-5 tasks")
             _check_council_message(note, {o["advisor_id"] for o in opinions})
@@ -1184,7 +1222,7 @@ def _write_sprint_batch(
         },
         "required_output_format": (
             f"BEGIN_SPRINT|{rows[0]['number']}\nTITLE|عنوان عربي\nDESCRIPTION|وصف عربي\n"
-            "TASK|مهمة تنفيذية|100\nTASK|مهمة تنفيذية أخرى|100\nTASK|مهمة تنفيذية ثالثة|100\n"
+            "TASK|مهمة تنفيذية\nTASK|مهمة تنفيذية أخرى\nTASK|مهمة تنفيذية ثالثة\n"
             "INDICATOR|مؤشر خاص بالمخرج الأول|number|1\n"
             "INDICATOR|مؤشر مخصص ثان|percent|100\n"
             "INDICATOR|مؤشر مخصص ثالث|number|3\n"
@@ -1215,7 +1253,8 @@ def _write_sprint_batch(
             block_non_arabic_scripts=True,
         )
         try:
-            _require_generated_arabic_quality(raw)
+            # Check publishable fields, not the entire raw model response:
+            # an admin-only META_MESSAGE must not invalidate valid sprint work.
             generated, note = _parse_batch(raw, numbers)
             metadata = _contract_metadata(raw)
             _check_council_message(note, {a["slug"] for a in advisors})
@@ -1252,6 +1291,7 @@ def _write_sprint_batch(
                 # return unrelated actions or recycled generic indicators.
                 # Repair that one card, not the entire 12-week roadmap.
                 quality_issues = _content_quality_issues(generated[index], source.get("output"), prior_rows)
+                quality_issues.update(_sprint_arabic_issues(generated[index]))
                 if quality_issues:
                     repaired, quality_note = _repair_sprint_quality(
                         council=council, system=system, sprint=generated[index],
@@ -1269,6 +1309,12 @@ def _write_sprint_batch(
                 all_notes[0] = {"message": all_notes[0], **metadata}
             return generated, all_notes
         except RoadmapError as exc:
+            # The assigned cards already passed validation and the isolated
+            # admin-only transcript note exhausted its own correction tries.
+            # Regenerating the entire sprint here wastes GPU and can damage
+            # otherwise valid work. Fail explicitly, never return partials.
+            if str(exc) == "Cannot produce a readable meta transcript message":
+                raise
             error = str(exc)
             print(
                 f"[roadmap] generate batch={numbers} attempt={attempt + 1}/{attempts} "
@@ -1357,7 +1403,7 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
         if not isinstance(old, list):
             raise RoadmapError("tasks must be a list")
         old_names = old
-        output_rule = "TASK|مهمة عربية محددة|planned_percent؛ 3 إلى 5 مهام جديدة بالترتيب؛ planned_percent عدد 0..100، 100 للمكتمل خلال الأسبوع."
+        output_rule = "TASK|مهمة عربية، سطر لكل مهمة؛ 3 إلى 5 مهام جديدة مختلفة ومحددة بالترتيب."
     else:
         old = payload.get("indicator")
         other = payload.get("other_indicators", [])
@@ -1429,7 +1475,7 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
                 "بلا توجيهات للخبراء أو رموز أو مسميات استشارية. "
                 "اكتب بالعربية الفصحى السليمة فقط، بلا أحرف كورية أو صينية أو ألفاظ مشوهة، "
                 "وراجع صياغة رسالة META_MESSAGE أيضًا. "
-                "اتبع البروتوكول TASK|المهمة|100 لكل مهمة وMETA_MESSAGE|... في النهاية."
+                "اتبع البروتوكول TASK|المهمة لكل مهمة وMETA_MESSAGE|... في النهاية."
                 if kind == "sprint" else
                 f"ردك السابق رُفض: {error}. أعِد الرد بالبروتوكول المطلوب."
             )
@@ -1440,7 +1486,6 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
             block_non_arabic_scripts=True,
         )
         try:
-            _require_generated_arabic_quality(raw)
             metadata = _contract_metadata(raw)
             try:
                 suggestion, note = _parse_regeneration(raw, kind, old_names)
@@ -1455,10 +1500,13 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
                     raise first_error
             if kind == "sprint":
                 _check_historical_lookback({"tasks": suggestion["tasks"]}, sprint)
+                for row in suggestion["tasks"]:
+                    _require_generated_arabic_quality(row["text"])
             else:
                 _check_indicator_follows_reason(suggestion, reason)
+                _require_generated_arabic_quality(suggestion["name"])
             _check_council_message(note, {a["slug"] for a in advisors})
-            if _INTERNAL_LEAK.search(note) or _SUSPECT_META_NOTE.search(note):
+            if _INTERNAL_LEAK.search(note) or _SUSPECT_META_NOTE.search(note) or _arabic_field_error(note):
                 note = _ensure_readable_meta_note(council, _meta_system(persona), note,
                            [{"number": sprint.get("number", 1),
                              "title": sprint.get("title", "العمل المعتمد")}], opinions)
