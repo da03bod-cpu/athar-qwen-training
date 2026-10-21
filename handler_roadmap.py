@@ -5,24 +5,7 @@ Uses already-loaded Specialist/Meta PEFT adapters via AtharCouncilEngine._genera
 No additional model instance, LoRA, dataset or third-party library required.
 
 Contract: Screen 5 (خارطة الطريق) — AI Contract, 2026-10.
-V11 core preserved: deliverable completion checks, focused repairs and transcript checks.
-V12 contract bridge: planned_percent, Screen 3 result shape, and optional
-Meta decision/synthesis/evidence metadata.
-V12.1: isolate Arabic corruption in publishable fields; repair meta note
-separately without discarding a valid sprint. Restore V11 TASK|text prompts.
-V12.2: distinguish consultant outreach from NGO execution; repair only
-consultant-outreach tasks in a sprint instead of regenerating entire cards.
-V12.3: bounded single-sprint line-grammar recovery with backend-owned numbering;
-retain strict multi-sprint validation and deliverable quality gates.
-V12.4: contract-grounded approval handoff for backend-required approved plans.
-V12.5: detect malformed initial KPIs without aborting sprint parsing; repair
-only indicators, then revalidate the whole sprint strictly before publishing.
-V12.6: when a model repeatedly cannot write usable KPIs, recover only the
-KPI list for explicitly identified file+source-register deliverables; proposals
-come from the backend's exact output, never from invented historical data.
-All unchanged model-generated tasks/card text and hard validation remain.
-Accept natural Arabic submission wording and ensure a human approval-request
-task is present without claiming the plan is already approved.
+V9: focused Meta-only rewrite for cross-sprint task collisions, retaining full-contract validation.
 """
 from __future__ import annotations
 
@@ -34,7 +17,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-ROADMAP_CODE_VERSION = "screen5-v12.6-v11-preserved-grounded-kpi-recovery"
+ROADMAP_CODE_VERSION = "screen5-v9-original-minimal-contract-bridge-s5-only"
 VALID_UNITS = frozenset(("percent", "number", "multiplier"))
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٫", "01234567890123456789.")
 _ARABIC = re.compile(r"[\u0600-\u06FF]")
@@ -48,31 +31,6 @@ _ANY_ADVISOR_ID = re.compile(r"(?<![A-Za-z0-9])AOS-[A-Z]{2,5}-\d{2}(?![A-Za-z0-9
 _ADVISOR_AS_TASK = re.compile(
     r"(?:المستشار(?:ين)?|مستشار(?:ين)?|المستشارة|مستشارة|الخبير(?:ين)?|خبير(?:ين)?)"
 )
-# Mentioning an advisor is not itself a request to CALL one.  The original V11
-# blanket ban rejected legitimate NGO work such as documenting recommendations.
-# These specific actions delegate sprint execution outside the organization.
-_ADVISOR_ACTOR = r"(?:المستشار(?:ون|ين|ات)?|مستشار(?:ون|ين|ات)?|المستشارة|مستشارة|الخبير(?:ون|ين|ات)?|خبير(?:ون|ين|ات)?|الخبراء|خبراء)"
-_ADVISOR_OUTREACH = re.compile(
-    r"(?:"
-    r"(?:التواصل|تواصل|الاتصال|اتصل|التنسيق|تنسيق|التشاور|تشاور|المراسلة|مراسلة|"
-    r"استدعاء|استدعي|استشارة|استشر|استعانة|الاستعانة|دعوة|تكليف|مقابلة|اجتماع|عقد\s+اجتماع)"
-    r"\s+(?:(?:مع|إلى|الى|ب|لدى|لـ|من|على)\s*)?" + _ADVISOR_ACTOR +
-    r"|(?:طلب|الحصول\s+على|استطلاع)\s+(?:رأي|مشورة|استشارة|موافقة|توجيهات|توصيات?)"
-    r"(?:\s+من|\s+لدى)?\s+" + _ADVISOR_ACTOR +
-    r"|(?:إرسال|ارسال|عرض|رفع)\s+.{0,45}?(?:إلى|الى|على|لـ)\s*" + _ADVISOR_ACTOR +
-    r"|(?:مراجعة|نقاش|مناقشة|تقييم)\s+.{0,40}?(?:مع|بمشاركة)\s*" + _ADVISOR_ACTOR +
-    r")"
-)
-
-
-def _advisor_task_issue(value: str) -> str | None:
-    """Only reject consultant-dependent actions or AOS IDs in NGO task text."""
-    if _ANY_ADVISOR_ID.search(value):
-        return "Task includes an advisor ID instead of an NGO action"
-    if _ADVISOR_OUTREACH.search(value):
-        return "Task delegates execution to calling/consulting an advisor, not an NGO action"
-    return None
-
 _WEAK_INDICATOR = re.compile(r"(?:التوصيات\s+المؤجلة|التوصيات\s+المؤثرة|التغطية\s+المؤقتة\s+للتمويل)")
 # A structurally valid unit can still contradict the Arabic indicator label.
 # Refuse ambiguous/incorrect model output rather than altering its semantics.
@@ -125,41 +83,6 @@ def _require_generated_arabic_quality(raw: str) -> None:
             "Generated Arabic contains corrupted or ungrammatical wording. "
             "Rewrite all tasks and META_MESSAGE in clear Modern Standard Arabic."
         )
-
-
-def _arabic_field_error(value: str) -> str | None:
-    """Check only the field that may enter the published result.
-
-    V11/V12's whole-raw guard rejected a *valid* sprint when an unrelated
-    META_MESSAGE contained a known typo. Do not silently autocorrect model
-    content: repair the exact field with the existing Meta adapter instead.
-    """
-    if _INVALID_SCRIPTS.search(value):
-        return "contains non-Arabic-script text"
-    match = _SUSPECT_ARABIC.search(value)
-    if match:
-        return f"contains suspect Arabic expression {match.group(0)!r}"
-    return None
-
-
-def _sprint_arabic_issues(sprint: dict) -> dict[str, str]:
-    issues: dict[str, str] = {}
-    for key in ("title", "description"):
-        problem = _arabic_field_error(str(sprint.get(key, "")))
-        if problem:
-            issues["card"] = f"Sprint {sprint.get('number')} {key} {problem}"
-            break
-    for row in sprint.get("tasks", []):
-        problem = _arabic_field_error(str(row.get("text", "")))
-        if problem:
-            issues["tasks"] = f"Sprint {sprint.get('number')} task {problem}"
-            break
-    for row in sprint.get("indicators", []):
-        problem = _arabic_field_error(str(row.get("name", "")))
-        if problem:
-            issues["indicators"] = f"Sprint {sprint.get('number')} KPI {problem}"
-            break
-    return issues
 
 
 def _text(value: Any, *, limit: int = 1000, arabic: bool = False) -> str:
@@ -232,36 +155,29 @@ def _indicator(data: Any) -> dict:
 
 
 def _planned_percent(value: Any) -> int:
-    """Weekly task completion proposal; never an achieved percentage.
-
-    Legacy V11 model replies wrote TASK|text, which means the model planned an
-    entire executable five-day task. Preserve their meaning with a default of
-    100. New TASK|text|percent replies may expressly choose a partial stage.
+    """Use a 100% weekly completion proposal for V9 TASK|text rows;
+    preserve explicit percentages when supplied by newer model outputs.
     """
-    if value is None or value == "":
+    if value is None or isinstance(value, bool):
         return 100
-    if isinstance(value, bool):
-        raise RoadmapError("Task planned_percent must be a whole number 0..100")
     try:
         numeric = float(str(value).strip().translate(_ARABIC_DIGITS))
     except (TypeError, ValueError):
-        raise RoadmapError("Task planned_percent is not numeric") from None
-    if not math.isfinite(numeric) or not 0 <= numeric <= 100:
-        raise RoadmapError("Task planned_percent outside 0..100")
-    return int(math.floor(numeric + 0.5))
+        return 100
+    return round(numeric) if math.isfinite(numeric) and 0 <= numeric <= 100 else 100
 
 
-def _task_line(value: str) -> dict:
-    """Both original V11 TASK|Arabic and new TASK|Arabic|40 are accepted."""
-    if "|" in value:
-        phrase, sep, maybe_percent = value.rpartition("|")
-        if sep and re.fullmatch(r"[0-9٠-٩۰-۹]{1,3}(?:[.٫][0-9٠-٩۰-۹]+)?", maybe_percent.strip()):
-            return {"text": phrase, "planned_percent": _planned_percent(maybe_percent)}
-    return {"text": value, "planned_percent": 100}
+def _parse_task_line(value: str) -> dict:
+    """Backwards compatible: original TASK|text; optionally TASK|text|percent."""
+    parts = value.rsplit("|", 1)
+    if len(parts) == 2 and re.fullmatch(r"\d{1,3}(?:\.\d+)?", parts[1].strip()):
+        val = float(parts[1].strip())
+        if 0 <= val <= 100:
+            return {"text": parts[0], "planned_percent": round(val)}
+    return {"text": value}
 
 
-def _validate_tasks(tasks: Any, *, minimum: int = 1,
-                    allow_advisor_outreach_for_repair: bool = False) -> list[dict]:
+def _validate_tasks(tasks: Any, *, minimum: int = 1) -> list[dict]:
     if not isinstance(tasks, list) or not minimum <= len(tasks) <= 8:
         raise RoadmapError("Tasks list length invalid")
     out = []
@@ -270,11 +186,9 @@ def _validate_tasks(tasks: Any, *, minimum: int = 1,
         clean = _text(value, limit=360, arabic=True)
         if not clean:
             raise RoadmapError("Empty/invalid task text")
-        issue = _advisor_task_issue(clean)
-        if issue and not allow_advisor_outreach_for_repair:
-            raise RoadmapError(issue)
-        percent = _planned_percent(row.get("planned_percent") if isinstance(row, dict) else None)
-        out.append({"text": clean, "planned_percent": percent})
+        if _ANY_ADVISOR_ID.search(clean) or _ADVISOR_AS_TASK.search(clean):
+            raise RoadmapError("Task is about calling an advisor, not an executable NGO action")
+        out.append({"text": clean, "planned_percent": _planned_percent(row.get("planned_percent") if isinstance(row, dict) else None)})
     if len({_norm(x["text"]) for x in out}) != len(out):
         raise RoadmapError("Duplicate tasks in sprint")
     return out
@@ -284,9 +198,7 @@ def _norm(value: str) -> str:
     return re.sub(r"\s+", " ", str(value).strip()).casefold()
 
 
-def _validate_sprint(row: Any, number: int, *,
-                     allow_advisor_outreach_for_repair: bool = False,
-                     allow_invalid_indicators_for_repair: bool = False) -> dict:
+def _validate_sprint(row: Any, number: int) -> dict:
     if not isinstance(row, dict) or _required_number(row.get("number")) != number:
         raise RoadmapError(f"Missing or wrong sprint number {number}")
     title = _text(row.get("title"), limit=130, arabic=True)
@@ -296,25 +208,14 @@ def _validate_sprint(row: Any, number: int, *,
     if _ANY_ADVISOR_ID.search(title + " " + desc):
         raise RoadmapError(f"Sprint {number} title/description contains advisor ID")
     # Contract design target: approximately 3-5 tasks and indicators per sprint.
-    tasks = _validate_tasks(row.get("tasks"), minimum=3,
-        allow_advisor_outreach_for_repair=allow_advisor_outreach_for_repair)
+    tasks = _validate_tasks(row.get("tasks"), minimum=3)
     if len(tasks) > 5:
         raise RoadmapError(f"Sprint {number} should have 3-5 tasks")
     inds = row.get("indicators")
     if not isinstance(inds, list) or not 3 <= len(inds) <= 5:
         raise RoadmapError(f"Sprint {number} should have 3-5 indicators")
-    indicators = []
-    for x in inds:
-        if (allow_invalid_indicators_for_repair and isinstance(x, dict)
-                and x.get("_roadmap_invalid_indicator_error")):
-            # Internal-only incomplete field. This sprint MUST go through the
-            # indicator-only model repair before ANY public response.
-            indicators.append(x)
-        else:
-            indicators.append(_indicator(x))
-    valid_names = [_norm(x["name"]) for x in indicators
-                   if not x.get("_roadmap_invalid_indicator_error")]
-    if len(set(valid_names)) != len(valid_names):
+    indicators = [_indicator(x) for x in inds]
+    if len({_norm(x["name"]) for x in indicators}) != len(indicators):
         raise RoadmapError(f"Sprint {number} has duplicate indicators")
     return {"number": number, "title": title, "description": desc,
             "tasks": tasks, "indicators": indicators}
@@ -400,32 +301,22 @@ def _input(request: dict) -> dict:
     return data
 
 
-def _normalize_output(value: Any) -> dict | None:
-    """Bridge Screen-3 result objects to Screen-5 string results.
-
-    The backend owns output assignment; this copy is for model context only.
-    Do not rewrite the backend's output or return it in suggestion.
-    """
-    if value is None:
-        return None
-    if not isinstance(value, dict):
-        raise RoadmapError("Sprint output must be an object or null")
-    results = value.get("results")
-    if results is None:
-        results = []
-    if not isinstance(results, list):
-        raise RoadmapError("Sprint output.results must be a list")
-    normalized = []
-    for result in results:
-        candidate = result.get("text") if isinstance(result, dict) else result
-        if not isinstance(candidate, str) or not candidate.strip():
-            raise RoadmapError("Sprint output result must contain nonempty text")
-        normalized.append(candidate.strip())
-    return {**value, "results": normalized}
+def _normalize_result_texts(value: Any) -> Any:
+    """Non-mutating Screen 3 -> Screen 5 bridge for results:[{text}] and results:[str]."""
+    if isinstance(value, list):
+        return [_normalize_result_texts(x) for x in value]
+    if isinstance(value, dict):
+        return {key: (
+            [r.get("text", "") if isinstance(r, dict) else r for r in raw]
+            if key == "results" and isinstance(raw, list)
+            else _normalize_result_texts(raw)
+        ) for key, raw in value.items()}
+    return value
 
 
 def _output_key(value: Any) -> str:
-    return _json(_normalize_output(value)) if value is not None else "null"
+    value = _normalize_result_texts(value)
+    return _json(value) if value is not None else "null"
 
 
 def _validate_generate_request(payload: dict) -> list[dict]:
@@ -441,22 +332,18 @@ def _validate_generate_request(payload: dict) -> list[dict]:
         if number in numbers:
             raise RoadmapError(f"Duplicate sprint {number}")
         numbers.add(number)
-        item_output = _normalize_output(row.get("output"))
-        output.append({"number": number, "output": item_output})
+        item_output = row.get("output")
+        if item_output is not None and not isinstance(item_output, dict):
+            raise RoadmapError("Sprint output must be an object or null")
+        output.append({"number": number, "output": _normalize_result_texts(item_output)})
     return sorted(output, key=lambda x: x["number"])
 
 
 def _context(data: dict, rows: list[dict] | None = None) -> dict:
     p = data["payload"]
-    context = {k: p.get(k) for k in (
+    return {k: _normalize_result_texts(p.get(k)) for k in (
         "organization", "programs", "track", "goal", "impact_map", "intervention"
-    )}
-    intervention = context.get("intervention")
-    if isinstance(intervention, dict) and isinstance(intervention.get("outputs"), list):
-        context["intervention"] = {**intervention, "outputs": [
-            _normalize_output(output) for output in intervention["outputs"]
-        ]}
-    return context | ({"sprints": rows} if rows is not None else {})
+    )} | ({"sprints": _normalize_result_texts(rows)} if rows is not None else {})
 
 
 def _specialist_messages(council: Any, data: dict, advisors: list[dict], context: dict) -> tuple[list[dict], list[dict]]:
@@ -538,86 +425,7 @@ def _parse_indicator_line(line: str) -> dict:
                        "unit": segments[-2].strip(), "target": segments[-1].strip()})
 
 
-def _single_sprint_lexical_anchor(sprint: dict, output: Any) -> bool:
-    """Conservative recovery gate: match a real deliverable, not a sprint ID.
-
-    Required only when repairing a lost/wrong model-generated sprint number.
-    The backend-provided output assignment remains authoritative. We deliberately
-    disallow recovery for null/underspecified outputs, and do not synthesize text.
-    """
-    if not isinstance(output, dict):
-        return False
-    output_text = output.get("text")
-    if not isinstance(output_text, str) or not output_text.strip():
-        return False
-    def keywords(value: str) -> set[str]:
-        value = re.sub(r"[\u064B-\u065F\u0670]", "", str(value))
-        value = re.sub(r"[^\u0621-\u064A]+", " ", value)
-        skip = {"إعداد", "اعداد", "بناء", "كتابة", "عمل", "خطة", "تقرير", "سجل",
-                "دليل", "نموذج", "مخرجات", "المخرجات", "وثيقة", "نتائج", "بيانات",
-                "برنامج", "جمعية", "مراجعة", "اعتماد", "معتمد", "معتمدة", "خاص"}
-        words = set()
-        for word in value.split():
-            if word.startswith("ال") and len(word) > 5:
-                word = word[2:]
-            if len(word) >= 4 and word not in skip:
-                words.add(word)
-        return words
-    expected = keywords(output_text)
-    written = keywords(" ".join([sprint["title"], sprint["description"],
-        *[x["text"] for x in sprint["tasks"]],
-        *[x["name"] for x in sprint["indicators"]]]))
-    if len(expected) < 2 or len(expected & written) < 2:
-        return False
-    return not _content_quality_issues(sprint, output, []) and not _sprint_arabic_issues(sprint)
-
-
-def _single_sprint_line_normalization(raw: str, numbers: list[int]) -> str:
-    """Normalize formatting of ONE requested sprint, without rewriting content.
-
-    Recognize minor delimiter variations. When a model omits both block markers,
-    recover only a complete, unique TITLE/DESCRIPTION/TASK/INDICATOR/META set.
-    Multi-sprint requests are untouched.
-    """
-    if len(numbers) != 1:
-        return raw
-    lines = []
-    for line in _lines(raw):
-        line = re.sub(r"^(BEGIN_SPRINT|TITLE|DESCRIPTION|TASK|INDICATOR|META_MESSAGE)\s*[:=]\s*",
-                      r"\1|", line)
-        line = re.sub(r"^(BEGIN_SPRINT|TITLE|DESCRIPTION|TASK|INDICATOR|META_MESSAGE)\s+\|\s*",
-                      r"\1|", line)
-        line = re.sub(r"^END_SPRINT\s*[:;.]?$", "END_SPRINT", line)
-        lines.append(line)
-    # Only a complete ONE-card response may have its missing markers restored.
-    # Incomplete outputs and ambiguous multiple cards still fail normally.
-    begins = [i for i, x in enumerate(lines) if x.startswith("BEGIN_SPRINT|")]
-    if len(begins) <= 1 and (sum(x.startswith("TITLE|") for x in lines) == 1 and
-        sum(x.startswith("DESCRIPTION|") for x in lines) == 1 and
-        3 <= sum(x.startswith("TASK|") for x in lines) <= 5 and
-        3 <= sum(x.startswith("INDICATOR|") for x in lines) <= 5 and
-        any(x.startswith("META_MESSAGE|") for x in lines)):
-        if not begins:
-            start = next(i for i, x in enumerate(lines) if x.startswith("TITLE|"))
-            lines.insert(start, f"BEGIN_SPRINT|{numbers[0]}")
-            print(f"[roadmap] v12.3 single_sprint_start_marker_restored "
-                  f"expected={numbers[0]}", flush=True)
-        begins = [i for i, x in enumerate(lines) if x.startswith("BEGIN_SPRINT|")]
-        if len(begins) == 1 and "END_SPRINT" not in lines[begins[0] + 1:]:
-            closing = next((i for i in range(begins[0] + 1, len(lines))
-                            if lines[i].startswith("META_MESSAGE|")), -1)
-            if closing != -1:
-                lines.insert(closing, "END_SPRINT")
-                print(f"[roadmap] v12.3 single_sprint_end_marker_restored "
-                      f"expected={numbers[0]}", flush=True)
-    return "\n".join(lines)
-
-
-def _parse_batch(raw: str, numbers: list[int], *,
-                 allow_advisor_outreach_for_repair: bool = False,
-                 allow_invalid_indicators_for_repair: bool = False,
-                 single_sprint_source: Any = None) -> tuple[list[dict], str]:
-    raw = _single_sprint_line_normalization(raw, numbers) if single_sprint_source is not None else raw
+def _parse_batch(raw: str, numbers: list[int]) -> tuple[list[dict], str]:
     sprints, current, meta_message = [], None, ""
     for line in _lines(raw):
         if line.startswith("BEGIN_SPRINT|"):
@@ -629,10 +437,7 @@ def _parse_batch(raw: str, numbers: list[int], *,
         if line == "END_SPRINT":
             if current is None:
                 raise RoadmapError("END_SPRINT without BEGIN_SPRINT")
-            sprints.append(_validate_sprint(
-                current, current["number"],
-                allow_advisor_outreach_for_repair=allow_advisor_outreach_for_repair,
-                allow_invalid_indicators_for_repair=allow_invalid_indicators_for_repair))
+            sprints.append(_validate_sprint(current, current["number"]))
             current = None
             continue
         if line.startswith("META_MESSAGE|"):
@@ -650,50 +455,24 @@ def _parse_batch(raw: str, numbers: list[int], *,
         elif key == "DESCRIPTION":
             current["description"] = val
         elif key == "TASK":
-            current["tasks"].append(_task_line(val))
+            current["tasks"].append(_parse_task_line(val))
         elif key == "INDICATOR":
             try:
                 current["indicators"].append(_parse_indicator_line(line))
             except RoadmapError as exc:
-                # V12.5: A structurally complete sprint can contain an invalid
-                # model-written KPI. Preserve its raw fields ONLY inside the
-                # current Generate operation, then repair indicators alone.
-                # Strict parse paths (e.g. regenerate) still reject it here.
+                # Name the exact sprint and offending line in the *repair*
+                # instruction. V6 only forwarded a generic validation error,
+                # which caused the Meta model to repeat the same weak KPI.
                 indicator_name = _text("|".join(line.split("|")[1:-2]), limit=160)
-                if not allow_invalid_indicators_for_repair:
-                    raise RoadmapError(
-                        f"Sprint {current['number']} indicator {indicator_name!r}: {exc}"
-                    ) from exc
-                segments = line.split("|")
-                current["indicators"].append({
-                    "name": indicator_name,
-                    "unit": segments[-2].strip() if len(segments) >= 4 else "",
-                    "target": segments[-1].strip() if len(segments) >= 4 else "",
-                    "_roadmap_invalid_indicator_error": str(exc),
-                })
-                print(f"[roadmap] v12.5 malformed_kpi_detected "
-                      f"sprint={current['number']} position={len(current['indicators'])} "
-                      f"reason={str(exc)[:140]}", flush=True)
+                raise RoadmapError(
+                    f"Sprint {current['number']} indicator {indicator_name!r}: {exc}"
+                ) from exc
         else:
             raise RoadmapError("Unknown sprint output field")
     if current is not None:
         raise RoadmapError("Unclosed sprint block")
-    actual_numbers = [x["number"] for x in sprints]
-    if actual_numbers != numbers:
-        # On a one-card request, only the backend has authority to assign the
-        # sprint number. The model may label the ONLY complete card incorrectly;
-        # map it to the requested slot solely when its content is grounded in
-        # the assigned output. Never renumber multi-card responses.
-        if (single_sprint_source is not None and len(numbers) == len(sprints) == 1
-            and _single_sprint_lexical_anchor(sprints[0], single_sprint_source)):
-            print(f"[roadmap] v12.3 single_sprint_number_recovered "
-                  f"expected={numbers[0]} model={actual_numbers[0]}", flush=True)
-            sprints[0]["number"] = numbers[0]
-        else:
-            raise RoadmapError(
-                f"Sprint block numbers do not match: expected {numbers}, "
-                f"parsed {actual_numbers} (recognized_blocks={len(sprints)}, "
-                f"nonempty_response={bool(raw.strip())})")
+    if [x["number"] for x in sprints] != numbers:
+        raise RoadmapError(f"Sprint block numbers do not match: expected {numbers}")
     if not meta_message:
         raise RoadmapError("Meta Advisor message missing")
     return sprints, meta_message
@@ -705,7 +484,7 @@ def _parse_regeneration(raw: str, kind: str, existing: Any) -> tuple[dict, str]:
         if line.startswith("META_MESSAGE|"):
             message = _text(line.partition("|")[2], limit=1100, arabic=True)
         elif kind == "sprint" and line.startswith("TASK|"):
-            tasks.append(_task_line(line.partition("|")[2]))
+            tasks.append(_parse_task_line(line.partition("|")[2]))
         elif kind == "sprint_indicator" and line.startswith("INDICATOR|"):
             if indicator is not None:
                 raise RoadmapError("Regeneration returned multiple indicators")
@@ -758,13 +537,13 @@ def _recover_valid_task_subset(raw: str, existing: list[Any]) -> tuple[dict, str
     notes = [x for x in notes if x]
     if not notes:
         raise RoadmapError("Meta Advisor message missing")
-    task_lines = [line.partition("|")[2] for line in lines if line.startswith("TASK|")]
+    task_lines = [_parse_task_line(line.partition("|")[2]) for line in lines if line.startswith("TASK|")]
     if not task_lines:
         raise RoadmapError("No tasks to recover")
     valid, seen = [], set()
     for candidate in task_lines:
         try:
-            task = _validate_tasks([_task_line(candidate)])[0]
+            task = _validate_tasks([candidate])[0]
         except RoadmapError:
             continue
         key = _norm(task["text"])
@@ -829,528 +608,67 @@ def _meta_system(persona: str) -> str:
         "لا تذكر أي مستشار داخل رسائل المجلس إلا برمز slug صحيح لمستشار وارد في advisors الذين ساهموا، "
         "واكتب صوت الميتا بصيغة meta_advisor؛ لا تختلق مستشارين جدد. "
         "اكتب عربية فصحى سليمة وخالية من الكلمات الكورية والصينية والألفاظ المحرّفة أو الركيكة. "
-        "لا تكتب الحقول الداخلية output.text أو output.results أو outputs/indicators أو رموز track داخل النص العربي. "
-        "ممنوع المؤشرات العامة المنسوخة مثل عدد مخرجات العمل الموثقة أو عدد العناصر المنجزة؛ "
-        "اكتب مؤشرات تحمل اسم الشيء المطلوب في المخرج، ومهمة تنتهي بصياغته أو تسليمه. "
-        "لا تخرج عن مخرج السبرينت المعين من النظام أو توصي بأعمال تتبع مخرجات مختلفة. "
         "تأكد من سلامة المهام وعناوينها وMETA_MESSAGE؛ لا تُخرج JSON. التزم ببروتوكول السطور حرفيًا."
     )
 
 
-# This is the only deliberate deterministic KPI rescue class in V12.6.
-# It requires BOTH independently named components in the backend-assigned
-# sprint output.  It never assumes an observed outcome or historic value.
-# Values 1 and 100 are *proposed weekly targets* (per Screen 5 contract).
-def _is_initial_data_file_with_source_register(output: Any) -> bool:
-    if not isinstance(output, dict):
-        return False
-    source = _text(output.get("text"), limit=1000)
-    if not source:
-        return False
-    return (bool(re.search(r"(?:ملف\s+(?:ال)?بيانات|الملف\s+(?:ال)?بيانات)", source))
-            and bool(re.search(r"(?:سجل\s+(?:ال)?مصدر|سجل\s+مصادر|توثيق\s+مصادر|سجل\s+للمصادر)", source)))
+def _indicator_examples_for_output(output: Any) -> list[str]:
+    """Ground repair examples in the assigned output, never in invented facts.
 
-
-def _concrete_data_file_kpis() -> list[dict]:
-    """Measurable plans, not actual beneficiary/funding/performance claims."""
+    These are *illustrative strings in the prompt*; we never insert them into
+    the returned JSON. The model must actually generate and pass validation.
+    """
+    title = _text((output or {}).get("text"), limit=500) if isinstance(output, dict) else ""
+    if "ختامي" in title or "متابعة" in title:
+        return [
+            "عدد التقارير الختامية المعدة|number|1",
+            "نسبة اكتمال إعداد خطة المتابعة|percent|100",
+            "عدد إجراءات المتابعة المحددة والموثقة|number|3",
+        ]
+    if "تقييم" in title or "الدروس" in title:
+        return [
+            "عدد تقارير تقييم الإجراءات المعدة|number|1",
+            "نسبة اكتمال توثيق نتائج الإجراءات|percent|100",
+            "عدد الدروس المستفادة الموثقة|number|3",
+        ]
+    if "لوحة" in title or "مؤشر" in title:
+        return [
+            "عدد المؤشرات المعرفة والموثقة|number|3",
+            "نسبة اكتمال إعداد لوحة المؤشرات|percent|100",
+            "عدد مصادر البيانات المربوطة بالمؤشرات|number|2",
+        ]
+    if "تقرير" in title:
+        return [
+            "عدد التقارير المعدة|number|1",
+            "نسبة اكتمال توثيق بيانات التقرير|percent|100",
+            "عدد النتائج المسجلة في التقرير|number|3",
+        ]
     return [
-        {"name": "عدد ملفات البيانات الأولية المنشأة", "unit": "number", "target": 1},
-        {"name": "عدد سجلات توثيق مصادر القيم المنشأة", "unit": "number", "target": 1},
-        {"name": "نسبة القيم المدخلة ذات مصدر موثق", "unit": "percent", "target": 100},
+        "نسبة اكتمال إعداد المخرج|percent|100",
+        "عدد عناصر المخرج المكتملة|number|3",
+        "عدد العناصر المراجعة والموثقة|number|3",
     ]
 
 
-def _try_backend_grounded_kpi_recovery(*, sprint: dict, output: Any,
-                                       previous: list[dict], fields: set[str]) -> dict | None:
-    """Final field-only rescue.  Refuse outputs not grounded in the two artifacts.
-
-    No generated task, title, description or admin decision is substituted.
-    If *anything else* is wrong, the existing strict failure remains in force.
-    """
-    if fields != {"indicators"} or not _is_initial_data_file_with_source_register(output):
-        return None
-    # The tasks MUST actually produce both explicit backend artifacts.  A
-    # finance plan or consultant-call task cannot be rescued with nice KPIs.
-    task_texts = [row.get("text", "") for row in sprint.get("tasks", [])]
-    action = re.compile(r"(?:إعداد|اعداد|أعد|اعد|إنشاء|انشاء|أنشئ|انشئ|"
-                        r"تجهيز|جهز|سجل|تسجيل|إضافة|اضافة|أدخل|ادخال|ربط|اربط|توثيق|وثق)")
-    has_file = any(action.search(t) and re.search(r"(?:ملف|البيانات)", t)
-                   for t in task_texts)
-    has_provenance = any(action.search(t) and re.search(r"(?:مصدر|المصادر|مصادر|سجل)", t)
-                         for t in task_texts)
-    if not (has_file and has_provenance):
-        return None
-    candidate = {**sprint, "indicators": [_indicator(k) for k in _concrete_data_file_kpis()]}
-    try:
-        candidate = _validate_sprint(candidate, sprint["number"])
-        if _sprint_arabic_issues(candidate):
-            return None
-        if _content_quality_issues(candidate, output, previous):
-            return None
-        _check_recent_history(candidate, previous)
-    except RoadmapError:
-        return None
-    return candidate
-
-
-def _indicator_examples_for_output(output: Any) -> list[str]:
-    """Output-specific examples, never generic placeholder KPIs."""
-    if _is_initial_data_file_with_source_register(output):
-        return [f"{k['name']}|{k['unit']}|{k['target']}" for k in _concrete_data_file_kpis()]
-    profile = _profile_for_output(output)
-    if profile:
-        return profile["examples"]
-    title = _text((output or {}).get("text"), limit=200) if isinstance(output, dict) else ""
-    return [f"عدد بنود «{title}» الموثقة|number|3"] if title else []
-
-
 def _execution_focus_for_output(output: Any) -> str:
-    """Offer grounded, output-type-specific execution guidance."""
-    profile = _profile_for_output(output)
-    if profile:
-        return profile["focus"]
-    name = _text(output.get("text"), limit=180) if isinstance(output, dict) else ""
-    return (f"أنتج المخرج المحدد «{name}» من بيانات الجمعية، واعرض خطوة تسليم واضحة."
-            if name else "نفذ العمل المناسب لهدف الجمعية من دون افتراض مخرجات مفقودة.")
-
-
-# Screen 5 V10: classify only from the Backend-assigned output, never invent
-# a new output, phase or result. The examples are guidance for the Meta model,
-# not hard-coded response content.
-_INTERNAL_LEAK = re.compile(
-    r"(?i)(?:\boutputs?\s*[./]\s*(?:text|results|indicators)\b|"
-    r"\boutput\s*(?:[0-9]+|\.|/)|\bfinancial[-_]sustainability\b|"
-    r"\b(?:payload|indicators|results)\s*[./]\s*(?:text|name|unit|target)\b|"
-    r"\b(?:output|outputs|results|indicators|payload|track)\b)"
-)
-_GENERIC_KPI = frozenset({
-    "عدد مخرجات العمل الموثقة", "نسبة اكتمال توثيق المخرج", "عدد العناصر المنجزة",
-    "نسبة اكتمال إعداد المخرج", "عدد عناصر المخرج المكتملة", "عدد العناصر المراجعة والموثقة",
-    "عدد التقارير المعدة", "عدد النتائج المسجلة في التقرير",
-})
-
-# Priority matters: 'تقرير ختامي' must be classified before 'تقرير'.
-_OUTPUT_PROFILES = (
-    ("final", ("ختامي",), ("تقرير", "ختامي", "متابعة", "خطة"),
-     ("تقرير", "الخطة", "المتابعة", "الختامي"),
-     ("عدد التقارير الختامية المعدة|number|1", "نسبة اكتمال خطة المتابعة|percent|100", "عدد إجراءات المتابعة المجدولة|number|3"),
-     "أنجز التقرير الختامي اعتمادًا على تقييم سابق، وأعد خطة متابعة مستقلة تتضمن إجراءات ومواعيد وآلية مراجعة؛ لا تكتف بكتابة التقرير أو جدوله الزمني."),
-    ("evaluating", ("تقييم",), ("تقييم", "نتائج", "تقرير", "دروس"),
-     ("التقييم", "نتائج", "الأدلة", "الدروس"),
-     ("عدد تقارير تقييم التنفيذ المعدة|number|1", "نسبة توثيق نتائج الإجراءات|percent|100", "عدد الدروس المستفادة المسجلة|number|3"),
-     "وثق الأدلة ونتائج الإجراءات، ثم أعد تقرير تقييم وخلاصة دروس مستفادة."),
-    ("offers", ("عروض", "شراكة"), ("عروض", "عرض", "شراكة", "شركاء"),
-     ("العروض", "عرض", "الشركاء", "الشراكة"),
-     ("عدد عروض الشراكة الجاهزة|number|2", "نسبة اكتمال محتوى عروض الشراكة|percent|100", "عدد عروض الشراكة المراجعة|number|2"),
-     "اجمع عناصر القيمة المقترحة للشريك، وصغ عرضًا قابلًا للتخصيص، ثم راجع حزمة العروض النهائية."),
-    ("dashboard", ("لوحة", "مؤشر"), ("لوحة", "مؤشرات", "بيانات"),
-     ("اللوحة", "المؤشرات", "البيانات"),
-     ("عدد مؤشرات الاستدامة المعرّفة|number|4", "نسبة اكتمال لوحة المتابعة|percent|100", "عدد مصادر بيانات المؤشرات الموثقة|number|3"),
-     "حدّد تعريف كل مؤشر ومصدره وطريقة تحديثه، ثم أنشئ أو صمّم لوحة مؤشرات قابلة للاستخدام مع طريقة تحديثها؛ تحديد المؤشرات وحده لا ينجز المخرج."),
-    ("pilot", ("تجربة",), ("تجربة", "نتائج", "قناة", "اختبار"),
-     ("التجربة", "القناة", "نتائج", "اختبار"),
-     ("عدد التجارب التجريبية المنفذة|number|1", "عدد نتائج اختبار قناة التمويل الموثقة|number|3", "نسبة اكتمال توثيق التجربة|percent|100"),
-     "حدد نطاق تجربة صغيرة لقناة التمويل، نفذ الخطوات الممكنة، وقس النتائج ووثّقها؛ لا تكتف بإعادة كتابة التوصية."),
-    ("guide", ("دليل", "إجراءات"), ("دليل", "إجراءات", "خطوات", "موافقات"),
-     ("الدليل", "الإجراءات", "الخطوات", "الموافقات"),
-     ("عدد إجراءات تنمية الموارد الموثقة|number|5", "نسبة اكتمال مسودة دليل الإجراءات|percent|100", "عدد خطوات الموافقة المراجعة|number|3"),
-     "ارسم تسلسل الإجراءات وحدد النماذج والموافقات والضوابط ثم أعد دليلًا قابلًا للتطبيق."),
-    ("campaign", ("حملة",), ("حملة", "قنوات", "رسائل", "محتوى"),
-     ("الحملة", "القنوات", "الرسائل", "المحتوى"),
-     ("عدد رسائل الحملة التمويلية المُعدّة|number|3", "عدد قنوات الحملة المحددة|number|2", "نسبة اكتمال خطة الحملة الرقمية|percent|100"),
-     "اختر القنوات، وصغ الرسائل والمحتوى، وحدّد جدول الحملة ومؤشرات متابعتها؛ جهّز خطة قابلة للتنفيذ."),
-    ("cashflow", ("تدفقات",), ("نموذج", "تدفقات", "النقدية", "توقع"),
-     ("التدفقات", "النقدية", "النموذج", "التوقع"),
-     ("عدد نماذج توقع التدفقات النقدية المعدة|number|1", "نسبة اكتمال بيانات التدفقات النقدية|percent|100", "عدد فترات التوقع المدرجة|number|3"),
-     "صنّف التدفقات الداخلة والخارجة المتاحة، وابنِ نموذج توقع وراجع الفجوات التمويلية."),
-    ("matrix", ("مصفوفة",), ("مصفوفة", "جدوى", "معايير", "تقييم"),
-     ("المصفوفة", "الجدوى", "المعايير", "التقييم"),
-     ("عدد معايير تقييم الجدوى المحددة|number|4", "عدد مصادر الإيرادات المقيّمة|number|3", "نسبة اكتمال مصفوفة الجدوى|percent|100"),
-     "حدّد معايير الجدوى، وقارن فرص الإيراد، ووثّق ترتيبها في مصفوفة قرار."),
-    ("partnerships", ("فرص", "شراكات"), ("قائمة", "فرص", "شراكات", "تواصل"),
-     ("القائمة", "الفرص", "الشراكات", "الجهات"),
-     ("عدد فرص الشراكات التمويلية المحصورة|number|5", "عدد جهات الشراكة المصنفة|number|3", "نسبة اكتمال قائمة فرص الشراكات|percent|100"),
-     "احصر فرص الشراكات الملائمة وصنّف الجهات، ثم أعد قائمة بالفرص ورسائل تواصل أولية."),
-    ("income_plan", ("خطة", "تنويع"), ("خطة", "تنويع", "دخل", "اعتماد"),
-     ("الخطة", "التنويع", "الدخل", "الاعتماد"),
-     ("عدد مصادر الدخل البديلة المقترحة|number|3", "نسبة اكتمال صياغة خطة التنويع|percent|100", "عدد عناصر خطة الدخل المعتمدة|number|3"),
-     "حوّل التحليل إلى خطة بدائل وأولويات وجدول تنفيذ؛ إذا اشترط المخرج الاعتماد فأضف مهمة عرض الخطة على الجهة المعتمدة للاعتماد، لا تفترض اعتمادًا تم مسبقًا."),
-    ("income_report", ("تقرير", "تحليل"), ("تقرير", "تحليل", "تمويل", "دخل"),
-     ("التقرير", "المصادر", "الدخل", "التمويل"),
-     ("عدد مصادر الدخل المصنفة|number|5", "نسبة اكتمال تحليل مصادر التمويل|percent|100", "عدد تقارير تحليل التمويل المعدة|number|1"),
-     "اجمع السجلات المتاحة وصنّف الإيرادات، ثم أعد تقرير تحليل مصادر التمويل بنفسه."),
-)
-_DELIVERABLE_VERBS = re.compile(
-    r"(?:أعد|اعد|إعداد|انشئ|أنشئ|صمم|صمّم|ابن|ابنِ|بناء|جهز|جهّز|"
-    r"صياغة|صغ|وثق|وثّق|سجّل|سجل|حدّد|حدد|أنجز|أنجز|راجع|اكتب|رتب|رتّب|اعرض|عرض|استكمل)"
-)
-
-
-def _profile_for_output(output: Any) -> dict | None:
-    if not isinstance(output, dict):
-        return None
-    text = _text(output.get("text"), limit=500)
-    if not text:
-        return None
-    ordered = sorted(_OUTPUT_PROFILES, key=lambda p: (p[0] != "matrix", p[0] != "offers"))
-    for name, triggers, artifact, indicator_terms, examples, focus in ordered:
-        if all(t in text for t in triggers):
-            return {"kind": name, "artifact_terms": artifact,
-                    "indicator_terms": indicator_terms, "examples": list(examples),
-                    "focus": focus}
-    return None  # unknown outputs: don't impose arbitrary hard-coded rules
-
-
-def _claims_deliverable_action(task: str, artifact: tuple[str, ...]) -> bool:
-    """A negated mention ('دون تجهيز عرض') is not a deliverable action."""
-    if not _DELIVERABLE_VERBS.search(task) or not any(w in task for w in artifact):
-        return False
-    # Local negation before a production verb invalidates the evidence when
-    # it is the only mention of the deliverable in the task.
-    if re.search(r"(?:دون|بدون|بلا|عدم)\s+(?:\S+\s+){0,3}(?:عرض|عروض|حزمة|تقرير|لوحة|مصفوفة|نموذج|قائمة|دليل|خطة|تجربة)", task):
-        return False
-    if re.search(r"(?:دون|بدون|بلا|عدم)\s+(?:\S+\s+){0,2}(?:تجهيز|إعداد|صياغة|بناء|إنشاء)\s+", task):
-        return False
-    return True
-
-
-# V11: these checks assert actual production of the promised artifact. A task
-# that merely mentions a dashboard or a plan as context is not sufficient.
-_ARTIFACT_PRODUCTION_VERBS = re.compile(
-    r"(?:أنشئ|انشئ|أنشاء|إنشاء|اعد|أعد|إعداد|جهز|جهّز|تجهيز|"
-    r"صمم|صمّم|تصميم|ابن|ابنِ|بناء|اطور|طوّر|تطوير|اكتب|كتابة|"
-    r"حرر|حرّر|صياغة|صغ|طور|أنجز|انتج|أنتج)"
-)
-
-
-def _builds_named_artifact(tasks: list[str], artifact: str) -> bool:
-    """Require a build/write verb near the artifact itself, in the same task."""
-    artifact_re = {
-        "dashboard": r"(?:لوح(?:ة|ه)\s+(?:مؤشرات|متابعة)|لوحة\s+(?:قياس|تتبع))",
-        "followup": r"(?:خطة\s+(?:المتابعة|متابعة|الرصد)|برنامج\s+متابعة)",
-        "report": r"(?:التقرير\s+الختامي|تقرير\s+ختامي)",
-    }[artifact]
-    pattern = re.compile(r"(?:" + _ARTIFACT_PRODUCTION_VERBS.pattern + r")(?:.{0,90}?)(?:" + artifact_re + r")")
-    for task in tasks:
-        if not _claims_deliverable_action(task, ("لوحة", "خطة", "تقرير")):
-            continue
-        for match in pattern.finditer(task):
-            # 'إعداد جدول زمني للتقرير' writes a timetable, not the report.
-            # Likewise a list *about* a dashboard is not a built dashboard.
-            middle = task[match.start():match.end()]
-            if re.search(r"(?:جدول(?:ا|ًا)?|قائمة|مصفوفة|ملخص).{2,70}(?:ل(?:ل)?|عن)", middle):
-                continue
-            return True
-    return False
-
-
-# Only an explicit *request* to a human decision-maker satisfies an approved
-# plan output. These are vocabulary groups, not prescribed model phrasing.
-_APPROVAL_ACTION = re.compile(
-    r"(?:اعرض|عرض|ارفع|رفع|قدّم|قدم|تقديم|أرسل|ارسل|إرسال|ارسال|"
-    r"أحال|احال|إحالة|احالة|تسليم|سلّم|سلم|ارفق|أرفق)"
-)
-_APPROVAL_DOCUMENT = re.compile(r"(?:خط[ةه]|الخط[ةه]|مسود[ةه]|الوثيق[ةه]|وثيق[ةه]|المقترح|مقترح)")
-_APPROVAL_REQUEST = re.compile(
-    r"(?:ل?لاعتماد|اعتمادها|ل?لموافق[ةه]|ل?لإقرار|ل?لاقرار|"
-    r"ل?لمراجع[ةه]|مراجعتها|ل?لتصديق|التصديق|إقرارها|اقرارها)"
-)
-_APPROVAL_AUTHORITY = re.compile(
-    r"(?:مجلس|المجلس|الإدار[ةه]|الادار[ةه]|اللجن[ةه]|لجن[ةه]|"
-    r"الجه[ةه]|جه[ةه]|صاحب[ةه]?\s+الصلاحي[ةه]|صاحب[ةه]?\s+الاعتماد|"
-    r"المسؤول\s+المخول|المعني\s+بالاعتماد)"
-)
-_APPROVAL_UNFOUNDED_FACT = re.compile(
-    r"(?:تم\s+اعتماد\s+(?:الخط[ةه]|المسود[ةه])|"
-    r"اعتمدت\s+(?:الجه[ةه]|الإدار[ةه]|الادار[ةه]|اللجن[ةه])\s+الخط[ةه])"
-)
-_APPROVAL_HANDOFF_TASK = (
-    "رفع مسودة الخطة إلى الجهة المختصة للمراجعة والاعتماد"
-)
-
-
-def _includes_approval_submission(tasks: list[str]) -> bool:
-    """Submission for human approval, without falsely asserting approval occurred."""
-    for task in tasks:
-        if (_APPROVAL_ACTION.search(task) and _APPROVAL_DOCUMENT.search(task)
-                and _APPROVAL_REQUEST.search(task)
-                and _APPROVAL_AUTHORITY.search(task)
-                and not _APPROVAL_UNFOUNDED_FACT.search(task)):
-            return True
-    return False
-
-
-def _needs_approval_handoff(output: Any) -> bool:
-    """Only an explicit approved income plan from Backend triggers this gate."""
-    return (isinstance(output, dict)
-            and (_profile_for_output(output) or {}).get("kind") == "income_plan"
-            and "معتمد" in _text(output.get("text"), limit=500))
-
-
-def _complete_backend_approval_handoff(sprint: dict, output: Any) -> tuple[dict, bool]:
-    """Add only the actionable review-submission required by Backend output.
-
-    Never state that approval was obtained. Preserve valid model-written tasks,
-    and never exceed the backend's 3-5 task design. No GPU/model calls.
-    """
-    if not _needs_approval_handoff(output):
-        return sprint, False
-    existing = sprint.get("tasks")
-    if not isinstance(existing, list) or not 3 <= len(existing) <= 5:
-        return sprint, False
-    if _includes_approval_submission([x.get("text", "") for x in existing]):
-        return sprint, False
-    amended = {**sprint, "tasks": [dict(x) for x in existing]}
-    if len(amended["tasks"]) < 5:
-        amended["tasks"].append({"text": _APPROVAL_HANDOFF_TASK, "planned_percent": 100})
-    else:
-        # All five task slots are filled. Keep their work and add the
-        # contract-required handoff to a plan-review task, or the final task.
-        candidate = next(
-            (i for i in range(4, -1, -1)
-             if re.search(r"(?:مراجع[ةه]|راجع|تدقيق|تسليم|عرض)", amended["tasks"][i]["text"])
-             and re.search(r"(?:خط[ةه]|مسود[ةه])", amended["tasks"][i]["text"])),
-            4,
+    """Ground model guidance in the supplied output; do not author tasks ourselves."""
+    title = _text((output or {}).get("text"), limit=500) if isinstance(output, dict) else ""
+    if "ختامي" in title or "خطة متابعة" in title or "متابعة" in title:
+        return (
+            "استفد من التقييم الموجود لإعداد تقرير ختامي وخطة متابعة؛ "
+            "وثّق الإجراءات القادمة ومؤشراتها وآلية المراجعة والاعتماد. "
+            "لا تعُد إلى جمع بيانات التقييم من البداية."
         )
-        old = amended["tasks"][candidate]["text"].rstrip(" .،؛")
-        combined = old + "، ثم " + _APPROVAL_HANDOFF_TASK
-        if len(combined) > 360:
-            # Avoid deleting, truncating or silently changing original work.
-            return sprint, False
-        amended["tasks"][candidate]["text"] = combined
-    _validate_tasks(amended["tasks"], minimum=3)
-    return amended, True
-
-
-def _content_quality_issues(sprint: dict, output: Any, earlier: list[dict]) -> dict[str, str]:
-    """Conservative content checks; repair with Meta instead of changing data.
-
-    Refuse template placeholders, generic recycled KPIs, and absent tangible
-    deliverables for recognized output types. Preserve flexibility for unknown
-    user-authored outputs (including null outputs).
-    """
-    issues = {}
-    heading = sprint["title"] + " " + sprint["description"]
-    if _INTERNAL_LEAK.search(heading):
-        issues["card"] = "Title/description exposes internal JSON field names"
-    task_texts = [x["text"] for x in sprint["tasks"]]
-    if any(_INTERNAL_LEAK.search(x) for x in task_texts):
-        issues["tasks"] = "Task exposes internal JSON field names instead of NGO work"
-    indicators = sprint["indicators"]
-    names = [_norm(x["name"]) for x in indicators]
-    if any(_INTERNAL_LEAK.search(x["name"]) for x in indicators):
-        issues["indicators"] = "Indicator exposes internal JSON field names"
-    if any(name in _GENERIC_KPI for name in names):
-        issues["indicators"] = "Generic KPI repeated across unrelated deliverables"
-
-    profile = _profile_for_output(output)
-    if profile:
-        # One explicit action must result in or directly prepare the actual
-        # named deliverable; generic data gathering alone is not sufficient.
-        artifact = profile["artifact_terms"]
-        if not any(_claims_deliverable_action(task, artifact)
-                   for task in task_texts):
-            issues["tasks"] = f"Sprint tasks never produce the assigned {profile['kind']} deliverable"
-        specific = sum(any(term in name or (term.startswith("ال") and term[2:] in name)
-                           for term in profile["indicator_terms"])
-                       for name in names)
-        if specific < 2:
-            issues["indicators"] = f"At least 2 KPIs must measure the assigned {profile['kind']} deliverable"
-        # Multi-part deliverables need all their parts. A dashboard KPI does
-        # not prove somebody built the dashboard; a final report alone does
-        # not satisfy a separate follow-up plan.
-        kind = profile["kind"]
-        if kind == "dashboard" and not _builds_named_artifact(task_texts, "dashboard"):
-            issues["tasks"] = (
-                "Sprint tasks identify KPIs but never actually create/build the assigned dashboard"
-            )
-        if kind == "final":
-            if not _builds_named_artifact(task_texts, "report"):
-                issues["tasks"] = "Sprint tasks never write the final report"
-            if not _builds_named_artifact(task_texts, "followup"):
-                issues["tasks"] = "Sprint tasks never create the required follow-up plan"
-        if kind == "income_plan" and isinstance(output, dict):
-            # Only demand a submission when Backend explicitly requested an
-            # approved plan. Approval itself is outside AI's control.
-            output_text = _text(output.get("text"), limit=500)
-            if "معتمد" in output_text and not _includes_approval_submission(task_texts):
-                issues["tasks"] = (
-                    "Backend output requires an approved plan: include a task to submit the plan for review/approval"
-                )
-    # Two completely shared KPIs means the cards are substantially templated.
-    for prior in earlier:
-        shared = len(set(names) & {_norm(x["name"]) for x in prior["indicators"]})
-        if shared >= 2:
-            issues["indicators"] = (
-                f"{shared} identical KPIs reused from sprint {prior['number']}; "
-                "indicators must measure this output"
-            )
-            break
-    return issues
-
-
-def _parse_quality_repair(raw: str, fields: set[str], old: dict) -> tuple[dict, str]:
-    if fields == {"card"}:
-        # A full sprint rewrite is necessary to fix a corrupted headline.
-        rows, note = _parse_batch(raw, [old["number"]])
-        return rows[0], note
-    tasks, indicators, notes = [], [], []
-    for line in _lines(raw):
-        if line.startswith("TASK|"):
-            tasks.append(_task_line(line.partition("|")[2]))
-        elif line.startswith("INDICATOR|"):
-            indicators.append(_parse_indicator_line(line))
-        elif line.startswith("META_MESSAGE|"):
-            notes.append(_text(line.partition("|")[2], limit=900, arabic=True))
-    if not notes or not notes[-1]:
-        raise RoadmapError("Quality repair is missing META_MESSAGE")
-    repaired = dict(old)
-    if "tasks" in fields:
-        repaired["tasks"] = _validate_tasks(tasks, minimum=3)
-        if len(repaired["tasks"]) > 5:
-            raise RoadmapError("Quality repair must return 3-5 tasks")
-    if "indicators" in fields:
-        if not 3 <= len(indicators) <= 5:
-            raise RoadmapError("Quality repair must return 3-5 indicators")
-        if len({_norm(x["name"]) for x in indicators}) != len(indicators):
-            raise RoadmapError("Quality repair repeated the same KPI")
-        repaired["indicators"] = indicators
-    return _validate_sprint(repaired, old["number"]), notes[-1]
-
-
-def _repair_sprint_quality(*, council: Any, system: str, sprint: dict, source: dict,
-                           opinions: list[dict], previous: list[dict],
-                           errors: dict[str, str]) -> tuple[dict, str]:
-    """Targeted same-job Meta repair: preserve valid fields; no template output."""
-    output = source.get("output")
-    profile = _profile_for_output(output)
-    fields = set(errors)
-    if "card" in fields:
-        fields = {"card"}
-    task = {
-        "quality_repair": True,
-        "number": sprint["number"],
-        "target_fields": sorted(fields),
-        "source_output": output,
-        "original_title": sprint["title"] if not _INTERNAL_LEAK.search(sprint["title"]) else None,
-        "original_description": sprint["description"] if not _INTERNAL_LEAK.search(sprint["description"]) else None,
-        # Do not include erroneous prior tasks/KPI labels: the model used to
-        # copy such examples in V8/V9. Preserve them only in Python validation.
-        "why_rejected": errors,
-        "deliverable_execution_focus": profile["focus"] if profile else
-            "أنجز المخرج المحدد في سياق السبرينت، لا مجرد وصف التوصيات.",
-        "specific_indicator_examples": _indicator_examples_for_output(output),
-        "previous_stage_headings": [{"number": row["number"], "title": row["title"]}
-                                    for row in previous[-4:]],
-        "advisory_insights": _task_advisory_insights(opinions),
-        "task": ("صحح الحقول المطلوبة فقط. أفعال ملموسة لفريق الجمعية، 3-5 مهام تنتج "
-                 "المخرج المخصص من Backend، و3-5 مؤشرات تقيس جوانبه بدقة. "
-                 "إذا المطلوب لوحة مؤشرات، أضف مهمة إنشاء/تصميم اللوحة نفسها، لا تعريف مؤشرات فقط. "
-                 "إذا المطلوب تقرير ختامي وخطة متابعة، أضف مهمتين واضحتين لإنجاز كليهما. "
-                 "إذا المخرج خطة معتمدة، أضف مهمة عرض الخطة للاعتماد دون الادعاء أنها معتمدة فعلًا. "
-                 "ممنوع مؤشرات القوالب العامة أو حقول برمجية. "
-                 "لا تغير أي حقل آخر ولا تفترض حقائق غير مذكورة. "
-                 "لا تجعل الاتصال أو الاستشارة أو الاجتماع مع مستشار جزءًا من مهام التنفيذ؛ "
-                 "استخلص الرأي المهني إلى إجراءات ينفذها فريق الجمعية نفسه. "),
-        "required_output_format": (
-            f"BEGIN_SPRINT|{sprint['number']}\nTITLE|عنوان خاص بالمخرج\nDESCRIPTION|وصف مرتبط بالمخرج\nTASK|مهمة محددة\nINDICATOR|اسم مؤشر خاص بالمخرج|number|1\nEND_SPRINT\nMETA_MESSAGE|ملخص"
-            if fields == {"card"} else
-            ("TASK|مهمة تنفيذية أولى\nTASK|مهمة تنفيذية ثانية\nTASK|مهمة تنفيذية ثالثة\n" if "tasks" in fields else "")
-            + ("INDICATOR|مؤشر أول متعلق بالمخرج|number|1\nINDICATOR|مؤشر ثان متخصص|percent|100\nINDICATOR|مؤشر ثالث متخصص|number|3\n"
-               if "indicators" in fields else "")
-            + "META_MESSAGE|سبب الإصلاح بإيجاز"
-        ),
-    }
-    attempts = max(1, min(3, int(os.getenv("ROADMAP_V10_QUALITY_ATTEMPTS", "2"))))
-    last = errors
-    for attempt in range(attempts):
-        payload = dict(task)
-        if attempt:
-            payload["last_validation_error"] = last
-            payload["task"] += "تأكد أن كل مؤشر خاص بهذا المخرج، وأن مهمة على الأقل تنتج العمل المطلوب نصًا."
-        raw = _meta_generate(council, system, payload,
-                             int(os.getenv("ROADMAP_V10_REPAIR_TOKENS", "1150")),
-                             sample=(attempt > 0), block_non_arabic_scripts=True)
-        try:
-            repaired, note = _parse_quality_repair(raw, fields, sprint)
-            repaired, handoff_added = _complete_backend_approval_handoff(repaired, output)
-            if handoff_added:
-                print(f"[roadmap] v12.4 repair_approval_handoff "
-                      f"sprint={sprint['number']}", flush=True)
-            field_issues = _sprint_arabic_issues(repaired)
-            if field_issues:
-                raise RoadmapError("; ".join(field_issues.values()))
-            if _INTERNAL_LEAK.search(note):
-                raise RoadmapError("Meta transcript contains internal JSON identifiers")
-            _check_council_message(note, {o["advisor_id"] for o in opinions})
-            _check_historical_lookback(repaired, {"output": output})
-            remaining = _content_quality_issues(repaired, output, previous)
-            if remaining:
-                raise RoadmapError("; ".join(remaining.values()))
-            _check_recent_history(repaired, previous)
-            print(f"[roadmap] quality repair succeeded sprint={sprint['number']} "
-                  f"fields={','.join(sorted(fields))} attempt={attempt+1}", flush=True)
-            return repaired, note
-        except RoadmapError as exc:
-            last = str(exc)
-            print(f"[roadmap] quality repair rejected sprint={sprint['number']} "
-                  f"attempt={attempt+1}/{attempts}: {last}", flush=True)
-    recovered = _try_backend_grounded_kpi_recovery(
-        sprint=sprint, output=output, previous=previous, fields=fields)
-    if recovered is not None:
-        print(f"[roadmap] v12.6 grounded_kpi_recovery_accepted "
-              f"sprint={sprint['number']} source=backend_output_only "
-              "targets=proposals", flush=True)
-        return recovered, (
-            "تعذر قبول مؤشرات النموذج بعد الإصلاح؛ اقتُرحت بدلًا منها مقاييس "
-            "اكتمال ملف البيانات وسجل مصادر القيم استنادًا إلى المخرج المحدد، "
-            "والمستهدفات تحتاج مراجعة الجمعية قبل الاعتماد."
+    if "تقييم" in title or "دروس" in title or "نتائج" in title:
+        return (
+            "حلّل أدلة التنفيذ والنتائج المتاحة، ووثّق الدروس المستفادة والفجوات "
+            "في تقرير تقييم، ليكون أساسًا للمرحلة الختامية."
         )
-    raise RoadmapError(f"Sprint {sprint['number']} quality repair failed: {last}")
-
-
-_SUSPECT_META_NOTE = re.compile(
-    r"(?:المجالدين|التضاريد|التضاريب|صنّاف|المستفدة|تبدأين|جوهرة|الجوهرة|استدعِ)"
-    r"|إال|\bSprint\b", re.I
-)
-
-
-def _ensure_readable_meta_note(council: Any, system: str, note: str,
-                               sprints: list[dict], opinions: list[dict]) -> str:
-    """Repair only an unreadable internal Meta message, never invent a transcript.
-
-    Do not re-run the whole 12-sprint generation because its admin-only note
-    contained an English template variable or a known corrupted expression.
-    """
-    selected = {x["advisor_id"] for x in opinions}
-    if not _INTERNAL_LEAK.search(note) and not _SUSPECT_META_NOTE.search(note) and not _arabic_field_error(note):
-        _check_council_message(note, selected)
-        return note
-    for attempt in range(2):
-        context = {
-            "task": "اكتب رسالة واحدة موجزة بصوت المستشار الأعلى تصف القرارات الحقيقية المبنية على عناوين السبرينتات.",
-            "sprints": [{"number": x["number"], "title": x["title"]} for x in sprints],
-            "reasons": _task_advisory_insights(opinions),
-            "constraints": "عربية فصحى فقط، دون رموز حقول برمجية أو مصطلح Sprint أو كلمات مشوهة أو مستشار غير مختار.",
-            "required_output_format": "META_MESSAGE|شرح عربي موجز لخارطة الطريق",
-        }
-        raw = _meta_generate(council, system, context, 320,
-                             sample=(attempt > 0), block_non_arabic_scripts=True)
-        try:
-            _require_generated_arabic_quality(raw)
-            lines = [line.partition("|")[2] for line in _lines(raw)
-                     if line.startswith("META_MESSAGE|")]
-            if len(lines) != 1:
-                raise RoadmapError("Meta message rewrite must return exactly one line")
-            new = _text(lines[0], limit=900, arabic=True)
-            if not new or _INTERNAL_LEAK.search(new) or _SUSPECT_META_NOTE.search(new) or _arabic_field_error(new):
-                raise RoadmapError("Meta message still contains internal jargon or corrupted wording")
-            _check_council_message(new, selected)
-            print("[roadmap] isolated meta transcript rewrite succeeded", flush=True)
-            return new
-        except RoadmapError as exc:
-            print(f"[roadmap] isolated meta transcript rewrite attempt={attempt+1} rejected: {exc}",flush=True)
-    raise RoadmapError("Cannot produce a readable meta transcript message")
+    if "خطة" in title:
+        return "حوّل البيانات والتحليل إلى خطوات خطة قابلة للمراجعة والاعتماد، ولا تكرر جمع المعلومات دون ضرورة."
+    if "تقرير" in title:
+        return "ركّز على إنتاج التقرير المسمى في output.text مع الأدلة الخاصة به."
+    return "اكتب خطوات واقعية تنتج output.text وتحقق output.results خلال أيام السبرينت الخمسة."
 
 
 def _repair_colliding_tasks(
@@ -1432,11 +750,9 @@ def _repair_colliding_tasks(
             block_non_arabic_scripts=True,
         )
         try:
-            # Preserve valid tasks if only the admin-only note has a typo.
+            _require_generated_arabic_quality(raw)
             suggestion, note = _parse_regeneration(raw, "sprint", sprint["tasks"])
             tasks = suggestion["tasks"]
-            for task_row in tasks:
-                _require_generated_arabic_quality(task_row["text"])
             if not 3 <= len(tasks) <= 5:
                 raise RoadmapError("Focused repair must return 3-5 tasks")
             _check_council_message(note, {o["advisor_id"] for o in opinions})
@@ -1502,8 +818,6 @@ def _write_sprint_batch(
             "لا يبدأ السبرينت الختامي بجمع نفس البيانات ولا تكرر مهام سبرينت التقييم. "
             "إذا تكرر المخرج في أكثر من سبرينت، طوّر العمل تدريجيًا حسب output_occurrence. "
             "اقرأ execution_focus_by_sprint لتوضيح التقدم المميز بكل سبرينت. "
-            "إذا كان مخرج السبرينت خطة معتمدة، لازم تتضمن المهام تقديم مسودة الخطة للجهة "
-            "صاحبة الصلاحية للمراجعة والاعتماد؛ لا تدعِ أن الاعتماد تحقق. "
             "لا ترجع حقول output/results/phase ولا تضف أو تحذف أرقام السبرينت."
         ),
         "context": _context(data),
@@ -1530,12 +844,10 @@ def _write_sprint_batch(
         "required_output_format": (
             f"BEGIN_SPRINT|{rows[0]['number']}\nTITLE|عنوان عربي\nDESCRIPTION|وصف عربي\n"
             "TASK|مهمة تنفيذية\nTASK|مهمة تنفيذية أخرى\nTASK|مهمة تنفيذية ثالثة\n"
-            "INDICATOR|مؤشر خاص بالمخرج الأول|number|1\n"
-            "INDICATOR|مؤشر مخصص ثان|percent|100\n"
-            "INDICATOR|مؤشر مخصص ثالث|number|3\n"
-            "END_SPRINT\nكرر بنفس الترتيب لكل سبرينت مطلوب، ثم META_MESSAGE|خلاصة قرار المجلس بالعربية\n"
-            "SYNTHESIS|COMPLEMENTARY أو CONSENSUS أو TRADE_OFF أو CONFLICT أو EVIDENCE_GAP أو SCOPE_CONFLICT؛ "
-            "اختر رمزًا واحدًا يعكس حكمك الفعلي على آراء المستشارين، وليس اتفاقًا مفترضًا"
+            "INDICATOR|عدد مخرجات العمل الموثقة|number|1\n"
+            "INDICATOR|نسبة اكتمال توثيق المخرج|percent|100\n"
+            "INDICATOR|عدد العناصر المنجزة|number|3\n"
+            "END_SPRINT\nكرر بنفس الترتيب لكل سبرينت مطلوب، ثم META_MESSAGE|خلاصة قرار المجلس بالعربية"
         ),
     }
     attempts = (2 if len(rows) > 1 else max(
@@ -1547,15 +859,11 @@ def _write_sprint_batch(
         if error:
             candidate["repair_instruction"] = (
                 f"المحاولة السابقة رُفضت: {error}. أعد السبرينتات المطلوبة كاملة بالأرقام نفسها، "
-                "اكتب لكل سبرينت BEGIN_SPRINT|رقمه وEND_SPRINT بالضبط؛ "
-                "لا تستخدم أرقام أمثلة، ولا تحذف TITLE أو DESCRIPTION أو META_MESSAGE. "
                 "واستبدل المؤشر الضعيف بمؤشر يقيس مستندًا أو عنصرًا منجزًا من المخرج المخصص للسبرينت. "
                 "indicator_examples_by_sprint اقتراحات مستهدفات وليست حقائق عن الجمعية. "
                 "إذا سبب الرفض هو تكرار المهام مع سبرينت آخر، فأعد كتابة 3-5 مهام مختلفة مرتبطة "
                 "بمخرج كل سبرينت وبخطوة تقدّم جديدة؛ لا تنسخ مهام previous_sprints_summary أو سبرينت آخر في الدفعة. "
-                "أعد كتابة 3-5 مؤشرات سليمة لكل سبرينت ولا تكرر الأسماء داخل السبرينت. "
-                "إذا الخطأ في مهمة تستدعي مستشارًا، استبدلها بفعل ينفذه موظفو الجمعية "
-                "لإنجاز الوثيقة أو التحليل المحدد؛ لا تجعل التواصل مع المستشار مهمة."
+                "أعد كتابة 3-5 مؤشرات سليمة لكل سبرينت ولا تكرر الأسماء داخل السبرينت."
             )
         raw = _meta_generate(
             council, system, candidate,
@@ -1564,16 +872,8 @@ def _write_sprint_batch(
             block_non_arabic_scripts=True,
         )
         try:
-            # Check publishable fields, not the entire raw model response:
-            # an admin-only META_MESSAGE must not invalidate valid sprint work.
-            # Parse the card even if one task is a consultant-outreach instruction.
-            # It is NEVER published as-is: fix just its tasks below and validate
-            # strictly before returning the sprint to the backend.
-            generated, note = _parse_batch(
-                raw, numbers, allow_advisor_outreach_for_repair=True,
-                allow_invalid_indicators_for_repair=True,
-                single_sprint_source=rows[0].get("output") if len(rows) == 1 else None)
-            metadata = _contract_metadata(raw)
+            _require_generated_arabic_quality(raw)
+            generated, note = _parse_batch(raw, numbers)
             _check_council_message(note, {a["slug"] for a in advisors})
             prior_rows = [
                 {**p, "output_key": _output_key(output_by_number[p["number"]])}
@@ -1581,68 +881,6 @@ def _write_sprint_batch(
             ]
             repair_notes = []
             for index, (sprint, source) in enumerate(zip(generated, rows)):
-                # The initial parser may retain invalid KPI fields internally;
-                # never let them reach quality/content/transcript/persistence
-                # checks, and never silently drop an invalid indicator.
-                malformed = [
-                    (i, row["_roadmap_invalid_indicator_error"])
-                    for i, row in enumerate(sprint["indicators"], start=1)
-                    if row.get("_roadmap_invalid_indicator_error")
-                ]
-                if malformed:
-                    # V12.6: If the backend explicitly asks for a concrete
-                    # initial data file PLUS source register, and the model's
-                    # tasks really create both, recover just the broken KPIs
-                    # from source-grounded weekly measures immediately.
-                    # This avoids repeated expensive model calls for the
-                    # same non-measurable KPI and never claims observed data.
-                    grounded = _try_backend_grounded_kpi_recovery(
-                        sprint=sprint, output=source.get("output"),
-                        previous=prior_rows, fields={"indicators"})
-                    if grounded is not None:
-                        sprint = grounded
-                        generated[index] = sprint
-                        print(f"[roadmap] v12.6 grounded_kpi_recovery_accepted "
-                              f"sprint={sprint['number']} stage=initial_parse "
-                              "source=backend_output_only targets=proposals", flush=True)
-                    else:
-                        print(f"[roadmap] v12.5 focused_kpi_repair_start "
-                              f"sprint={sprint['number']} positions={[i for i, _ in malformed]}",
-                              flush=True)
-                        sprint, repaired_note = _repair_sprint_quality(
-                            council=council, system=system, sprint=sprint,
-                            source=source, opinions=opinions, previous=prior_rows,
-                            errors={"indicators": "; ".join(
-                                f"indicator {i}: {msg}" for i, msg in malformed)},
-                        )
-                        # _repair_sprint_quality/_parse_quality_repair run strict
-                        # _validate_sprint; this check is defense-in-depth.
-                        sprint = _validate_sprint(sprint, sprint["number"])
-                        generated[index] = sprint
-                        repair_notes.append(repaired_note)
-                        print(f"[roadmap] v12.5 focused_kpi_repair_accepted "
-                              f"sprint={sprint['number']}", flush=True)
-                outreach_issues = [_advisor_task_issue(task_row["text"])
-                                   for task_row in sprint["tasks"]]
-                outreach_issues = [problem for problem in outreach_issues if problem]
-                if outreach_issues:
-                    # This is the only temporary relaxed path: the initial
-                    # parsed sprint is not accepted until its tasks are repaired.
-                    sprint, targeted_note = _repair_sprint_quality(
-                        council=council, system=system, sprint=sprint,
-                        source=source, opinions=opinions, previous=prior_rows,
-                        errors={"tasks": "; ".join(sorted(set(outreach_issues)))},
-                    )
-                    generated[index] = sprint
-                    repair_notes.append(targeted_note)
-                    print(f"[roadmap] v12.2 targeted_advisor_task_repair "
-                          f"accepted sprint={sprint['number']}", flush=True)
-                sprint, handoff_added = _complete_backend_approval_handoff(
-                    sprint, source.get("output"))
-                if handoff_added:
-                    generated[index] = sprint
-                    print(f"[roadmap] v12.4 approval_handoff sprint={sprint['number']} "
-                          "backend_output_requires_review=true", flush=True)
                 _check_historical_lookback(sprint, {
                     "output": source["output"],
                     "organization": payload.get("organization"),
@@ -1666,34 +904,9 @@ def _write_sprint_batch(
                     generated[index] = repaired
                     current = {**repaired, "output_key": _output_key(source["output"])}
                     repair_notes.append(repair_note)
-                # V10: the model may satisfy the line protocol but still
-                # return unrelated actions or recycled generic indicators.
-                # Repair that one card, not the entire 12-week roadmap.
-                quality_issues = _content_quality_issues(generated[index], source.get("output"), prior_rows)
-                quality_issues.update(_sprint_arabic_issues(generated[index]))
-                if quality_issues:
-                    repaired, quality_note = _repair_sprint_quality(
-                        council=council, system=system, sprint=generated[index],
-                        source=source, opinions=opinions, previous=prior_rows,
-                        errors=quality_issues,
-                    )
-                    generated[index] = repaired
-                    current = {**repaired, "output_key": _output_key(source["output"])}
-                    repair_notes.append(quality_note)
                 prior_rows.append(current)
-            all_notes = [note] + repair_notes
-            all_notes = [_ensure_readable_meta_note(council, system, text,
-                         generated, opinions) for text in all_notes]
-            if metadata:
-                all_notes[0] = {"message": all_notes[0], **metadata}
-            return generated, all_notes
+            return generated, [note] + repair_notes
         except RoadmapError as exc:
-            # The assigned cards already passed validation and the isolated
-            # admin-only transcript note exhausted its own correction tries.
-            # Regenerating the entire sprint here wastes GPU and can damage
-            # otherwise valid work. Fail explicitly, never return partials.
-            if str(exc) == "Cannot produce a readable meta transcript message":
-                raise
             error = str(exc)
             print(
                 f"[roadmap] generate batch={numbers} attempt={attempt + 1}/{attempts} "
@@ -1750,20 +963,12 @@ def _complete(data: dict, council: Any, advisors: list[dict], persona: str) -> d
         )
         completed.extend(new_sprints)
         meta_messages.extend(notes)
-    # Forbid any internal placeholder escaping as a successful response.
-    completed = [_validate_sprint(row, row["number"]) for row in completed]
     if [x["number"] for x in completed] != [x["number"] for x in requested]:
         raise RoadmapError("Incomplete roadmap: no partial successes allowed")
     for model_message in messages:
         _require_generated_arabic_quality(model_message["message"])
         _check_council_message(model_message["message"], {a["slug"] for a in advisors})
-    extras = {}
-    for note in meta_messages:
-        if isinstance(note, dict):
-            for key in ("decision_memory", "human_escalation"):
-                if key in note:
-                    extras[key] = note[key]
-    return _envelope(opinions, messages, meta_messages, {"sprints": completed}, extras)
+    return _envelope(opinions, messages, meta_messages, {"sprints": completed})
 
 
 def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) -> dict:
@@ -1775,7 +980,6 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
     if not isinstance(sprint, dict):
         raise RoadmapError("Regeneration requires sprint context")
     _required_number(sprint.get("number"))
-    sprint = {**sprint, "output": _normalize_output(sprint.get("output"))}
     if not _text(sprint.get("title"), limit=130, arabic=True) or not _text(sprint.get("description"), limit=650, arabic=True):
         raise RoadmapError("Regeneration requires sprint title and description")
     reason = _text(data.get("reason"), limit=1500)
@@ -1819,7 +1023,7 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
         "reason": reason, "sprint": sprint, "previous": old,
         "other_indicators": payload.get("other_indicators", []),
         "advisors": _meta_context(advisors, opinions),
-        "required_output_format": output_rule + "\nMETA_MESSAGE|سبب اختيار البديل بصوت الميتا بالعربية\nSYNTHESIS|رمز الحكم الصحيح على آراء المستشارين",
+        "required_output_format": output_rule + "\nMETA_MESSAGE|سبب اختيار البديل بصوت الميتا بالعربية",
     }
     if kind == "sprint":
         # Specialist expertise still contributes, but Meta gets only the
@@ -1856,7 +1060,7 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
                 "بلا توجيهات للخبراء أو رموز أو مسميات استشارية. "
                 "اكتب بالعربية الفصحى السليمة فقط، بلا أحرف كورية أو صينية أو ألفاظ مشوهة، "
                 "وراجع صياغة رسالة META_MESSAGE أيضًا. "
-                "اتبع البروتوكول TASK|المهمة لكل مهمة وMETA_MESSAGE|... في النهاية."
+                "اتبع البروتوكول TASK|... لكل مهمة وMETA_MESSAGE|... في النهاية."
                 if kind == "sprint" else
                 f"ردك السابق رُفض: {error}. أعِد الرد بالبروتوكول المطلوب."
             )
@@ -1867,7 +1071,7 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
             block_non_arabic_scripts=True,
         )
         try:
-            metadata = _contract_metadata(raw)
+            _require_generated_arabic_quality(raw)
             try:
                 suggestion, note = _parse_regeneration(raw, kind, old_names)
             except RoadmapError as first_error:
@@ -1881,27 +1085,9 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
                     raise first_error
             if kind == "sprint":
                 _check_historical_lookback({"tasks": suggestion["tasks"]}, sprint)
-                for row in suggestion["tasks"]:
-                    _require_generated_arabic_quality(row["text"])
             else:
                 _check_indicator_follows_reason(suggestion, reason)
-                _require_generated_arabic_quality(suggestion["name"])
             _check_council_message(note, {a["slug"] for a in advisors})
-            if _INTERNAL_LEAK.search(note) or _SUSPECT_META_NOTE.search(note) or _arabic_field_error(note):
-                note = _ensure_readable_meta_note(council, _meta_system(persona), note,
-                           [{"number": sprint.get("number", 1),
-                             "title": sprint.get("title", "العمل المعتمد")}], opinions)
-            if kind == "sprint":
-                if any(_INTERNAL_LEAK.search(x["text"]) for x in suggestion["tasks"]):
-                    raise RoadmapError("Regenerated task contains internal JSON field references")
-                # The request supplies only sprint/output/title/description;
-                # use that authoritative context and do not invent new output.
-                profile = _profile_for_output(sprint.get("output"))
-                if profile and not any(_claims_deliverable_action(t["text"], profile["artifact_terms"])
-                     for t in suggestion["tasks"]):
-                    raise RoadmapError("Regenerated tasks do not produce the assigned sprint output")
-            elif _INTERNAL_LEAK.search(suggestion["name"]):
-                raise RoadmapError("Regenerated indicator contains internal JSON field references")
             break
         except RoadmapError as exc:
             error = str(exc)
@@ -1911,9 +1097,7 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
     for model_message in messages:
         _require_generated_arabic_quality(model_message["message"])
         _check_council_message(model_message["message"], {a["slug"] for a in advisors})
-    return _envelope(opinions, messages,
-                     [{"message": note, **metadata}] if metadata else [note],
-                     suggestion, metadata)
+    return _envelope(opinions, messages, [note], suggestion)
 
 
 def _check_council_message(message: str, selected: set[str]) -> None:
@@ -1965,93 +1149,41 @@ def _check_recent_history(sprint: dict, previous_sprints: list[dict]) -> None:
             )
 
 
-_SYNTHESIS_CODES = frozenset((
-    "CONSENSUS", "COMPLEMENTARY", "TRADE_OFF", "CONFLICT", "EVIDENCE_GAP", "SCOPE_CONFLICT"
-))
-_DECISION_STATUSES = frozenset((
-    "APPROVED", "APPROVED WITH CONDITIONS", "PILOT FIRST", "NEEDS MORE EVIDENCE",
-    "ESCALATE", "DO NOT PROCEED"
-))
-_ESCALATION_TYPES = frozenset((
-    "BINDING_LEGAL_OPINION", "MEDICAL_DECISION", "REGULATED_INVESTMENT",
-    "FORMAL_ACCOUNTING_OPINION", "SENSITIVE_HR_DECISION", "HIGH_RISK_CYBERSECURITY",
-    "CONTRACTUAL_COMMITMENT", "SENSITIVE_PERSONAL_DATA", "BOARD_OR_ASSEMBLY_EXCLUSIVE"
-))
+def _envelope(opinions: list[dict], messages: list[dict], meta_messages: list[str], suggestion: dict) -> dict:
+    """Old model-generated council messages, with new contract metadata only.
 
-
-def _contract_metadata(raw: str) -> dict:
-    """Read *optional* Meta metadata from a reply, without assuming agreement.
-
-    Does not participate in sprint parsing. If the old V11 model omits these
-    lines, the original content and council execution remain unchanged.
+    All message and reasoning text still originates from the original Specialist
+    and Meta adapters. I2 is a conservative inference (never an observed fact).
     """
-    entries: dict[str, str] = {}
-    for line in _lines(raw):
-        key, sep, value = line.partition("|")
-        if sep and key in {"SYNTHESIS", "DECISION_STATUS", "DECISION_ISSUE",
-                           "DECISION", "DECISION_OWNER", "DECISION_OUTCOME",
-                           "ESCALATION_TYPE", "ESCALATION_STATUS", "ESCALATION_REASON"}:
-            entries[key] = value.strip()
-    result: dict[str, Any] = {}
-    synthesis = entries.get("SYNTHESIS", "")
-    if synthesis in _SYNTHESIS_CODES:
-        result["synthesis"] = synthesis
-    status = entries.get("DECISION_STATUS")
-    issue = _text(entries.get("DECISION_ISSUE"), limit=700, arabic=True)
-    decision = _text(entries.get("DECISION"), limit=1200, arabic=True)
-    if status in _DECISION_STATUSES and issue and decision:
-        memory = {"status": status, "issue": issue, "decision": decision}
-        owner = _text(entries.get("DECISION_OWNER"), limit=200, arabic=True)
-        outcome = _text(entries.get("DECISION_OUTCOME"), limit=600, arabic=True)
-        if owner:
-            memory["owner"] = owner
-        if outcome:
-            memory["outcome"] = outcome
-        result["decision_memory"] = memory
-    esc_type = entries.get("ESCALATION_TYPE")
-    esc_status = entries.get("ESCALATION_STATUS")
-    esc_reason = _text(entries.get("ESCALATION_REASON"), limit=1200, arabic=True)
-    if esc_type in _ESCALATION_TYPES and esc_status in _DECISION_STATUSES and esc_reason:
-        result["human_escalation"] = {"type": esc_type, "status": esc_status,
-                                      "reason": esc_reason}
-    return result
-
-
-def _envelope(opinions: list[dict], messages: list[dict], meta_messages: list[Any],
-              suggestion: dict, contract_extras: dict | None = None) -> dict:
     transcript = []
-    # These are actual model-produced independent opinions and meta decisions,
-    # represented as a chronological council group chat for the admin UI.
-    selected = {x["advisor_id"] for x in opinions}
+    selected = {opinion["advisor_id"] for opinion in opinions}
     for message in messages:
-        row = {"sequence": len(transcript) + 1, **message}
-        if row.get("from") in selected:
-            # Independent opinions are professional interpretation, not proof
-            # of verified project outcomes or secondary-source evidence.
-            row["evidence"] = {
+        sender = message.get("from")
+        if sender not in selected:
+            continue
+        transcript.append({
+            "sequence": len(transcript) + 1,
+            "from": sender,
+            "message": message["message"],
+            "evidence": {
                 "class": "I2",
-                "description": "تقدير مهني من معطيات الطلب يحتاج إلى التحقق قبل إثبات النتائج."
-            }
-        transcript.append(row)
-    for note in meta_messages:
-        row = {"sequence": len(transcript) + 1, "from": "meta_advisor",
-               "message": note["message"] if isinstance(note, dict) else note}
-        if isinstance(note, dict) and note.get("synthesis") in _SYNTHESIS_CODES:
-            row["synthesis"] = note["synthesis"]
+                "description": "رأي مهني أولي يحتاج إلى التحقق من الأدلة أثناء التنفيذ."
+            },
+        })
+    for index, note in enumerate(meta_messages):
+        row = {"sequence": len(transcript) + 1, "from": "meta_advisor", "message": note}
+        if index == len(meta_messages) - 1:
+            # Legacy V9 does not ask Qwen to classify the group discussion.
+            # This remains a conservative presentation label, not a factual
+            # claim of agreement or a board decision.
+            row["synthesis"] = "COMPLEMENTARY" if len(opinions) > 1 else "CONSENSUS"
         transcript.append(row)
     for opinion in opinions:
         _require_generated_arabic_quality(opinion["reasoning"])
-    envelope = {
-        "involved_advisor_ids": [x["advisor_id"] for x in opinions],
-        "advisor_reasonings": [{"advisor_id": x["advisor_id"], "reasoning": x["reasoning"]} for x in opinions],
-        "transcript": transcript,
-        "suggestion": suggestion
-    }
-    if isinstance(contract_extras, dict):
-        for key in ("decision_memory", "human_escalation"):
-            if isinstance(contract_extras.get(key), dict):
-                envelope[key] = contract_extras[key]
-    return envelope
+    return {"involved_advisor_ids": [x["advisor_id"] for x in opinions],
+            "advisor_reasonings": [{"advisor_id": x["advisor_id"], "reasoning": x["reasoning"]} for x in opinions],
+            "transcript": transcript,
+            "suggestion": suggestion}
 
 
 def consult_roadmap(council: Any, request: dict) -> dict:
