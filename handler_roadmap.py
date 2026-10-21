@@ -15,6 +15,8 @@ consultant-outreach tasks in a sprint instead of regenerating entire cards.
 V12.3: bounded single-sprint line-grammar recovery with backend-owned numbering;
 retain strict multi-sprint validation and deliverable quality gates.
 V12.4: contract-grounded approval handoff for backend-required approved plans.
+V12.5: detect malformed initial KPIs without aborting sprint parsing; repair
+only indicators, then revalidate the whole sprint strictly before publishing.
 Accept natural Arabic submission wording and ensure a human approval-request
 task is present without claiming the plan is already approved.
 """
@@ -28,7 +30,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-ROADMAP_CODE_VERSION = "screen5-v12.4-v11-preserved-contract-approval-handoff"
+ROADMAP_CODE_VERSION = "screen5-v12.5-v11-preserved-kpi-field-recovery"
 VALID_UNITS = frozenset(("percent", "number", "multiplier"))
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٫", "01234567890123456789.")
 _ARABIC = re.compile(r"[\u0600-\u06FF]")
@@ -279,7 +281,8 @@ def _norm(value: str) -> str:
 
 
 def _validate_sprint(row: Any, number: int, *,
-                     allow_advisor_outreach_for_repair: bool = False) -> dict:
+                     allow_advisor_outreach_for_repair: bool = False,
+                     allow_invalid_indicators_for_repair: bool = False) -> dict:
     if not isinstance(row, dict) or _required_number(row.get("number")) != number:
         raise RoadmapError(f"Missing or wrong sprint number {number}")
     title = _text(row.get("title"), limit=130, arabic=True)
@@ -296,8 +299,18 @@ def _validate_sprint(row: Any, number: int, *,
     inds = row.get("indicators")
     if not isinstance(inds, list) or not 3 <= len(inds) <= 5:
         raise RoadmapError(f"Sprint {number} should have 3-5 indicators")
-    indicators = [_indicator(x) for x in inds]
-    if len({_norm(x["name"]) for x in indicators}) != len(indicators):
+    indicators = []
+    for x in inds:
+        if (allow_invalid_indicators_for_repair and isinstance(x, dict)
+                and x.get("_roadmap_invalid_indicator_error")):
+            # Internal-only incomplete field. This sprint MUST go through the
+            # indicator-only model repair before ANY public response.
+            indicators.append(x)
+        else:
+            indicators.append(_indicator(x))
+    valid_names = [_norm(x["name"]) for x in indicators
+                   if not x.get("_roadmap_invalid_indicator_error")]
+    if len(set(valid_names)) != len(valid_names):
         raise RoadmapError(f"Sprint {number} has duplicate indicators")
     return {"number": number, "title": title, "description": desc,
             "tasks": tasks, "indicators": indicators}
@@ -598,6 +611,7 @@ def _single_sprint_line_normalization(raw: str, numbers: list[int]) -> str:
 
 def _parse_batch(raw: str, numbers: list[int], *,
                  allow_advisor_outreach_for_repair: bool = False,
+                 allow_invalid_indicators_for_repair: bool = False,
                  single_sprint_source: Any = None) -> tuple[list[dict], str]:
     raw = _single_sprint_line_normalization(raw, numbers) if single_sprint_source is not None else raw
     sprints, current, meta_message = [], None, ""
@@ -611,8 +625,10 @@ def _parse_batch(raw: str, numbers: list[int], *,
         if line == "END_SPRINT":
             if current is None:
                 raise RoadmapError("END_SPRINT without BEGIN_SPRINT")
-            sprints.append(_validate_sprint(current, current["number"],
-                allow_advisor_outreach_for_repair=allow_advisor_outreach_for_repair))
+            sprints.append(_validate_sprint(
+                current, current["number"],
+                allow_advisor_outreach_for_repair=allow_advisor_outreach_for_repair,
+                allow_invalid_indicators_for_repair=allow_invalid_indicators_for_repair))
             current = None
             continue
         if line.startswith("META_MESSAGE|"):
@@ -635,13 +651,25 @@ def _parse_batch(raw: str, numbers: list[int], *,
             try:
                 current["indicators"].append(_parse_indicator_line(line))
             except RoadmapError as exc:
-                # Name the exact sprint and offending line in the *repair*
-                # instruction. V6 only forwarded a generic validation error,
-                # which caused the Meta model to repeat the same weak KPI.
+                # V12.5: A structurally complete sprint can contain an invalid
+                # model-written KPI. Preserve its raw fields ONLY inside the
+                # current Generate operation, then repair indicators alone.
+                # Strict parse paths (e.g. regenerate) still reject it here.
                 indicator_name = _text("|".join(line.split("|")[1:-2]), limit=160)
-                raise RoadmapError(
-                    f"Sprint {current['number']} indicator {indicator_name!r}: {exc}"
-                ) from exc
+                if not allow_invalid_indicators_for_repair:
+                    raise RoadmapError(
+                        f"Sprint {current['number']} indicator {indicator_name!r}: {exc}"
+                    ) from exc
+                segments = line.split("|")
+                current["indicators"].append({
+                    "name": indicator_name,
+                    "unit": segments[-2].strip() if len(segments) >= 4 else "",
+                    "target": segments[-1].strip() if len(segments) >= 4 else "",
+                    "_roadmap_invalid_indicator_error": str(exc),
+                })
+                print(f"[roadmap] v12.5 malformed_kpi_detected "
+                      f"sprint={current['number']} position={len(current['indicators'])} "
+                      f"reason={str(exc)[:140]}", flush=True)
         else:
             raise RoadmapError("Unknown sprint output field")
     if current is not None:
@@ -1470,6 +1498,7 @@ def _write_sprint_batch(
             # strictly before returning the sprint to the backend.
             generated, note = _parse_batch(
                 raw, numbers, allow_advisor_outreach_for_repair=True,
+                allow_invalid_indicators_for_repair=True,
                 single_sprint_source=rows[0].get("output") if len(rows) == 1 else None)
             metadata = _contract_metadata(raw)
             _check_council_message(note, {a["slug"] for a in advisors})
@@ -1479,6 +1508,31 @@ def _write_sprint_batch(
             ]
             repair_notes = []
             for index, (sprint, source) in enumerate(zip(generated, rows)):
+                # The initial parser may retain invalid KPI fields internally;
+                # never let them reach quality/content/transcript/persistence
+                # checks, and never silently drop an invalid indicator.
+                malformed = [
+                    (i, row["_roadmap_invalid_indicator_error"])
+                    for i, row in enumerate(sprint["indicators"], start=1)
+                    if row.get("_roadmap_invalid_indicator_error")
+                ]
+                if malformed:
+                    print(f"[roadmap] v12.5 focused_kpi_repair_start "
+                          f"sprint={sprint['number']} positions={[i for i, _ in malformed]}",
+                          flush=True)
+                    sprint, repaired_note = _repair_sprint_quality(
+                        council=council, system=system, sprint=sprint,
+                        source=source, opinions=opinions, previous=prior_rows,
+                        errors={"indicators": "; ".join(
+                            f"indicator {i}: {msg}" for i, msg in malformed)},
+                    )
+                    # _repair_sprint_quality/_parse_quality_repair run strict
+                    # _validate_sprint; this check is defense-in-depth.
+                    sprint = _validate_sprint(sprint, sprint["number"])
+                    generated[index] = sprint
+                    repair_notes.append(repaired_note)
+                    print(f"[roadmap] v12.5 focused_kpi_repair_accepted "
+                          f"sprint={sprint['number']}", flush=True)
                 outreach_issues = [_advisor_task_issue(task_row["text"])
                                    for task_row in sprint["tasks"]]
                 outreach_issues = [problem for problem in outreach_issues if problem]
@@ -1607,6 +1661,8 @@ def _complete(data: dict, council: Any, advisors: list[dict], persona: str) -> d
         )
         completed.extend(new_sprints)
         meta_messages.extend(notes)
+    # Forbid any internal placeholder escaping as a successful response.
+    completed = [_validate_sprint(row, row["number"]) for row in completed]
     if [x["number"] for x in completed] != [x["number"] for x in requested]:
         raise RoadmapError("Incomplete roadmap: no partial successes allowed")
     for model_message in messages:
