@@ -12,6 +12,8 @@ V12.1: isolate Arabic corruption in publishable fields; repair meta note
 separately without discarding a valid sprint. Restore V11 TASK|text prompts.
 V12.2: distinguish consultant outreach from NGO execution; repair only
 consultant-outreach tasks in a sprint instead of regenerating entire cards.
+V12.3: bounded single-sprint line-grammar recovery with backend-owned numbering;
+retain strict multi-sprint validation and deliverable quality gates.
 """
 from __future__ import annotations
 
@@ -23,7 +25,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-ROADMAP_CODE_VERSION = "screen5-v12.2-v11-preserved-targeted-task-guard"
+ROADMAP_CODE_VERSION = "screen5-v12.3-v11-preserved-single-sprint-grammar-recovery"
 VALID_UNITS = frozenset(("percent", "number", "multiplier"))
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٫", "01234567890123456789.")
 _ARABIC = re.compile(r"[\u0600-\u06FF]")
@@ -516,8 +518,85 @@ def _parse_indicator_line(line: str) -> dict:
                        "unit": segments[-2].strip(), "target": segments[-1].strip()})
 
 
+def _single_sprint_lexical_anchor(sprint: dict, output: Any) -> bool:
+    """Conservative recovery gate: match a real deliverable, not a sprint ID.
+
+    Required only when repairing a lost/wrong model-generated sprint number.
+    The backend-provided output assignment remains authoritative. We deliberately
+    disallow recovery for null/underspecified outputs, and do not synthesize text.
+    """
+    if not isinstance(output, dict):
+        return False
+    output_text = output.get("text")
+    if not isinstance(output_text, str) or not output_text.strip():
+        return False
+    def keywords(value: str) -> set[str]:
+        value = re.sub(r"[\u064B-\u065F\u0670]", "", str(value))
+        value = re.sub(r"[^\u0621-\u064A]+", " ", value)
+        skip = {"إعداد", "اعداد", "بناء", "كتابة", "عمل", "خطة", "تقرير", "سجل",
+                "دليل", "نموذج", "مخرجات", "المخرجات", "وثيقة", "نتائج", "بيانات",
+                "برنامج", "جمعية", "مراجعة", "اعتماد", "معتمد", "معتمدة", "خاص"}
+        words = set()
+        for word in value.split():
+            if word.startswith("ال") and len(word) > 5:
+                word = word[2:]
+            if len(word) >= 4 and word not in skip:
+                words.add(word)
+        return words
+    expected = keywords(output_text)
+    written = keywords(" ".join([sprint["title"], sprint["description"],
+        *[x["text"] for x in sprint["tasks"]],
+        *[x["name"] for x in sprint["indicators"]]]))
+    if len(expected) < 2 or len(expected & written) < 2:
+        return False
+    return not _content_quality_issues(sprint, output, []) and not _sprint_arabic_issues(sprint)
+
+
+def _single_sprint_line_normalization(raw: str, numbers: list[int]) -> str:
+    """Normalize formatting of ONE requested sprint, without rewriting content.
+
+    Recognize minor delimiter variations. When a model omits both block markers,
+    recover only a complete, unique TITLE/DESCRIPTION/TASK/INDICATOR/META set.
+    Multi-sprint requests are untouched.
+    """
+    if len(numbers) != 1:
+        return raw
+    lines = []
+    for line in _lines(raw):
+        line = re.sub(r"^(BEGIN_SPRINT|TITLE|DESCRIPTION|TASK|INDICATOR|META_MESSAGE)\s*[:=]\s*",
+                      r"\1|", line)
+        line = re.sub(r"^(BEGIN_SPRINT|TITLE|DESCRIPTION|TASK|INDICATOR|META_MESSAGE)\s+\|\s*",
+                      r"\1|", line)
+        line = re.sub(r"^END_SPRINT\s*[:;.]?$", "END_SPRINT", line)
+        lines.append(line)
+    # Only a complete ONE-card response may have its missing markers restored.
+    # Incomplete outputs and ambiguous multiple cards still fail normally.
+    begins = [i for i, x in enumerate(lines) if x.startswith("BEGIN_SPRINT|")]
+    if len(begins) <= 1 and (sum(x.startswith("TITLE|") for x in lines) == 1 and
+        sum(x.startswith("DESCRIPTION|") for x in lines) == 1 and
+        3 <= sum(x.startswith("TASK|") for x in lines) <= 5 and
+        3 <= sum(x.startswith("INDICATOR|") for x in lines) <= 5 and
+        any(x.startswith("META_MESSAGE|") for x in lines)):
+        if not begins:
+            start = next(i for i, x in enumerate(lines) if x.startswith("TITLE|"))
+            lines.insert(start, f"BEGIN_SPRINT|{numbers[0]}")
+            print(f"[roadmap] v12.3 single_sprint_start_marker_restored "
+                  f"expected={numbers[0]}", flush=True)
+        begins = [i for i, x in enumerate(lines) if x.startswith("BEGIN_SPRINT|")]
+        if len(begins) == 1 and "END_SPRINT" not in lines[begins[0] + 1:]:
+            closing = next((i for i in range(begins[0] + 1, len(lines))
+                            if lines[i].startswith("META_MESSAGE|")), -1)
+            if closing != -1:
+                lines.insert(closing, "END_SPRINT")
+                print(f"[roadmap] v12.3 single_sprint_end_marker_restored "
+                      f"expected={numbers[0]}", flush=True)
+    return "\n".join(lines)
+
+
 def _parse_batch(raw: str, numbers: list[int], *,
-                 allow_advisor_outreach_for_repair: bool = False) -> tuple[list[dict], str]:
+                 allow_advisor_outreach_for_repair: bool = False,
+                 single_sprint_source: Any = None) -> tuple[list[dict], str]:
+    raw = _single_sprint_line_normalization(raw, numbers) if single_sprint_source is not None else raw
     sprints, current, meta_message = [], None, ""
     for line in _lines(raw):
         if line.startswith("BEGIN_SPRINT|"):
@@ -564,8 +643,22 @@ def _parse_batch(raw: str, numbers: list[int], *,
             raise RoadmapError("Unknown sprint output field")
     if current is not None:
         raise RoadmapError("Unclosed sprint block")
-    if [x["number"] for x in sprints] != numbers:
-        raise RoadmapError(f"Sprint block numbers do not match: expected {numbers}")
+    actual_numbers = [x["number"] for x in sprints]
+    if actual_numbers != numbers:
+        # On a one-card request, only the backend has authority to assign the
+        # sprint number. The model may label the ONLY complete card incorrectly;
+        # map it to the requested slot solely when its content is grounded in
+        # the assigned output. Never renumber multi-card responses.
+        if (single_sprint_source is not None and len(numbers) == len(sprints) == 1
+            and _single_sprint_lexical_anchor(sprints[0], single_sprint_source)):
+            print(f"[roadmap] v12.3 single_sprint_number_recovered "
+                  f"expected={numbers[0]} model={actual_numbers[0]}", flush=True)
+            sprints[0]["number"] = numbers[0]
+        else:
+            raise RoadmapError(
+                f"Sprint block numbers do not match: expected {numbers}, "
+                f"parsed {actual_numbers} (recognized_blocks={len(sprints)}, "
+                f"nonempty_response={bool(raw.strip())})")
     if not meta_message:
         raise RoadmapError("Meta Advisor message missing")
     return sprints, meta_message
@@ -1275,6 +1368,8 @@ def _write_sprint_batch(
         if error:
             candidate["repair_instruction"] = (
                 f"المحاولة السابقة رُفضت: {error}. أعد السبرينتات المطلوبة كاملة بالأرقام نفسها، "
+                "اكتب لكل سبرينت BEGIN_SPRINT|رقمه وEND_SPRINT بالضبط؛ "
+                "لا تستخدم أرقام أمثلة، ولا تحذف TITLE أو DESCRIPTION أو META_MESSAGE. "
                 "واستبدل المؤشر الضعيف بمؤشر يقيس مستندًا أو عنصرًا منجزًا من المخرج المخصص للسبرينت. "
                 "indicator_examples_by_sprint اقتراحات مستهدفات وليست حقائق عن الجمعية. "
                 "إذا سبب الرفض هو تكرار المهام مع سبرينت آخر، فأعد كتابة 3-5 مهام مختلفة مرتبطة "
@@ -1296,7 +1391,8 @@ def _write_sprint_batch(
             # It is NEVER published as-is: fix just its tasks below and validate
             # strictly before returning the sprint to the backend.
             generated, note = _parse_batch(
-                raw, numbers, allow_advisor_outreach_for_repair=True)
+                raw, numbers, allow_advisor_outreach_for_repair=True,
+                single_sprint_source=rows[0].get("output") if len(rows) == 1 else None)
             metadata = _contract_metadata(raw)
             _check_council_message(note, {a["slug"] for a in advisors})
             prior_rows = [
