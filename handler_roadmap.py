@@ -5,7 +5,9 @@ Uses already-loaded Specialist/Meta PEFT adapters via AtharCouncilEngine._genera
 No additional model instance, LoRA, dataset or third-party library required.
 
 Contract: Screen 5 (خارطة الطريق) — AI Contract, 2026-10.
-V10: deliverable-aligned tasks and specific measurable KPIs with focused quality repairs.
+V11 core preserved: deliverable completion checks, focused repairs and transcript checks.
+V12 contract bridge: planned_percent, Screen 3 result shape, and optional
+Meta decision/synthesis/evidence metadata. No changes to model routing or batching.
 """
 from __future__ import annotations
 
@@ -17,7 +19,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-ROADMAP_CODE_VERSION = "screen5-v10-deliverable-quality-focus"
+ROADMAP_CODE_VERSION = "screen5-v12-v11-preserved-contract-bridge"
 VALID_UNITS = frozenset(("percent", "number", "multiplier"))
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٫", "01234567890123456789.")
 _ARABIC = re.compile(r"[\u0600-\u06FF]")
@@ -154,6 +156,35 @@ def _indicator(data: Any) -> dict:
     return {"name": name, "unit": unit, "target": _number(data.get("target"), unit)}
 
 
+def _planned_percent(value: Any) -> int:
+    """Weekly task completion proposal; never an achieved percentage.
+
+    Legacy V11 model replies wrote TASK|text, which means the model planned an
+    entire executable five-day task. Preserve their meaning with a default of
+    100. New TASK|text|percent replies may expressly choose a partial stage.
+    """
+    if value is None or value == "":
+        return 100
+    if isinstance(value, bool):
+        raise RoadmapError("Task planned_percent must be a whole number 0..100")
+    try:
+        numeric = float(str(value).strip().translate(_ARABIC_DIGITS))
+    except (TypeError, ValueError):
+        raise RoadmapError("Task planned_percent is not numeric") from None
+    if not math.isfinite(numeric) or not 0 <= numeric <= 100:
+        raise RoadmapError("Task planned_percent outside 0..100")
+    return int(math.floor(numeric + 0.5))
+
+
+def _task_line(value: str) -> dict:
+    """Both original V11 TASK|Arabic and new TASK|Arabic|40 are accepted."""
+    if "|" in value:
+        phrase, sep, maybe_percent = value.rpartition("|")
+        if sep and re.fullmatch(r"[0-9٠-٩۰-۹]{1,3}(?:[.٫][0-9٠-٩۰-۹]+)?", maybe_percent.strip()):
+            return {"text": phrase, "planned_percent": _planned_percent(maybe_percent)}
+    return {"text": value, "planned_percent": 100}
+
+
 def _validate_tasks(tasks: Any, *, minimum: int = 1) -> list[dict]:
     if not isinstance(tasks, list) or not minimum <= len(tasks) <= 8:
         raise RoadmapError("Tasks list length invalid")
@@ -165,7 +196,8 @@ def _validate_tasks(tasks: Any, *, minimum: int = 1) -> list[dict]:
             raise RoadmapError("Empty/invalid task text")
         if _ANY_ADVISOR_ID.search(clean) or _ADVISOR_AS_TASK.search(clean):
             raise RoadmapError("Task is about calling an advisor, not an executable NGO action")
-        out.append({"text": clean})
+        percent = _planned_percent(row.get("planned_percent") if isinstance(row, dict) else None)
+        out.append({"text": clean, "planned_percent": percent})
     if len({_norm(x["text"]) for x in out}) != len(out):
         raise RoadmapError("Duplicate tasks in sprint")
     return out
@@ -278,8 +310,32 @@ def _input(request: dict) -> dict:
     return data
 
 
+def _normalize_output(value: Any) -> dict | None:
+    """Bridge Screen-3 result objects to Screen-5 string results.
+
+    The backend owns output assignment; this copy is for model context only.
+    Do not rewrite the backend's output or return it in suggestion.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise RoadmapError("Sprint output must be an object or null")
+    results = value.get("results")
+    if results is None:
+        results = []
+    if not isinstance(results, list):
+        raise RoadmapError("Sprint output.results must be a list")
+    normalized = []
+    for result in results:
+        candidate = result.get("text") if isinstance(result, dict) else result
+        if not isinstance(candidate, str) or not candidate.strip():
+            raise RoadmapError("Sprint output result must contain nonempty text")
+        normalized.append(candidate.strip())
+    return {**value, "results": normalized}
+
+
 def _output_key(value: Any) -> str:
-    return _json(value) if value is not None else "null"
+    return _json(_normalize_output(value)) if value is not None else "null"
 
 
 def _validate_generate_request(payload: dict) -> list[dict]:
@@ -295,18 +351,22 @@ def _validate_generate_request(payload: dict) -> list[dict]:
         if number in numbers:
             raise RoadmapError(f"Duplicate sprint {number}")
         numbers.add(number)
-        item_output = row.get("output")
-        if item_output is not None and not isinstance(item_output, dict):
-            raise RoadmapError("Sprint output must be an object or null")
+        item_output = _normalize_output(row.get("output"))
         output.append({"number": number, "output": item_output})
     return sorted(output, key=lambda x: x["number"])
 
 
 def _context(data: dict, rows: list[dict] | None = None) -> dict:
     p = data["payload"]
-    return {k: p.get(k) for k in (
+    context = {k: p.get(k) for k in (
         "organization", "programs", "track", "goal", "impact_map", "intervention"
-    )} | ({"sprints": rows} if rows is not None else {})
+    )}
+    intervention = context.get("intervention")
+    if isinstance(intervention, dict) and isinstance(intervention.get("outputs"), list):
+        context["intervention"] = {**intervention, "outputs": [
+            _normalize_output(output) for output in intervention["outputs"]
+        ]}
+    return context | ({"sprints": rows} if rows is not None else {})
 
 
 def _specialist_messages(council: Any, data: dict, advisors: list[dict], context: dict) -> tuple[list[dict], list[dict]]:
@@ -418,7 +478,7 @@ def _parse_batch(raw: str, numbers: list[int]) -> tuple[list[dict], str]:
         elif key == "DESCRIPTION":
             current["description"] = val
         elif key == "TASK":
-            current["tasks"].append({"text": val})
+            current["tasks"].append(_task_line(val))
         elif key == "INDICATOR":
             try:
                 current["indicators"].append(_parse_indicator_line(line))
@@ -447,7 +507,7 @@ def _parse_regeneration(raw: str, kind: str, existing: Any) -> tuple[dict, str]:
         if line.startswith("META_MESSAGE|"):
             message = _text(line.partition("|")[2], limit=1100, arabic=True)
         elif kind == "sprint" and line.startswith("TASK|"):
-            tasks.append({"text": line.partition("|")[2]})
+            tasks.append(_task_line(line.partition("|")[2]))
         elif kind == "sprint_indicator" and line.startswith("INDICATOR|"):
             if indicator is not None:
                 raise RoadmapError("Regeneration returned multiple indicators")
@@ -506,7 +566,7 @@ def _recover_valid_task_subset(raw: str, existing: list[Any]) -> tuple[dict, str
     valid, seen = [], set()
     for candidate in task_lines:
         try:
-            task = _validate_tasks([candidate])[0]
+            task = _validate_tasks([_task_line(candidate)])[0]
         except RoadmapError:
             continue
         key = _norm(task["text"])
@@ -561,6 +621,9 @@ def _meta_system(persona: str) -> str:
         "لا تكتب عدد التوصيات المؤثرة أو المؤجلة أو تقييمًا انطباعيًا لا يمكن التحقق منه. "
         "يُسمح لك باقتراح مستهدفات target رقمية معقولة حتى بلا Benchmarks، لكنها مقترحات تنفيذية وليست حقائق تاريخية. "
         "لا تفترض توفر عدد سنوات أو سجلات أو نسب فعلية لم يذكرها سياق المخرج أو المنظمة؛ استخدم 'البيانات المتاحة' عند غيابها. "
+        "كل مهمة لها planned_percent بين صفر ومئة: اكتب TASK|نص المهمة|100 عند إتمامها خلال السبرينت، "
+        "أو TASK|نص المهمة|40 إذا كان جزءا مخططا عمدا ويمتد لسبرينت آخر. "
+        "المخطط ليس المنجز ولا تصف نسبة فعلية. يمكن قبول صيغة TASK|نص المهمة القديمة للتوافق. "
         "الوحدات المسموحة فقط percent أو number أو multiplier، وpercent من 0 إلى 100 لا 0 إلى 1. "
         "كل مؤشر يبدأ بكلمة نسبة يجب أن تكون وحدته percent، ويبدأ بعدد يجب أن تكون وحدته number. "
         "لا تستخدم عددًا لتمثيل نسبة حتى لو ذكر المستهدف 10%. لا تغيّر معنى المؤشر أو وحدته دون تطابق دقيق. "
@@ -618,7 +681,7 @@ _OUTPUT_PROFILES = (
     ("final", ("ختامي",), ("تقرير", "ختامي", "متابعة", "خطة"),
      ("تقرير", "الخطة", "المتابعة", "الختامي"),
      ("عدد التقارير الختامية المعدة|number|1", "نسبة اكتمال خطة المتابعة|percent|100", "عدد إجراءات المتابعة المجدولة|number|3"),
-     "أنجز التقرير الختامي اعتمادًا على تقييم سابق، واكتب خطة متابعة بإجراءات وآلية مراجعة؛ لا تعد إلى جمع البيانات الأولية."),
+     "أنجز التقرير الختامي اعتمادًا على تقييم سابق، وأعد خطة متابعة مستقلة تتضمن إجراءات ومواعيد وآلية مراجعة؛ لا تكتف بكتابة التقرير أو جدوله الزمني."),
     ("evaluating", ("تقييم",), ("تقييم", "نتائج", "تقرير", "دروس"),
      ("التقييم", "نتائج", "الأدلة", "الدروس"),
      ("عدد تقارير تقييم التنفيذ المعدة|number|1", "نسبة توثيق نتائج الإجراءات|percent|100", "عدد الدروس المستفادة المسجلة|number|3"),
@@ -630,7 +693,7 @@ _OUTPUT_PROFILES = (
     ("dashboard", ("لوحة", "مؤشر"), ("لوحة", "مؤشرات", "بيانات"),
      ("اللوحة", "المؤشرات", "البيانات"),
      ("عدد مؤشرات الاستدامة المعرّفة|number|4", "نسبة اكتمال لوحة المتابعة|percent|100", "عدد مصادر بيانات المؤشرات الموثقة|number|3"),
-     "حدّد تعريف كل مؤشر ومصدره وطريقة تحديثه، وصمّم لوحة متابعة قابلة للاستخدام؛ لا تستخدم مؤشرات التقرير الختامي."),
+     "حدّد تعريف كل مؤشر ومصدره وطريقة تحديثه، ثم أنشئ أو صمّم لوحة مؤشرات قابلة للاستخدام مع طريقة تحديثها؛ تحديد المؤشرات وحده لا ينجز المخرج."),
     ("pilot", ("تجربة",), ("تجربة", "نتائج", "قناة", "اختبار"),
      ("التجربة", "القناة", "نتائج", "اختبار"),
      ("عدد التجارب التجريبية المنفذة|number|1", "عدد نتائج اختبار قناة التمويل الموثقة|number|3", "نسبة اكتمال توثيق التجربة|percent|100"),
@@ -658,7 +721,7 @@ _OUTPUT_PROFILES = (
     ("income_plan", ("خطة", "تنويع"), ("خطة", "تنويع", "دخل", "اعتماد"),
      ("الخطة", "التنويع", "الدخل", "الاعتماد"),
      ("عدد مصادر الدخل البديلة المقترحة|number|3", "نسبة اكتمال صياغة خطة التنويع|percent|100", "عدد عناصر خطة الدخل المعتمدة|number|3"),
-     "حوّل التحليل إلى خطة بدائل وأولويات وجدول تنفيذ؛ أضف خطوة مراجعة وعرض للاعتماد عندما يتضمن المخرج ذلك."),
+     "حوّل التحليل إلى خطة بدائل وأولويات وجدول تنفيذ؛ إذا اشترط المخرج الاعتماد فأضف مهمة عرض الخطة على الجهة المعتمدة للاعتماد، لا تفترض اعتمادًا تم مسبقًا."),
     ("income_report", ("تقرير", "تحليل"), ("تقرير", "تحليل", "تمويل", "دخل"),
      ("التقرير", "المصادر", "الدخل", "التمويل"),
      ("عدد مصادر الدخل المصنفة|number|5", "نسبة اكتمال تحليل مصادر التمويل|percent|100", "عدد تقارير تحليل التمويل المعدة|number|1"),
@@ -698,6 +761,45 @@ def _claims_deliverable_action(task: str, artifact: tuple[str, ...]) -> bool:
     return True
 
 
+# V11: these checks assert actual production of the promised artifact. A task
+# that merely mentions a dashboard or a plan as context is not sufficient.
+_ARTIFACT_PRODUCTION_VERBS = re.compile(
+    r"(?:أنشئ|انشئ|أنشاء|إنشاء|اعد|أعد|إعداد|جهز|جهّز|تجهيز|"
+    r"صمم|صمّم|تصميم|ابن|ابنِ|بناء|اطور|طوّر|تطوير|اكتب|كتابة|"
+    r"حرر|حرّر|صياغة|صغ|طور|أنجز|انتج|أنتج)"
+)
+
+
+def _builds_named_artifact(tasks: list[str], artifact: str) -> bool:
+    """Require a build/write verb near the artifact itself, in the same task."""
+    artifact_re = {
+        "dashboard": r"(?:لوح(?:ة|ه)\s+(?:مؤشرات|متابعة)|لوحة\s+(?:قياس|تتبع))",
+        "followup": r"(?:خطة\s+(?:المتابعة|متابعة|الرصد)|برنامج\s+متابعة)",
+        "report": r"(?:التقرير\s+الختامي|تقرير\s+ختامي)",
+    }[artifact]
+    pattern = re.compile(r"(?:" + _ARTIFACT_PRODUCTION_VERBS.pattern + r")(?:.{0,90}?)(?:" + artifact_re + r")")
+    for task in tasks:
+        if not _claims_deliverable_action(task, ("لوحة", "خطة", "تقرير")):
+            continue
+        for match in pattern.finditer(task):
+            # 'إعداد جدول زمني للتقرير' writes a timetable, not the report.
+            # Likewise a list *about* a dashboard is not a built dashboard.
+            middle = task[match.start():match.end()]
+            if re.search(r"(?:جدول(?:ا|ًا)?|قائمة|مصفوفة|ملخص).{2,70}(?:ل(?:ل)?|عن)", middle):
+                continue
+            return True
+    return False
+
+
+def _includes_approval_submission(tasks: list[str]) -> bool:
+    """Approval must be requested from a human; don't claim it already happened."""
+    return any(re.search(
+        r"(?:اعرض|عرض|ارفع|رفع|قدم|قدّم|تقديم|احل|أحل|أرسل|إرسال)"
+        r".{0,110}(?:خطة|الخطة|اعتماد|المجلس|الإدارة)"
+        r".{0,110}(?:للاعتماد|للمراجعة|مجلس|الإدارة|الموافقة|الاعتماد)", task
+    ) for task in tasks)
+
+
 def _content_quality_issues(sprint: dict, output: Any, earlier: list[dict]) -> dict[str, str]:
     """Conservative content checks; repair with Meta instead of changing data.
 
@@ -732,6 +834,27 @@ def _content_quality_issues(sprint: dict, output: Any, earlier: list[dict]) -> d
                        for name in names)
         if specific < 2:
             issues["indicators"] = f"At least 2 KPIs must measure the assigned {profile['kind']} deliverable"
+        # Multi-part deliverables need all their parts. A dashboard KPI does
+        # not prove somebody built the dashboard; a final report alone does
+        # not satisfy a separate follow-up plan.
+        kind = profile["kind"]
+        if kind == "dashboard" and not _builds_named_artifact(task_texts, "dashboard"):
+            issues["tasks"] = (
+                "Sprint tasks identify KPIs but never actually create/build the assigned dashboard"
+            )
+        if kind == "final":
+            if not _builds_named_artifact(task_texts, "report"):
+                issues["tasks"] = "Sprint tasks never write the final report"
+            if not _builds_named_artifact(task_texts, "followup"):
+                issues["tasks"] = "Sprint tasks never create the required follow-up plan"
+        if kind == "income_plan" and isinstance(output, dict):
+            # Only demand a submission when Backend explicitly requested an
+            # approved plan. Approval itself is outside AI's control.
+            output_text = _text(output.get("text"), limit=500)
+            if "معتمد" in output_text and not _includes_approval_submission(task_texts):
+                issues["tasks"] = (
+                    "Backend output requires an approved plan: include a task to submit the plan for review/approval"
+                )
     # Two completely shared KPIs means the cards are substantially templated.
     for prior in earlier:
         shared = len(set(names) & {_norm(x["name"]) for x in prior["indicators"]})
@@ -752,7 +875,7 @@ def _parse_quality_repair(raw: str, fields: set[str], old: dict) -> tuple[dict, 
     tasks, indicators, notes = [], [], []
     for line in _lines(raw):
         if line.startswith("TASK|"):
-            tasks.append({"text": line.partition("|")[2]})
+            tasks.append(_task_line(line.partition("|")[2]))
         elif line.startswith("INDICATOR|"):
             indicators.append(_parse_indicator_line(line))
         elif line.startswith("META_MESSAGE|"):
@@ -800,6 +923,9 @@ def _repair_sprint_quality(*, council: Any, system: str, sprint: dict, source: d
         "advisory_insights": _task_advisory_insights(opinions),
         "task": ("صحح الحقول المطلوبة فقط. أفعال ملموسة لفريق الجمعية، 3-5 مهام تنتج "
                  "المخرج المخصص من Backend، و3-5 مؤشرات تقيس جوانبه بدقة. "
+                 "إذا المطلوب لوحة مؤشرات، أضف مهمة إنشاء/تصميم اللوحة نفسها، لا تعريف مؤشرات فقط. "
+                 "إذا المطلوب تقرير ختامي وخطة متابعة، أضف مهمتين واضحتين لإنجاز كليهما. "
+                 "إذا المخرج خطة معتمدة، أضف مهمة عرض الخطة للاعتماد دون الادعاء أنها معتمدة فعلًا. "
                  "ممنوع مؤشرات القوالب العامة أو حقول برمجية. "
                  "لا تغير أي حقل آخر ولا تفترض حقائق غير مذكورة. "),
         "required_output_format": (
@@ -842,7 +968,10 @@ def _repair_sprint_quality(*, council: Any, system: str, sprint: dict, source: d
     raise RoadmapError(f"Sprint {sprint['number']} quality repair failed: {last}")
 
 
-_SUSPECT_META_NOTE = re.compile(r"(?:المجالدين|التضاريد|التضاريب)|إال|\bSprint\b", re.I)
+_SUSPECT_META_NOTE = re.compile(
+    r"(?:المجالدين|التضاريد|التضاريب|صنّاف|المستفدة|تبدأين|جوهرة|الجوهرة|استدعِ)"
+    r"|إال|\bSprint\b", re.I
+)
 
 
 def _ensure_readable_meta_note(council: Any, system: str, note: str,
@@ -1055,11 +1184,13 @@ def _write_sprint_batch(
         },
         "required_output_format": (
             f"BEGIN_SPRINT|{rows[0]['number']}\nTITLE|عنوان عربي\nDESCRIPTION|وصف عربي\n"
-            "TASK|مهمة تنفيذية\nTASK|مهمة تنفيذية أخرى\nTASK|مهمة تنفيذية ثالثة\n"
+            "TASK|مهمة تنفيذية|100\nTASK|مهمة تنفيذية أخرى|100\nTASK|مهمة تنفيذية ثالثة|100\n"
             "INDICATOR|مؤشر خاص بالمخرج الأول|number|1\n"
             "INDICATOR|مؤشر مخصص ثان|percent|100\n"
             "INDICATOR|مؤشر مخصص ثالث|number|3\n"
-            "END_SPRINT\nكرر بنفس الترتيب لكل سبرينت مطلوب، ثم META_MESSAGE|خلاصة قرار المجلس بالعربية"
+            "END_SPRINT\nكرر بنفس الترتيب لكل سبرينت مطلوب، ثم META_MESSAGE|خلاصة قرار المجلس بالعربية\n"
+            "SYNTHESIS|COMPLEMENTARY أو CONSENSUS أو TRADE_OFF أو CONFLICT أو EVIDENCE_GAP أو SCOPE_CONFLICT؛ "
+            "اختر رمزًا واحدًا يعكس حكمك الفعلي على آراء المستشارين، وليس اتفاقًا مفترضًا"
         ),
     }
     attempts = (2 if len(rows) > 1 else max(
@@ -1086,6 +1217,7 @@ def _write_sprint_batch(
         try:
             _require_generated_arabic_quality(raw)
             generated, note = _parse_batch(raw, numbers)
+            metadata = _contract_metadata(raw)
             _check_council_message(note, {a["slug"] for a in advisors})
             prior_rows = [
                 {**p, "output_key": _output_key(output_by_number[p["number"]])}
@@ -1133,6 +1265,8 @@ def _write_sprint_batch(
             all_notes = [note] + repair_notes
             all_notes = [_ensure_readable_meta_note(council, system, text,
                          generated, opinions) for text in all_notes]
+            if metadata:
+                all_notes[0] = {"message": all_notes[0], **metadata}
             return generated, all_notes
         except RoadmapError as exc:
             error = str(exc)
@@ -1196,7 +1330,13 @@ def _complete(data: dict, council: Any, advisors: list[dict], persona: str) -> d
     for model_message in messages:
         _require_generated_arabic_quality(model_message["message"])
         _check_council_message(model_message["message"], {a["slug"] for a in advisors})
-    return _envelope(opinions, messages, meta_messages, {"sprints": completed})
+    extras = {}
+    for note in meta_messages:
+        if isinstance(note, dict):
+            for key in ("decision_memory", "human_escalation"):
+                if key in note:
+                    extras[key] = note[key]
+    return _envelope(opinions, messages, meta_messages, {"sprints": completed}, extras)
 
 
 def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) -> dict:
@@ -1208,6 +1348,7 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
     if not isinstance(sprint, dict):
         raise RoadmapError("Regeneration requires sprint context")
     _required_number(sprint.get("number"))
+    sprint = {**sprint, "output": _normalize_output(sprint.get("output"))}
     if not _text(sprint.get("title"), limit=130, arabic=True) or not _text(sprint.get("description"), limit=650, arabic=True):
         raise RoadmapError("Regeneration requires sprint title and description")
     reason = _text(data.get("reason"), limit=1500)
@@ -1216,7 +1357,7 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
         if not isinstance(old, list):
             raise RoadmapError("tasks must be a list")
         old_names = old
-        output_rule = "TASK|مهمة عربية، سطر لكل مهمة؛ 3 إلى 5 مهام جديدة مختلفة ومحددة بالترتيب."
+        output_rule = "TASK|مهمة عربية محددة|planned_percent؛ 3 إلى 5 مهام جديدة بالترتيب؛ planned_percent عدد 0..100، 100 للمكتمل خلال الأسبوع."
     else:
         old = payload.get("indicator")
         other = payload.get("other_indicators", [])
@@ -1251,7 +1392,7 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
         "reason": reason, "sprint": sprint, "previous": old,
         "other_indicators": payload.get("other_indicators", []),
         "advisors": _meta_context(advisors, opinions),
-        "required_output_format": output_rule + "\nMETA_MESSAGE|سبب اختيار البديل بصوت الميتا بالعربية",
+        "required_output_format": output_rule + "\nMETA_MESSAGE|سبب اختيار البديل بصوت الميتا بالعربية\nSYNTHESIS|رمز الحكم الصحيح على آراء المستشارين",
     }
     if kind == "sprint":
         # Specialist expertise still contributes, but Meta gets only the
@@ -1288,7 +1429,7 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
                 "بلا توجيهات للخبراء أو رموز أو مسميات استشارية. "
                 "اكتب بالعربية الفصحى السليمة فقط، بلا أحرف كورية أو صينية أو ألفاظ مشوهة، "
                 "وراجع صياغة رسالة META_MESSAGE أيضًا. "
-                "اتبع البروتوكول TASK|... لكل مهمة وMETA_MESSAGE|... في النهاية."
+                "اتبع البروتوكول TASK|المهمة|100 لكل مهمة وMETA_MESSAGE|... في النهاية."
                 if kind == "sprint" else
                 f"ردك السابق رُفض: {error}. أعِد الرد بالبروتوكول المطلوب."
             )
@@ -1300,6 +1441,7 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
         )
         try:
             _require_generated_arabic_quality(raw)
+            metadata = _contract_metadata(raw)
             try:
                 suggestion, note = _parse_regeneration(raw, kind, old_names)
             except RoadmapError as first_error:
@@ -1340,7 +1482,9 @@ def _regenerate(data: dict, council: Any, advisors: list[dict], persona: str) ->
     for model_message in messages:
         _require_generated_arabic_quality(model_message["message"])
         _check_council_message(model_message["message"], {a["slug"] for a in advisors})
-    return _envelope(opinions, messages, [note], suggestion)
+    return _envelope(opinions, messages,
+                     [{"message": note, **metadata}] if metadata else [note],
+                     suggestion, metadata)
 
 
 def _check_council_message(message: str, selected: set[str]) -> None:
@@ -1392,21 +1536,93 @@ def _check_recent_history(sprint: dict, previous_sprints: list[dict]) -> None:
             )
 
 
-def _envelope(opinions: list[dict], messages: list[dict], meta_messages: list[str], suggestion: dict) -> dict:
+_SYNTHESIS_CODES = frozenset((
+    "CONSENSUS", "COMPLEMENTARY", "TRADE_OFF", "CONFLICT", "EVIDENCE_GAP", "SCOPE_CONFLICT"
+))
+_DECISION_STATUSES = frozenset((
+    "APPROVED", "APPROVED WITH CONDITIONS", "PILOT FIRST", "NEEDS MORE EVIDENCE",
+    "ESCALATE", "DO NOT PROCEED"
+))
+_ESCALATION_TYPES = frozenset((
+    "BINDING_LEGAL_OPINION", "MEDICAL_DECISION", "REGULATED_INVESTMENT",
+    "FORMAL_ACCOUNTING_OPINION", "SENSITIVE_HR_DECISION", "HIGH_RISK_CYBERSECURITY",
+    "CONTRACTUAL_COMMITMENT", "SENSITIVE_PERSONAL_DATA", "BOARD_OR_ASSEMBLY_EXCLUSIVE"
+))
+
+
+def _contract_metadata(raw: str) -> dict:
+    """Read *optional* Meta metadata from a reply, without assuming agreement.
+
+    Does not participate in sprint parsing. If the old V11 model omits these
+    lines, the original content and council execution remain unchanged.
+    """
+    entries: dict[str, str] = {}
+    for line in _lines(raw):
+        key, sep, value = line.partition("|")
+        if sep and key in {"SYNTHESIS", "DECISION_STATUS", "DECISION_ISSUE",
+                           "DECISION", "DECISION_OWNER", "DECISION_OUTCOME",
+                           "ESCALATION_TYPE", "ESCALATION_STATUS", "ESCALATION_REASON"}:
+            entries[key] = value.strip()
+    result: dict[str, Any] = {}
+    synthesis = entries.get("SYNTHESIS", "")
+    if synthesis in _SYNTHESIS_CODES:
+        result["synthesis"] = synthesis
+    status = entries.get("DECISION_STATUS")
+    issue = _text(entries.get("DECISION_ISSUE"), limit=700, arabic=True)
+    decision = _text(entries.get("DECISION"), limit=1200, arabic=True)
+    if status in _DECISION_STATUSES and issue and decision:
+        memory = {"status": status, "issue": issue, "decision": decision}
+        owner = _text(entries.get("DECISION_OWNER"), limit=200, arabic=True)
+        outcome = _text(entries.get("DECISION_OUTCOME"), limit=600, arabic=True)
+        if owner:
+            memory["owner"] = owner
+        if outcome:
+            memory["outcome"] = outcome
+        result["decision_memory"] = memory
+    esc_type = entries.get("ESCALATION_TYPE")
+    esc_status = entries.get("ESCALATION_STATUS")
+    esc_reason = _text(entries.get("ESCALATION_REASON"), limit=1200, arabic=True)
+    if esc_type in _ESCALATION_TYPES and esc_status in _DECISION_STATUSES and esc_reason:
+        result["human_escalation"] = {"type": esc_type, "status": esc_status,
+                                      "reason": esc_reason}
+    return result
+
+
+def _envelope(opinions: list[dict], messages: list[dict], meta_messages: list[Any],
+              suggestion: dict, contract_extras: dict | None = None) -> dict:
     transcript = []
     # These are actual model-produced independent opinions and meta decisions,
     # represented as a chronological council group chat for the admin UI.
+    selected = {x["advisor_id"] for x in opinions}
     for message in messages:
-        transcript.append({"sequence": len(transcript) + 1, **message})
+        row = {"sequence": len(transcript) + 1, **message}
+        if row.get("from") in selected:
+            # Independent opinions are professional interpretation, not proof
+            # of verified project outcomes or secondary-source evidence.
+            row["evidence"] = {
+                "class": "I2",
+                "description": "تقدير مهني من معطيات الطلب يحتاج إلى التحقق قبل إثبات النتائج."
+            }
+        transcript.append(row)
     for note in meta_messages:
-        transcript.append({"sequence": len(transcript) + 1,
-                           "from": "meta_advisor", "message": note})
+        row = {"sequence": len(transcript) + 1, "from": "meta_advisor",
+               "message": note["message"] if isinstance(note, dict) else note}
+        if isinstance(note, dict) and note.get("synthesis") in _SYNTHESIS_CODES:
+            row["synthesis"] = note["synthesis"]
+        transcript.append(row)
     for opinion in opinions:
         _require_generated_arabic_quality(opinion["reasoning"])
-    return {"involved_advisor_ids": [x["advisor_id"] for x in opinions],
-            "advisor_reasonings": [{"advisor_id": x["advisor_id"], "reasoning": x["reasoning"]} for x in opinions],
-            "transcript": transcript,
-            "suggestion": suggestion}
+    envelope = {
+        "involved_advisor_ids": [x["advisor_id"] for x in opinions],
+        "advisor_reasonings": [{"advisor_id": x["advisor_id"], "reasoning": x["reasoning"]} for x in opinions],
+        "transcript": transcript,
+        "suggestion": suggestion
+    }
+    if isinstance(contract_extras, dict):
+        for key in ("decision_memory", "human_escalation"):
+            if isinstance(contract_extras.get(key), dict):
+                envelope[key] = contract_extras[key]
+    return envelope
 
 
 def consult_roadmap(council: Any, request: dict) -> dict:
