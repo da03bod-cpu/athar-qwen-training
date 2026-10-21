@@ -14,6 +14,9 @@ V12.2: distinguish consultant outreach from NGO execution; repair only
 consultant-outreach tasks in a sprint instead of regenerating entire cards.
 V12.3: bounded single-sprint line-grammar recovery with backend-owned numbering;
 retain strict multi-sprint validation and deliverable quality gates.
+V12.4: contract-grounded approval handoff for backend-required approved plans.
+Accept natural Arabic submission wording and ensure a human approval-request
+task is present without claiming the plan is already approved.
 """
 from __future__ import annotations
 
@@ -25,7 +28,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-ROADMAP_CODE_VERSION = "screen5-v12.3-v11-preserved-single-sprint-grammar-recovery"
+ROADMAP_CODE_VERSION = "screen5-v12.4-v11-preserved-contract-approval-handoff"
 VALID_UNITS = frozenset(("percent", "number", "multiplier"))
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٫", "01234567890123456789.")
 _ARABIC = re.compile(r"[\u0600-\u06FF]")
@@ -951,13 +954,82 @@ def _builds_named_artifact(tasks: list[str], artifact: str) -> bool:
     return False
 
 
+# Only an explicit *request* to a human decision-maker satisfies an approved
+# plan output. These are vocabulary groups, not prescribed model phrasing.
+_APPROVAL_ACTION = re.compile(
+    r"(?:اعرض|عرض|ارفع|رفع|قدّم|قدم|تقديم|أرسل|ارسل|إرسال|ارسال|"
+    r"أحال|احال|إحالة|احالة|تسليم|سلّم|سلم|ارفق|أرفق)"
+)
+_APPROVAL_DOCUMENT = re.compile(r"(?:خط[ةه]|الخط[ةه]|مسود[ةه]|الوثيق[ةه]|وثيق[ةه]|المقترح|مقترح)")
+_APPROVAL_REQUEST = re.compile(
+    r"(?:ل?لاعتماد|اعتمادها|ل?لموافق[ةه]|ل?لإقرار|ل?لاقرار|"
+    r"ل?لمراجع[ةه]|مراجعتها|ل?لتصديق|التصديق|إقرارها|اقرارها)"
+)
+_APPROVAL_AUTHORITY = re.compile(
+    r"(?:مجلس|المجلس|الإدار[ةه]|الادار[ةه]|اللجن[ةه]|لجن[ةه]|"
+    r"الجه[ةه]|جه[ةه]|صاحب[ةه]?\s+الصلاحي[ةه]|صاحب[ةه]?\s+الاعتماد|"
+    r"المسؤول\s+المخول|المعني\s+بالاعتماد)"
+)
+_APPROVAL_UNFOUNDED_FACT = re.compile(
+    r"(?:تم\s+اعتماد\s+(?:الخط[ةه]|المسود[ةه])|"
+    r"اعتمدت\s+(?:الجه[ةه]|الإدار[ةه]|الادار[ةه]|اللجن[ةه])\s+الخط[ةه])"
+)
+_APPROVAL_HANDOFF_TASK = (
+    "رفع مسودة الخطة إلى الجهة المختصة للمراجعة والاعتماد"
+)
+
+
 def _includes_approval_submission(tasks: list[str]) -> bool:
-    """Approval must be requested from a human; don't claim it already happened."""
-    return any(re.search(
-        r"(?:اعرض|عرض|ارفع|رفع|قدم|قدّم|تقديم|احل|أحل|أرسل|إرسال)"
-        r".{0,110}(?:خطة|الخطة|اعتماد|المجلس|الإدارة)"
-        r".{0,110}(?:للاعتماد|للمراجعة|مجلس|الإدارة|الموافقة|الاعتماد)", task
-    ) for task in tasks)
+    """Submission for human approval, without falsely asserting approval occurred."""
+    for task in tasks:
+        if (_APPROVAL_ACTION.search(task) and _APPROVAL_DOCUMENT.search(task)
+                and _APPROVAL_REQUEST.search(task)
+                and _APPROVAL_AUTHORITY.search(task)
+                and not _APPROVAL_UNFOUNDED_FACT.search(task)):
+            return True
+    return False
+
+
+def _needs_approval_handoff(output: Any) -> bool:
+    """Only an explicit approved income plan from Backend triggers this gate."""
+    return (isinstance(output, dict)
+            and (_profile_for_output(output) or {}).get("kind") == "income_plan"
+            and "معتمد" in _text(output.get("text"), limit=500))
+
+
+def _complete_backend_approval_handoff(sprint: dict, output: Any) -> tuple[dict, bool]:
+    """Add only the actionable review-submission required by Backend output.
+
+    Never state that approval was obtained. Preserve valid model-written tasks,
+    and never exceed the backend's 3-5 task design. No GPU/model calls.
+    """
+    if not _needs_approval_handoff(output):
+        return sprint, False
+    existing = sprint.get("tasks")
+    if not isinstance(existing, list) or not 3 <= len(existing) <= 5:
+        return sprint, False
+    if _includes_approval_submission([x.get("text", "") for x in existing]):
+        return sprint, False
+    amended = {**sprint, "tasks": [dict(x) for x in existing]}
+    if len(amended["tasks"]) < 5:
+        amended["tasks"].append({"text": _APPROVAL_HANDOFF_TASK, "planned_percent": 100})
+    else:
+        # All five task slots are filled. Keep their work and add the
+        # contract-required handoff to a plan-review task, or the final task.
+        candidate = next(
+            (i for i in range(4, -1, -1)
+             if re.search(r"(?:مراجع[ةه]|راجع|تدقيق|تسليم|عرض)", amended["tasks"][i]["text"])
+             and re.search(r"(?:خط[ةه]|مسود[ةه])", amended["tasks"][i]["text"])),
+            4,
+        )
+        old = amended["tasks"][candidate]["text"].rstrip(" .،؛")
+        combined = old + "، ثم " + _APPROVAL_HANDOFF_TASK
+        if len(combined) > 360:
+            # Avoid deleting, truncating or silently changing original work.
+            return sprint, False
+        amended["tasks"][candidate]["text"] = combined
+    _validate_tasks(amended["tasks"], minimum=3)
+    return amended, True
 
 
 def _content_quality_issues(sprint: dict, output: Any, earlier: list[dict]) -> dict[str, str]:
@@ -1111,6 +1183,10 @@ def _repair_sprint_quality(*, council: Any, system: str, sprint: dict, source: d
                              sample=(attempt > 0), block_non_arabic_scripts=True)
         try:
             repaired, note = _parse_quality_repair(raw, fields, sprint)
+            repaired, handoff_added = _complete_backend_approval_handoff(repaired, output)
+            if handoff_added:
+                print(f"[roadmap] v12.4 repair_approval_handoff "
+                      f"sprint={sprint['number']}", flush=True)
             field_issues = _sprint_arabic_issues(repaired)
             if field_issues:
                 raise RoadmapError("; ".join(field_issues.values()))
@@ -1325,6 +1401,8 @@ def _write_sprint_batch(
             "لا يبدأ السبرينت الختامي بجمع نفس البيانات ولا تكرر مهام سبرينت التقييم. "
             "إذا تكرر المخرج في أكثر من سبرينت، طوّر العمل تدريجيًا حسب output_occurrence. "
             "اقرأ execution_focus_by_sprint لتوضيح التقدم المميز بكل سبرينت. "
+            "إذا كان مخرج السبرينت خطة معتمدة، لازم تتضمن المهام تقديم مسودة الخطة للجهة "
+            "صاحبة الصلاحية للمراجعة والاعتماد؛ لا تدعِ أن الاعتماد تحقق. "
             "لا ترجع حقول output/results/phase ولا تضف أو تحذف أرقام السبرينت."
         ),
         "context": _context(data),
@@ -1416,6 +1494,12 @@ def _write_sprint_batch(
                     repair_notes.append(targeted_note)
                     print(f"[roadmap] v12.2 targeted_advisor_task_repair "
                           f"accepted sprint={sprint['number']}", flush=True)
+                sprint, handoff_added = _complete_backend_approval_handoff(
+                    sprint, source.get("output"))
+                if handoff_added:
+                    generated[index] = sprint
+                    print(f"[roadmap] v12.4 approval_handoff sprint={sprint['number']} "
+                          "backend_output_requires_review=true", flush=True)
                 _check_historical_lookback(sprint, {
                     "output": source["output"],
                     "organization": payload.get("organization"),
