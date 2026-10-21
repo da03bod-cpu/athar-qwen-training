@@ -10,6 +10,8 @@ V12 contract bridge: planned_percent, Screen 3 result shape, and optional
 Meta decision/synthesis/evidence metadata.
 V12.1: isolate Arabic corruption in publishable fields; repair meta note
 separately without discarding a valid sprint. Restore V11 TASK|text prompts.
+V12.2: distinguish consultant outreach from NGO execution; repair only
+consultant-outreach tasks in a sprint instead of regenerating entire cards.
 """
 from __future__ import annotations
 
@@ -21,7 +23,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-ROADMAP_CODE_VERSION = "screen5-v12.1-v11-preserved-field-isolation"
+ROADMAP_CODE_VERSION = "screen5-v12.2-v11-preserved-targeted-task-guard"
 VALID_UNITS = frozenset(("percent", "number", "multiplier"))
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٫", "01234567890123456789.")
 _ARABIC = re.compile(r"[\u0600-\u06FF]")
@@ -35,6 +37,31 @@ _ANY_ADVISOR_ID = re.compile(r"(?<![A-Za-z0-9])AOS-[A-Z]{2,5}-\d{2}(?![A-Za-z0-9
 _ADVISOR_AS_TASK = re.compile(
     r"(?:المستشار(?:ين)?|مستشار(?:ين)?|المستشارة|مستشارة|الخبير(?:ين)?|خبير(?:ين)?)"
 )
+# Mentioning an advisor is not itself a request to CALL one.  The original V11
+# blanket ban rejected legitimate NGO work such as documenting recommendations.
+# These specific actions delegate sprint execution outside the organization.
+_ADVISOR_ACTOR = r"(?:المستشار(?:ون|ين|ات)?|مستشار(?:ون|ين|ات)?|المستشارة|مستشارة|الخبير(?:ون|ين|ات)?|خبير(?:ون|ين|ات)?|الخبراء|خبراء)"
+_ADVISOR_OUTREACH = re.compile(
+    r"(?:"
+    r"(?:التواصل|تواصل|الاتصال|اتصل|التنسيق|تنسيق|التشاور|تشاور|المراسلة|مراسلة|"
+    r"استدعاء|استدعي|استشارة|استشر|استعانة|الاستعانة|دعوة|تكليف|مقابلة|اجتماع|عقد\s+اجتماع)"
+    r"\s+(?:(?:مع|إلى|الى|ب|لدى|لـ|من|على)\s*)?" + _ADVISOR_ACTOR +
+    r"|(?:طلب|الحصول\s+على|استطلاع)\s+(?:رأي|مشورة|استشارة|موافقة|توجيهات|توصيات?)"
+    r"(?:\s+من|\s+لدى)?\s+" + _ADVISOR_ACTOR +
+    r"|(?:إرسال|ارسال|عرض|رفع)\s+.{0,45}?(?:إلى|الى|على|لـ)\s*" + _ADVISOR_ACTOR +
+    r"|(?:مراجعة|نقاش|مناقشة|تقييم)\s+.{0,40}?(?:مع|بمشاركة)\s*" + _ADVISOR_ACTOR +
+    r")"
+)
+
+
+def _advisor_task_issue(value: str) -> str | None:
+    """Only reject consultant-dependent actions or AOS IDs in NGO task text."""
+    if _ANY_ADVISOR_ID.search(value):
+        return "Task includes an advisor ID instead of an NGO action"
+    if _ADVISOR_OUTREACH.search(value):
+        return "Task delegates execution to calling/consulting an advisor, not an NGO action"
+    return None
+
 _WEAK_INDICATOR = re.compile(r"(?:التوصيات\s+المؤجلة|التوصيات\s+المؤثرة|التغطية\s+المؤقتة\s+للتمويل)")
 # A structurally valid unit can still contradict the Arabic indicator label.
 # Refuse ambiguous/incorrect model output rather than altering its semantics.
@@ -222,7 +249,8 @@ def _task_line(value: str) -> dict:
     return {"text": value, "planned_percent": 100}
 
 
-def _validate_tasks(tasks: Any, *, minimum: int = 1) -> list[dict]:
+def _validate_tasks(tasks: Any, *, minimum: int = 1,
+                    allow_advisor_outreach_for_repair: bool = False) -> list[dict]:
     if not isinstance(tasks, list) or not minimum <= len(tasks) <= 8:
         raise RoadmapError("Tasks list length invalid")
     out = []
@@ -231,8 +259,9 @@ def _validate_tasks(tasks: Any, *, minimum: int = 1) -> list[dict]:
         clean = _text(value, limit=360, arabic=True)
         if not clean:
             raise RoadmapError("Empty/invalid task text")
-        if _ANY_ADVISOR_ID.search(clean) or _ADVISOR_AS_TASK.search(clean):
-            raise RoadmapError("Task is about calling an advisor, not an executable NGO action")
+        issue = _advisor_task_issue(clean)
+        if issue and not allow_advisor_outreach_for_repair:
+            raise RoadmapError(issue)
         percent = _planned_percent(row.get("planned_percent") if isinstance(row, dict) else None)
         out.append({"text": clean, "planned_percent": percent})
     if len({_norm(x["text"]) for x in out}) != len(out):
@@ -244,7 +273,8 @@ def _norm(value: str) -> str:
     return re.sub(r"\s+", " ", str(value).strip()).casefold()
 
 
-def _validate_sprint(row: Any, number: int) -> dict:
+def _validate_sprint(row: Any, number: int, *,
+                     allow_advisor_outreach_for_repair: bool = False) -> dict:
     if not isinstance(row, dict) or _required_number(row.get("number")) != number:
         raise RoadmapError(f"Missing or wrong sprint number {number}")
     title = _text(row.get("title"), limit=130, arabic=True)
@@ -254,7 +284,8 @@ def _validate_sprint(row: Any, number: int) -> dict:
     if _ANY_ADVISOR_ID.search(title + " " + desc):
         raise RoadmapError(f"Sprint {number} title/description contains advisor ID")
     # Contract design target: approximately 3-5 tasks and indicators per sprint.
-    tasks = _validate_tasks(row.get("tasks"), minimum=3)
+    tasks = _validate_tasks(row.get("tasks"), minimum=3,
+        allow_advisor_outreach_for_repair=allow_advisor_outreach_for_repair)
     if len(tasks) > 5:
         raise RoadmapError(f"Sprint {number} should have 3-5 tasks")
     inds = row.get("indicators")
@@ -485,7 +516,8 @@ def _parse_indicator_line(line: str) -> dict:
                        "unit": segments[-2].strip(), "target": segments[-1].strip()})
 
 
-def _parse_batch(raw: str, numbers: list[int]) -> tuple[list[dict], str]:
+def _parse_batch(raw: str, numbers: list[int], *,
+                 allow_advisor_outreach_for_repair: bool = False) -> tuple[list[dict], str]:
     sprints, current, meta_message = [], None, ""
     for line in _lines(raw):
         if line.startswith("BEGIN_SPRINT|"):
@@ -497,7 +529,8 @@ def _parse_batch(raw: str, numbers: list[int]) -> tuple[list[dict], str]:
         if line == "END_SPRINT":
             if current is None:
                 raise RoadmapError("END_SPRINT without BEGIN_SPRINT")
-            sprints.append(_validate_sprint(current, current["number"]))
+            sprints.append(_validate_sprint(current, current["number"],
+                allow_advisor_outreach_for_repair=allow_advisor_outreach_for_repair))
             current = None
             continue
         if line.startswith("META_MESSAGE|"):
@@ -961,7 +994,9 @@ def _repair_sprint_quality(*, council: Any, system: str, sprint: dict, source: d
                  "إذا المطلوب تقرير ختامي وخطة متابعة، أضف مهمتين واضحتين لإنجاز كليهما. "
                  "إذا المخرج خطة معتمدة، أضف مهمة عرض الخطة للاعتماد دون الادعاء أنها معتمدة فعلًا. "
                  "ممنوع مؤشرات القوالب العامة أو حقول برمجية. "
-                 "لا تغير أي حقل آخر ولا تفترض حقائق غير مذكورة. "),
+                 "لا تغير أي حقل آخر ولا تفترض حقائق غير مذكورة. "
+                 "لا تجعل الاتصال أو الاستشارة أو الاجتماع مع مستشار جزءًا من مهام التنفيذ؛ "
+                 "استخلص الرأي المهني إلى إجراءات ينفذها فريق الجمعية نفسه. "),
         "required_output_format": (
             f"BEGIN_SPRINT|{sprint['number']}\nTITLE|عنوان خاص بالمخرج\nDESCRIPTION|وصف مرتبط بالمخرج\nTASK|مهمة محددة\nINDICATOR|اسم مؤشر خاص بالمخرج|number|1\nEND_SPRINT\nMETA_MESSAGE|ملخص"
             if fields == {"card"} else
@@ -1244,7 +1279,9 @@ def _write_sprint_batch(
                 "indicator_examples_by_sprint اقتراحات مستهدفات وليست حقائق عن الجمعية. "
                 "إذا سبب الرفض هو تكرار المهام مع سبرينت آخر، فأعد كتابة 3-5 مهام مختلفة مرتبطة "
                 "بمخرج كل سبرينت وبخطوة تقدّم جديدة؛ لا تنسخ مهام previous_sprints_summary أو سبرينت آخر في الدفعة. "
-                "أعد كتابة 3-5 مؤشرات سليمة لكل سبرينت ولا تكرر الأسماء داخل السبرينت."
+                "أعد كتابة 3-5 مؤشرات سليمة لكل سبرينت ولا تكرر الأسماء داخل السبرينت. "
+                "إذا الخطأ في مهمة تستدعي مستشارًا، استبدلها بفعل ينفذه موظفو الجمعية "
+                "لإنجاز الوثيقة أو التحليل المحدد؛ لا تجعل التواصل مع المستشار مهمة."
             )
         raw = _meta_generate(
             council, system, candidate,
@@ -1255,7 +1292,11 @@ def _write_sprint_batch(
         try:
             # Check publishable fields, not the entire raw model response:
             # an admin-only META_MESSAGE must not invalidate valid sprint work.
-            generated, note = _parse_batch(raw, numbers)
+            # Parse the card even if one task is a consultant-outreach instruction.
+            # It is NEVER published as-is: fix just its tasks below and validate
+            # strictly before returning the sprint to the backend.
+            generated, note = _parse_batch(
+                raw, numbers, allow_advisor_outreach_for_repair=True)
             metadata = _contract_metadata(raw)
             _check_council_message(note, {a["slug"] for a in advisors})
             prior_rows = [
@@ -1264,6 +1305,21 @@ def _write_sprint_batch(
             ]
             repair_notes = []
             for index, (sprint, source) in enumerate(zip(generated, rows)):
+                outreach_issues = [_advisor_task_issue(task_row["text"])
+                                   for task_row in sprint["tasks"]]
+                outreach_issues = [problem for problem in outreach_issues if problem]
+                if outreach_issues:
+                    # This is the only temporary relaxed path: the initial
+                    # parsed sprint is not accepted until its tasks are repaired.
+                    sprint, targeted_note = _repair_sprint_quality(
+                        council=council, system=system, sprint=sprint,
+                        source=source, opinions=opinions, previous=prior_rows,
+                        errors={"tasks": "; ".join(sorted(set(outreach_issues)))},
+                    )
+                    generated[index] = sprint
+                    repair_notes.append(targeted_note)
+                    print(f"[roadmap] v12.2 targeted_advisor_task_repair "
+                          f"accepted sprint={sprint['number']}", flush=True)
                 _check_historical_lookback(sprint, {
                     "output": source["output"],
                     "organization": payload.get("organization"),
