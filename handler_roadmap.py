@@ -17,6 +17,10 @@ retain strict multi-sprint validation and deliverable quality gates.
 V12.4: contract-grounded approval handoff for backend-required approved plans.
 V12.5: detect malformed initial KPIs without aborting sprint parsing; repair
 only indicators, then revalidate the whole sprint strictly before publishing.
+V12.6: when a model repeatedly cannot write usable KPIs, recover only the
+KPI list for explicitly identified file+source-register deliverables; proposals
+come from the backend's exact output, never from invented historical data.
+All unchanged model-generated tasks/card text and hard validation remain.
 Accept natural Arabic submission wording and ensure a human approval-request
 task is present without claiming the plan is already approved.
 """
@@ -30,7 +34,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-ROADMAP_CODE_VERSION = "screen5-v12.5-v11-preserved-kpi-field-recovery"
+ROADMAP_CODE_VERSION = "screen5-v12.6-v11-preserved-grounded-kpi-recovery"
 VALID_UNITS = frozenset(("percent", "number", "multiplier"))
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٫", "01234567890123456789.")
 _ARABIC = re.compile(r"[\u0600-\u06FF]")
@@ -833,8 +837,66 @@ def _meta_system(persona: str) -> str:
     )
 
 
+# This is the only deliberate deterministic KPI rescue class in V12.6.
+# It requires BOTH independently named components in the backend-assigned
+# sprint output.  It never assumes an observed outcome or historic value.
+# Values 1 and 100 are *proposed weekly targets* (per Screen 5 contract).
+def _is_initial_data_file_with_source_register(output: Any) -> bool:
+    if not isinstance(output, dict):
+        return False
+    source = _text(output.get("text"), limit=1000)
+    if not source:
+        return False
+    return (bool(re.search(r"(?:ملف\s+(?:ال)?بيانات|الملف\s+(?:ال)?بيانات)", source))
+            and bool(re.search(r"(?:سجل\s+(?:ال)?مصدر|سجل\s+مصادر|توثيق\s+مصادر|سجل\s+للمصادر)", source)))
+
+
+def _concrete_data_file_kpis() -> list[dict]:
+    """Measurable plans, not actual beneficiary/funding/performance claims."""
+    return [
+        {"name": "عدد ملفات البيانات الأولية المنشأة", "unit": "number", "target": 1},
+        {"name": "عدد سجلات توثيق مصادر القيم المنشأة", "unit": "number", "target": 1},
+        {"name": "نسبة القيم المدخلة ذات مصدر موثق", "unit": "percent", "target": 100},
+    ]
+
+
+def _try_backend_grounded_kpi_recovery(*, sprint: dict, output: Any,
+                                       previous: list[dict], fields: set[str]) -> dict | None:
+    """Final field-only rescue.  Refuse outputs not grounded in the two artifacts.
+
+    No generated task, title, description or admin decision is substituted.
+    If *anything else* is wrong, the existing strict failure remains in force.
+    """
+    if fields != {"indicators"} or not _is_initial_data_file_with_source_register(output):
+        return None
+    # The tasks MUST actually produce both explicit backend artifacts.  A
+    # finance plan or consultant-call task cannot be rescued with nice KPIs.
+    task_texts = [row.get("text", "") for row in sprint.get("tasks", [])]
+    action = re.compile(r"(?:إعداد|اعداد|أعد|اعد|إنشاء|انشاء|أنشئ|انشئ|"
+                        r"تجهيز|جهز|سجل|تسجيل|إضافة|اضافة|أدخل|ادخال|ربط|اربط|توثيق|وثق)")
+    has_file = any(action.search(t) and re.search(r"(?:ملف|البيانات)", t)
+                   for t in task_texts)
+    has_provenance = any(action.search(t) and re.search(r"(?:مصدر|المصادر|مصادر|سجل)", t)
+                         for t in task_texts)
+    if not (has_file and has_provenance):
+        return None
+    candidate = {**sprint, "indicators": [_indicator(k) for k in _concrete_data_file_kpis()]}
+    try:
+        candidate = _validate_sprint(candidate, sprint["number"])
+        if _sprint_arabic_issues(candidate):
+            return None
+        if _content_quality_issues(candidate, output, previous):
+            return None
+        _check_recent_history(candidate, previous)
+    except RoadmapError:
+        return None
+    return candidate
+
+
 def _indicator_examples_for_output(output: Any) -> list[str]:
     """Output-specific examples, never generic placeholder KPIs."""
+    if _is_initial_data_file_with_source_register(output):
+        return [f"{k['name']}|{k['unit']}|{k['target']}" for k in _concrete_data_file_kpis()]
     profile = _profile_for_output(output)
     if profile:
         return profile["examples"]
@@ -1177,7 +1239,7 @@ def _repair_sprint_quality(*, council: Any, system: str, sprint: dict, source: d
         "why_rejected": errors,
         "deliverable_execution_focus": profile["focus"] if profile else
             "أنجز المخرج المحدد في سياق السبرينت، لا مجرد وصف التوصيات.",
-        "specific_indicator_examples": profile["examples"] if profile else [],
+        "specific_indicator_examples": _indicator_examples_for_output(output),
         "previous_stage_headings": [{"number": row["number"], "title": row["title"]}
                                     for row in previous[-4:]],
         "advisory_insights": _task_advisory_insights(opinions),
@@ -1233,6 +1295,17 @@ def _repair_sprint_quality(*, council: Any, system: str, sprint: dict, source: d
             last = str(exc)
             print(f"[roadmap] quality repair rejected sprint={sprint['number']} "
                   f"attempt={attempt+1}/{attempts}: {last}", flush=True)
+    recovered = _try_backend_grounded_kpi_recovery(
+        sprint=sprint, output=output, previous=previous, fields=fields)
+    if recovered is not None:
+        print(f"[roadmap] v12.6 grounded_kpi_recovery_accepted "
+              f"sprint={sprint['number']} source=backend_output_only "
+              "targets=proposals", flush=True)
+        return recovered, (
+            "تعذر قبول مؤشرات النموذج بعد الإصلاح؛ اقتُرحت بدلًا منها مقاييس "
+            "اكتمال ملف البيانات وسجل مصادر القيم استنادًا إلى المخرج المحدد، "
+            "والمستهدفات تحتاج مراجعة الجمعية قبل الاعتماد."
+        )
     raise RoadmapError(f"Sprint {sprint['number']} quality repair failed: {last}")
 
 
@@ -1517,22 +1590,38 @@ def _write_sprint_batch(
                     if row.get("_roadmap_invalid_indicator_error")
                 ]
                 if malformed:
-                    print(f"[roadmap] v12.5 focused_kpi_repair_start "
-                          f"sprint={sprint['number']} positions={[i for i, _ in malformed]}",
-                          flush=True)
-                    sprint, repaired_note = _repair_sprint_quality(
-                        council=council, system=system, sprint=sprint,
-                        source=source, opinions=opinions, previous=prior_rows,
-                        errors={"indicators": "; ".join(
-                            f"indicator {i}: {msg}" for i, msg in malformed)},
-                    )
-                    # _repair_sprint_quality/_parse_quality_repair run strict
-                    # _validate_sprint; this check is defense-in-depth.
-                    sprint = _validate_sprint(sprint, sprint["number"])
-                    generated[index] = sprint
-                    repair_notes.append(repaired_note)
-                    print(f"[roadmap] v12.5 focused_kpi_repair_accepted "
-                          f"sprint={sprint['number']}", flush=True)
+                    # V12.6: If the backend explicitly asks for a concrete
+                    # initial data file PLUS source register, and the model's
+                    # tasks really create both, recover just the broken KPIs
+                    # from source-grounded weekly measures immediately.
+                    # This avoids repeated expensive model calls for the
+                    # same non-measurable KPI and never claims observed data.
+                    grounded = _try_backend_grounded_kpi_recovery(
+                        sprint=sprint, output=source.get("output"),
+                        previous=prior_rows, fields={"indicators"})
+                    if grounded is not None:
+                        sprint = grounded
+                        generated[index] = sprint
+                        print(f"[roadmap] v12.6 grounded_kpi_recovery_accepted "
+                              f"sprint={sprint['number']} stage=initial_parse "
+                              "source=backend_output_only targets=proposals", flush=True)
+                    else:
+                        print(f"[roadmap] v12.5 focused_kpi_repair_start "
+                              f"sprint={sprint['number']} positions={[i for i, _ in malformed]}",
+                              flush=True)
+                        sprint, repaired_note = _repair_sprint_quality(
+                            council=council, system=system, sprint=sprint,
+                            source=source, opinions=opinions, previous=prior_rows,
+                            errors={"indicators": "; ".join(
+                                f"indicator {i}: {msg}" for i, msg in malformed)},
+                        )
+                        # _repair_sprint_quality/_parse_quality_repair run strict
+                        # _validate_sprint; this check is defense-in-depth.
+                        sprint = _validate_sprint(sprint, sprint["number"])
+                        generated[index] = sprint
+                        repair_notes.append(repaired_note)
+                        print(f"[roadmap] v12.5 focused_kpi_repair_accepted "
+                              f"sprint={sprint['number']}", flush=True)
                 outreach_issues = [_advisor_task_issue(task_row["text"])
                                    for task_row in sprint["tasks"]]
                 outreach_issues = [problem for problem in outreach_issues if problem]
