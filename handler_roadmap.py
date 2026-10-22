@@ -17,7 +17,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-ROADMAP_CODE_VERSION = "screen5-v9-stable-prompt-quality-only-2026-10-21"
+ROADMAP_CODE_VERSION = "screen5-v9-stable-two-kpi-hotfixes-2026-10-22"
 VALID_UNITS = frozenset(("percent", "number", "multiplier"))
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٫", "01234567890123456789.")
 _ARABIC = re.compile(r"[\u0600-\u06FF]")
@@ -31,7 +31,14 @@ _ANY_ADVISOR_ID = re.compile(r"(?<![A-Za-z0-9])AOS-[A-Z]{2,5}-\d{2}(?![A-Za-z0-9
 _ADVISOR_AS_TASK = re.compile(
     r"(?:المستشار(?:ين)?|مستشار(?:ين)?|المستشارة|مستشارة|الخبير(?:ين)?|خبير(?:ين)?)"
 )
-_WEAK_INDICATOR = re.compile(r"(?:التوصيات\s+المؤجلة|التوصيات\s+المؤثرة|التغطية\s+المؤقتة\s+للتمويل)")
+# Keep the original guards for clearly weak categories, but do not ban
+# "التوصيات المؤثرة" inside a concrete, measurable completed-deliverable KPI.
+_WEAK_INDICATOR = re.compile(r"(?:التوصيات\s+المؤجلة|التغطية\s+المؤقتة\s+للتمويل)")
+# A bare label ("عدد التوصيات المؤثرة") is still vague. A specific item such
+# as "عدد التوصيات المؤثرة التي تم دمجها في نسخة التحسين" is measurable.
+_VAGUE_IMPACT_RECOMMENDATIONS = re.compile(
+    r"^(?:(?:عدد|إجمالي عدد|نسبة|معدل|مؤشر)\s+)?التوصيات\s+المؤثرة$"
+)
 # A structurally valid unit can still contradict the Arabic indicator label.
 # Refuse ambiguous/incorrect model output rather than altering its semantics.
 _PERCENT_LABEL = re.compile(r"^(?:نسبة|النسبة|مؤشر نسبة|معدل النسبة)\s")
@@ -143,7 +150,7 @@ def _indicator(data: Any) -> dict:
         raise RoadmapError("Missing indicator name or invalid unit")
     if _ANY_ADVISOR_ID.search(name) or _ADVISOR_AS_TASK.search(name):
         raise RoadmapError("Indicator must measure sprint work, not an advisor")
-    if _WEAK_INDICATOR.search(name):
+    if _WEAK_INDICATOR.search(name) or _VAGUE_IMPACT_RECOMMENDATIONS.fullmatch(name):
         raise RoadmapError("Indicator does not measure a concrete sprint deliverable")
     if _PERCENT_LABEL.search(name) and unit != "percent":
         raise RoadmapError("Indicator name begins with نسبة, so unit must be percent (not number)")
@@ -423,6 +430,110 @@ def _parse_indicator_line(line: str) -> dict:
     # Permit a vertical bar in the label, but not in the unit/target.
     return _indicator({"name": "|".join(segments[1:-2]),
                        "unit": segments[-2].strip(), "target": segments[-1].strip()})
+
+
+def _recover_advisor_kpis_for_assigned_outputs(raw: str, rows: list[dict]) -> str:
+    """Conservative repair for an *advisor-directed* KPI in whole-roadmap generation.
+
+    A sprint KPI must measure an NGO deliverable, not tasks allocated to
+    specialists. V9's validator correctly rejects the latter; merely allowing
+    the word 'advisor' would publish invalid KPIs. Instead, when the backend's
+    assigned output explicitly names a tangible artifact, replace ONLY the
+    offending indicator with a proposed measure of that artifact. No new model
+    call, no fabricated achieved result, and no change to other indicators.
+
+    Deliberately narrow: unknown output types, advisor IDs, malformed line
+    grammar, or exhausted distinct candidates keep the V9 retry/reject path.
+    """
+    outputs: dict[int, str] = {}
+    for row in rows:
+        output = row.get("output")
+        if isinstance(output, dict):
+            source = _text(output.get("text"), limit=1600)
+            if source:
+                outputs[row["number"]] = source
+
+    def candidates(source: str) -> list[tuple[str, str, int]]:
+        choices: list[tuple[str, str, int]] = []
+        # These are deliverable types, *not* assumptions about completed work.
+        if "قائمة تحقق" in source and "جاهزية" in source:
+            choices.extend([
+                ("عدد قوائم التحقق من الجاهزية المستكملة والموثقة", "number", 1),
+                ("نسبة بنود قائمة التحقق من الجاهزية التي تم تقييمها وتوثيقها", "percent", 100),
+            ])
+        if "سجل ملاحظات" in source and "جاهزية" in source:
+            choices.append(("عدد سجلات ملاحظات الجاهزية التي تم إعدادها وتوثيقها", "number", 1))
+        if "وثيقة نطاق" in source:
+            choices.append(("عدد وثائق نطاق العمل المكتملة والمقدمة للمراجعة", "number", 1))
+        if "جدول مسؤوليات" in source:
+            choices.append(("عدد جداول المسؤوليات المكتملة والموثقة", "number", 1))
+        if "دليل استخدام" in source:
+            choices.append(("عدد أدلة الاستخدام المكتملة والمراجعة", "number", 1))
+        if "سجل تنفيذ" in source:
+            choices.append(("عدد سجلات التنفيذ المكتملة والموثقة", "number", 1))
+        if "سجل أدلة" in source:
+            choices.append(("عدد سجلات الأدلة المنشأة والموثقة", "number", 1))
+        if "سجل تغيير" in source:
+            choices.append(("عدد سجلات التغيير المكتملة والموثقة", "number", 1))
+        if "ملف أدلة نهائي" in source:
+            choices.append(("عدد ملفات الأدلة النهائية المكتملة والموثقة", "number", 1))
+        return choices
+
+    lines = raw.splitlines()
+    block: int | None = None
+    used: dict[int, set[str]] = {}
+    # Gather *all* other KPI names first, so the fix cannot create duplicates
+    # even when the valid candidate appears later in the model response.
+    for line in lines:
+        if line.startswith("BEGIN_SPRINT|"):
+            try:
+                block = _required_number(line.partition("|")[2].strip())
+            except RoadmapError:
+                block = None
+        elif line == "END_SPRINT":
+            block = None
+        elif block is not None and line.startswith("INDICATOR|"):
+            parts = line.split("|")
+            if len(parts) >= 4:
+                name = "|".join(parts[1:-2]).strip()
+                if not _ADVISOR_AS_TASK.search(name) and not _ANY_ADVISOR_ID.search(name):
+                    used.setdefault(block, set()).add(_norm(name))
+
+    changed = []
+    block = None
+    for idx, line in enumerate(lines):
+        if line.startswith("BEGIN_SPRINT|"):
+            try:
+                block = _required_number(line.partition("|")[2].strip())
+            except RoadmapError:
+                block = None
+            continue
+        if line == "END_SPRINT":
+            block = None
+            continue
+        if block not in outputs or not line.startswith("INDICATOR|"):
+            continue
+        parts = line.split("|")
+        if len(parts) < 4:
+            continue
+        name = "|".join(parts[1:-2]).strip()
+        if _ANY_ADVISOR_ID.search(name) or not _ADVISOR_AS_TASK.search(name):
+            continue
+        for replacement, unit, target in candidates(outputs[block]):
+            if _norm(replacement) in used.setdefault(block, set()):
+                continue
+            # Keep the *normal* V9 validator authoritative.
+            try:
+                _indicator({"name": replacement, "unit": unit, "target": target})
+            except RoadmapError:
+                continue
+            lines[idx] = f"INDICATOR|{replacement}|{unit}|{target}"
+            used[block].add(_norm(replacement))
+            changed.append(block)
+            break
+    for number in sorted(set(changed)):
+        print(f"[roadmap] sprint={number} grounded_advisor_kpi_recovery accepted", flush=True)
+    return "\n".join(lines) if changed else raw
 
 
 def _parse_batch(raw: str, numbers: list[int]) -> tuple[list[dict], str]:
@@ -898,6 +1009,10 @@ def _write_sprint_batch(
         )
         try:
             _require_generated_arabic_quality(raw)
+            # Retain the V9 parser/validator and its retry budget. Only a KPI
+            # about advisor activity with a clear backend-assigned deliverable
+            # receives a narrow, traceable replacement before strict parsing.
+            raw = _recover_advisor_kpis_for_assigned_outputs(raw, rows)
             generated, note = _parse_batch(raw, numbers)
             _check_council_message(note, {a["slug"] for a in advisors})
             prior_rows = [
