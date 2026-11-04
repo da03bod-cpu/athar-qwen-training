@@ -5,7 +5,13 @@ ENV JUPYTER_DISABLE=1 \
     TOKENIZERS_PARALLELISM=false \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     ATHAR_KNOWLEDGE_EMBEDDING_MODEL=intfloat/multilingual-e5-small \
-    ATHAR_KNOWLEDGE_OFFLINE=1
+    ATHAR_KNOWLEDGE_OFFLINE=1 \
+    ATHAR_STAKEHOLDER_QUALITY_REVIEW=1 \
+    ATHAR_STAKEHOLDER_MAX_INPUT_TOKENS=24000 \
+    ATHAR_STAKEHOLDER_MAX_NEW_TOKENS=1900 \
+    ATHAR_STAKEHOLDER_REVIEW_MAX_NEW_TOKENS=1900 \
+    ATHAR_STAKEHOLDER_GENERATION_MAX_SECONDS=180 \
+    ATHAR_STAKEHOLDER_REVIEW_MAX_SECONDS=180
 
 WORKDIR /workspace/data/athar
 
@@ -43,5 +49,5 @@ RUN /workspace/axolotl-venv/bin/python -m py_compile \
     handler.py handler_advisory_council.py handler_roadmap.py \
     handler_knowledge.py handler_stakeholder.py knowledge/*.py
 
-LABEL athar.redeploy="2026-11-04-knowledge-v5-stakeholder-additive"
+LABEL athar.redeploy="2026-11-05-knowledge-v5-stakeholder-quality-v6"
 ENTRYPOINT ["/workspace/axolotl-venv/bin/python", "-u", "/workspace/data/athar/handler.py"]
