@@ -18233,6 +18233,24 @@ def _handler_impl(job):
     )
 
     # ---------------------------------------------------------------
+    # Additive V5 knowledge routes, same existing RunPod endpoint.
+    # Legacy advisor/roadmap/continual paths are deliberately unchanged.
+    # ---------------------------------------------------------------
+    if request_type in ("knowledge_index", "knowledge_search", "knowledge_delete"):
+        from handler_knowledge import dispatch as knowledge_dispatch
+        return knowledge_dispatch(job_input)
+
+    if request_type == "stakeholder_strategy":
+        from handler_stakeholder import dispatch as stakeholder_dispatch
+        return stakeholder_dispatch(
+            job_input,
+            load_model=ensure_rich_router_model,
+            get_model=lambda: _RICH_MODEL,
+            get_tokenizer=lambda: _RICH_TOKENIZER,
+            model_lock=INFERENCE_MODEL_LOCK,
+        )
+
+    # ---------------------------------------------------------------
     # Production advisor discovery / matching
     # ---------------------------------------------------------------
     if request_type == "advisory_match":
