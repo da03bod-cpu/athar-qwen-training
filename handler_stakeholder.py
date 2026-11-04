@@ -6,6 +6,7 @@ approved exact marker, then return the strict SIX-KEY business JSON object.
 from __future__ import annotations
 from contextlib import nullcontext
 import json
+from difflib import SequenceMatcher
 import os
 import re
 import time
@@ -22,7 +23,7 @@ KEYS = {"how_affected", "interest", "power", "actions_required", "offer_and_comm
 # Stakeholder Strategy Quality v6. These instructions complement the Backend's
 # fully rendered prompt; they do NOT alter the seven template placeholders or
 # the six-key response contract. The backend's prompt remains the task data.
-QUALITY_VERSION = "stakeholder-quality-v6"
+QUALITY_VERSION = "stakeholder-quality-v7"
 
 PRIMARY_SYSTEM_PROMPT = """أنت محلل استراتيجيات أصحاب المصلحة لمنظومة أثر. اتبع طلب الباك المكتمل وبيانات الجمعية، وأعد كائن JSON واحدًا فقط وفق المفاتيح الستة المحددة.
 
@@ -65,6 +66,41 @@ REVIEW_SYSTEM_PROMPT = """أنت مدقق جودة مستقل للنتيجة ا�
 """
 
 
+# V7 strengthens evidence discipline without adding business-output keys.
+# It retains the existing Backend-ready prompt and the same Qwen model.
+PRIMARY_SYSTEM_PROMPT += """
+
+تدقيق إضافي للإسناد والتمييز بين الواقع والمقترح (الإصدار السابع):
+- قبل كتابة أي بند ميّز داخليًا بين: «واقعة مثبتة في مدخلات الجمعية»، «أثر محتمل مشروط»، «خطوة مستقبلية مقترحة». لا تخلط بينهم في الصياغة.
+- لا تُحوِّل اقتراحًا إلى وعد نافذ. «تضمن الجمعية السداد»، «تلتزم الجمعية بعقد»، «تمنح الجمعية مزايا دعائية»، «تزيد الجمعية مشترياتها» عبارات غير مقبولة دون مستند صريح. لا تجعلها التزامًا حتى لو بدت معقولة؛ استخدم «يمكن دراسة ... بعد الاعتماد» فقط لو الفكرة مرتبطة بوقائع الحالة، وإلا احذفها.
+- لا تفترض وجود بنود دفع أو نظام تعاقدات أو حملات ترويجية أو ميزانيات أو موردين بدلاء، ولا تدّعِ نسب الالتزام أو مواصفات لم تُذكر. وجود فئة «موردون» وحده لا يثبت أي شيء من ذلك.
+- عند عدم وجود أدلة مالية/تعاقدية، ركّز على آثار احتياجات الجمعية الموثقة: مواسم التنفيذ، توقيت الاحتياج، وضوح الكميات والمواصفات، وتنسيق التوريد. لا تملأ فراغ المعلومات بتفاصيل جديدة.
+- كل بند في how_affected يصف أثرًا على الفئة. وكل بند في actions_required يبدأ بإجراء عملي تتخذه الجمعية. وكل بند في offer_and_commitments يصف ما تستطيع الجمعية اقتراحه أو إتاحته للفئة، دون الزعم بأنه مضمون أو معتمد.
+- عند تقدير power افحص الأدلة على إمكانية الاستبدال والاعتماد والقدرة على تعطيل التنفيذ. لا تفسّر غياب المعلومات بأنه «قوة منخفضة» تلقائيًا. إذا لم تكفِ الأدلة، ضع ملاحظة محددة مثل «تصنيف قوة الموردين تقديري؛ لا توجد بيانات عن بدائل التوريد أو قابلية الاستبدال» في data_notes، مع الحفاظ على high/low.
+- في تحليل جديد لا يحتوي على نصوص سابقة محفوظة، اكتفِ عادةً من 3 إلى 5 نقاط جوهرية غير مترادفة في كل قائمة. الحد الأعلى التعاقدي 10 ليس هدفًا. في regeneration لا تقصّر قوائم المستخدم السابقة أو تغير تعديلاته لمجرد هذا الهدف.
+- لا تُكرر معنى «مواعيد التوريد» بعدة صياغات مختلفة. فضّل المعلومة المحددة المدعومة على كثرة النصوص؛ البنود غير المسندة تُحذف حتى لو أدّى ذلك لقائمة أقصر.
+"""
+
+REVIEW_SYSTEM_PROMPT += """
+
+قواعد تدقيق نهائية ملزمة للإصدار السابع:
+أ) عامل كل بند في المسودة كادعاء يحتاج دليلًا من backend_prompt. صنّف الادعاء في ذهنك: مثبت / أثر محتمل / إجراء مقترح / غير مسند. احذف «غير مسند» ولا تضف بديلًا جديدًا إلا إن كان نابعًا من المدخلات.
+ب) امنع إطلاق التزامات اقتصادية أو تعاقدية أو ترويجية من تلقاء نفسك: وعود الدفع والضمان والحملات الدعائية وتكبير حجم المشتريات والعقود القائمة لا تجوز دون دليل محدد. التزامات المستقبل تُكتب كـ«يمكن أن تعرض الجمعية...» أو «يُقترح بعد الموافقة»، دون التعهد بوجود قرار.
+ج) اعمل مراجعة مستقلة لتصنيف power: هل يملك أصحاب المصلحة قدرة مثبتة على التأثير أو تعطيل التنفيذ؟ ما مدى إمكانية الاستبدال؟ هل استبدالهم سهل بالفعل؟ إن لم تكن هناك بيانات فلا تتعامل مع low كحقيقة ثابتة، وأبرز أساس التقدير ونقص الأدلة في data_notes.
+د) إذا كان التحليل جديدًا والنسخة السابقة «لا يوجد»، اجعل القوائم الوصفية 3-5 بنود جوهرية كحد مستهدف بدل عشر نقاط متشابهة، ما لم تتطلب بيانات المستخدم خلاف ذلك. في وجود نسخة سابقة احتفظ بالمحتوى الذي أدخله المستخدم حرفيًا.
+هـ) قارن بنود كل قائمة بعضها ببعض لاكتشاف تشابه المعنى حتى لو اختلفت الألفاظ. ادمج المعاني المتكررة ولا تُكرر التوريد أو التواصل أو المواعيد بعدة صيغ.
+و) لا تغيّر أسماء المفاتيح الستة أو قيم high/low، ولا تضف confidence أو reasoning أو citations للمخرجات.
+"""
+
+# Used only after the normal review, and only when a safely identifiable fresh
+# analysis still contains too many points or obvious near-duplicates.
+TARGETED_REPAIR_SYSTEM_PROMPT = """أنت مراجع نهائي لنتيجة تحليل أصحاب المصلحة في منظومة أثر.
+ستستلم backend_prompt الأصلي وreviewed_output وملاحظات الجودة. أعد JSON نهائيًا بالمفاتيح الستة نفسها.
+إذا كانت النسخة السابقة لا يوجد والتحليل جديد، احتفظ بأفضل 3-5 نقاط متمايزة فقط لكل قائمة وصفية، وادمج البنود المترادفة. لا تخترع أي حقيقة أو ميزة أو وعد أو عقد أو شروط دفع غير واردة في backend_prompt. جميع الوعود غير المعتمدة يجب إزالتها، والمقترحات المتاحة تصاغ على أنها «يمكن دراسة ...» فقط عند وجود صلة حقيقية بالأدلة. افحص how_affected من منظور الفئة، وactions_required من منظور إجراءات الجمعية، وoffer_and_commitments من منظور ما يمكن أن تقدمه الجمعية لا ما يلتزم به المورد.
+احترم نصوص التعديلات اليدوية والنسخ السابقة حرفيًا ولا تختصرها. interest وpower قيم high/low فقط، وصنّف power بناء على مدى الاعتماد وإمكانية الاستبدال لا على اسم الفئة. عند نقص الأدلة وثق أن التقدير أولي في data_notes.
+أعد كائن JSON فقط بالمفاتيح how_affected, interest, power, actions_required, offer_and_commitments, data_notes دون أي مفتاح آخر أو نص خارج JSON."""
+
+
 def _quality_review_enabled():
     value = os.environ.get("ATHAR_STAKEHOLDER_QUALITY_REVIEW", "1").strip().lower()
     if value not in {"1", "true", "yes", "0", "false", "no"}:
@@ -79,9 +115,61 @@ def _quality_review_input(original_prompt, first_draft):
     else:
         draft = str(first_draft)
     return json.dumps(
-        {"task": "quality_review_v6", "backend_prompt": original_prompt, "first_draft": draft},
+        {"task": "quality_review_v7", "backend_prompt": original_prompt, "first_draft": draft},
         ensure_ascii=False,
     )
+
+
+def _is_clear_fresh_analysis(prompt):
+    """Conservative guard: never shorten saved/manual material based on guesses.
+
+    The Backend still owns mode and previous values inside its prompt. If the
+    prompt is not unambiguously a new analysis with no saved version, V7 makes
+    no count-based retry. This is NOT used for security or access control.
+    """
+    mode = re.search(r"(?:نوع\s+العملية|mode)\s*[:：]\s*analysis\b", prompt, re.IGNORECASE)
+    previous = re.search(
+        r"(?:النسخة\s+السابقة|previous_version)\s*[:：]\s*"
+        r"(?:لا\s+يوجد|none|null)(?=\s*(?:\n|$))", prompt, re.IGNORECASE,
+    )
+    return bool(mode and previous)
+
+
+def _normalize_comparison(text):
+    # A similarity heuristic only, not a ground-truth semantic evaluator.
+    clean = re.sub(r"[\u064b-\u065f]", "", text)
+    return re.sub(r"[^\w\u0621-\u064a]+", "", clean, flags=re.UNICODE).casefold()
+
+
+def _fresh_quality_issues(result, *, prompt):
+    """Detect objective excess and strong near-duplicates in fresh results only."""
+    if not _is_clear_fresh_analysis(prompt):
+        return []
+    issues = []
+    for key in ("how_affected", "actions_required", "offer_and_commitments"):
+        entries = result[key]
+        if len(entries) > 5:
+            issues.append(f"{key}: expected at most 5 focused points in a fresh analysis; got {len(entries)}")
+        compact = [_normalize_comparison(item) for item in entries]
+        for i in range(len(compact)):
+            for j in range(i + 1, len(compact)):
+                if min(len(compact[i]), len(compact[j])) < 35:
+                    continue
+                if SequenceMatcher(None, compact[i], compact[j]).ratio() >= 0.92:
+                    issues.append(f"{key}: near-duplicate items {i+1} and {j+1}")
+                    break
+            if any(f"{key}: near-duplicate items {i+1} " in issue for issue in issues):
+                break
+    return issues
+
+
+def _targeted_repair_input(original_prompt, reviewed_output, issues):
+    return json.dumps({
+        "task": "quality_repair_v7",
+        "backend_prompt": original_prompt,
+        "reviewed_output": reviewed_output,
+        "issues": issues,
+    }, ensure_ascii=False)
 
 
 def validate_no_exact_repeats(result):
@@ -223,7 +311,8 @@ def dispatch(req, *, load_model, get_model, get_tokenizer, model_lock, inference
                     "prompt_id": "category-strategy-v1", "model": "Qwen/Qwen3-14B",
                     "six_key_response": sorted(KEYS), "worker_retrieval_optional": True,
                     "quality_version": QUALITY_VERSION,
-                    "quality_review_enabled": _quality_review_enabled()}
+                    "quality_review_enabled": _quality_review_enabled(),
+                    "fresh_analysis_repair_supported": True}
         prompt = prepare_prompt(req)
         review_enabled = _quality_review_enabled()
 
@@ -251,6 +340,18 @@ def dispatch(req, *, load_model, get_model, get_tokenizer, model_lock, inference
         # review is enabled but invalid. This preserves the Backend's failure
         # semantics: the category stays unchanged and no regeneration is used.
         final = parse_strategy_json(final_raw)
+        # A targeted third pass is used only when a definitely new analysis
+        # still has excessive or strongly repeated points after review.
+        # No silent truncation: the model must choose the best supported points.
+        issues = _fresh_quality_issues(final, prompt=prompt) if review_enabled else []
+        if issues:
+            repaired_raw = generate(
+                _targeted_repair_input(prompt, final, issues),
+                TARGETED_REPAIR_SYSTEM_PROMPT, True,
+            )
+            final = parse_strategy_json(repaired_raw)
+            if _fresh_quality_issues(final, prompt=prompt):
+                raise StrategyError("QUALITY_GATE_FAILED", "Fresh analysis failed quality repair")
         return validate_no_exact_repeats(final)
     except KnowledgeError as exc:
         # Never show prompts/documents/signed URLs in any failure response or logs.
