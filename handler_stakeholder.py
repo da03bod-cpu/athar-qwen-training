@@ -6,7 +6,6 @@ approved exact marker, then return the strict SIX-KEY business JSON object.
 from __future__ import annotations
 from contextlib import nullcontext
 import json
-import math
 from difflib import SequenceMatcher
 import os
 import re
@@ -24,7 +23,7 @@ KEYS = {"how_affected", "interest", "power", "actions_required", "offer_and_comm
 # Stakeholder Strategy Quality v6. These instructions complement the Backend's
 # fully rendered prompt; they do NOT alter the seven template placeholders or
 # the six-key response contract. The backend's prompt remains the task data.
-QUALITY_VERSION = "stakeholder-quality-v9"
+QUALITY_VERSION = "stakeholder-quality-v8"
 
 PRIMARY_SYSTEM_PROMPT = """أنت محلل استراتيجيات أصحاب المصلحة لمنظومة أثر. اتبع طلب الباك المكتمل وبيانات الجمعية، وأعد كائن JSON واحدًا فقط وفق المفاتيح الستة المحددة.
 
@@ -115,39 +114,6 @@ NOTES_ONLY_REPAIR_SYSTEM_PROMPT = """أنت مدقق تنسيق حقل data_note
 إذا لم توجد معلومات ناقصة مثبتة يمكن وصفها، أعد {"data_notes": []}.
 لا تضف عقودًا أو مواعيد دفع أو تعهدات أو أدلة جديدة، ولا تعيد الحقول الخمسة الأخرى.
 لا تكتب Markdown أو شرحًا خارج JSON.
-"""
-
-# V9: Evidence-first commitments and defensible ordinal judgments.
-# No additional mandatory inference pass; reuse V7's conditional repair only
-# when high-confidence fresh-analysis defects are detected.
-V9_EVIDENCE_RULES = """
-قواعد جودة الإصدار التاسع، ملزمة لكل تحليل جديد:
-- العرض والتعهد من الجمعية يجب أن يكون مرتبطًا مباشرة بوقائع الحالة، ومتاحًا منطقيًا للجمعية، ومقترحًا واضحًا لا وعدًا قائمًا. لا يكفي أن تبدأ العبارة بـ«دراسة إمكانية» لجعل فكرة غير مدعومة مناسبة.
-- ابدأ بالمخرجات البسيطة التي تملك الجمعية تقديمها ضمن نطاق تعاملها المثبت، مثل وضوح متطلبات الخدمة والتنسيق والاستجابة والتوثيق عندما تنطبق على الحالة.
-- امنع المزايا أو المنح أو التمويل أو الدعم اللوجستي أو التسويقي أو الدعاية أو شهادات التكريم أو زيادة المشتريات أو إشراك الفئة في تصميم برامج الجمعية ما لم يوجد في المدخلات سبب محدد وصريح لذلك. لا تقترح هذه المزايا لمجرد أن الفئة موردون أو شركاء.
-- افصل بين «إجراء تقوم به الجمعية» و«ما تعرض الجمعية تقديمه للفئة»: لا تكرر نفس البند لفظيًا في actions_required وoffer_and_commitments. ميّز الأثر على الطرف الآخر من الإجراءات التي سننفذها.
-- حدّد interest من درجة اهتمام الفئة بنتائج الجمعية أو تأثرها بها، وpower من قدرة الفئة على تغيير القرار أو تعطيل التنفيذ. قيّم المؤشرين كلًا على حدة، ولا تجعل أهمية الفئة للجمعية دليلًا آليًا على ارتفاع أو انخفاض أحدهما.
-- اعتمد في power على الاعتماد التشغيلي، بدائل الاستبدال، ندرة العرض، والأثر عند التعطّل عندما تكون المعلومات موجودة. غياب بيانات البدائل لا يثبت power=low. عند نقص المعلومات اكتب صراحة في data_notes أن «تقدير قوة التأثير مبدئي» وأن التحقق يحتاج بيانات محددة، بصرف النظر عن اختيار high أو low.
-- عند غياب دليل كافٍ على درجة اهتمام الفئة، اذكر أن تقدير الاهتمام أولي وما البيانات اللازمة للتحقق، من غير إضافة مفاتيح جديدة أو قيمة ثالثة خارج high/low.
-- إذا كانت بيانات الجمعية محدودة، نقاط قليلة قوية أفضل من بنود كثيرة ضعيفة؛ في التحليل الجديد اكتف عادةً بواحدة إلى خمس نقاط لكل قائمة وفق الأدلة، ولا تختلق نقاطًا للوصول لثلاث نقاط.
-- في regeneration احفظ المحتوى السابق والقرارات اليدوية طبقًا لتعليمات الباك. لا تعِد كتابة نصوص المستخدم أو تختصرها بذريعة قواعد الإصدار التاسع.
-"""
-
-PRIMARY_SYSTEM_PROMPT += "\n" + V9_EVIDENCE_RULES
-REVIEW_SYSTEM_PROMPT += "\n" + V9_EVIDENCE_RULES + """
-خطوة تحقق نهائية قبل إرجاع JSON:
-1) في offer_and_commitments احذف كل عرض لا يملك دليلًا في backend_prompt أو ارتباطًا مباشرًا باحتياجات الفئة؛ «يمكن دراسة» لا يكفي لتبريره.
-2) حدّد هل تضمن العرض ضمانًا ماليًا أو دعمًا أو ترويجًا أو وعودًا تعاقدية أو تغيير نطاق البرامج دون دليل؛ احذفه، ولا تستبدله بمزية جانبية أخرى.
-3) لو بدائل الموردين أو قدرتهم على تعطيل التنفيذ غير معروفة، اذكر بوضوح أن تصنيف power مبدئي وأي بيانات ناقصة، سواء اخترت high أو low.
-4) افحص interest مستقلاً عن power؛ عندما تكون معلومات الاهتمام غير حاسمة، وضّح ذلك في data_notes.
-5) راجع القوائم الثلاث للتداخل والتكرار. لا تملأ العدد؛ اختر النقاط المسندة والواضحة.
-6) احفظ جميع الحقول اليدوية غير المستهدفة في regeneration حرفيًا وفق backend_prompt.
-"""
-TARGETED_REPAIR_SYSTEM_PROMPT += "\n" + V9_EVIDENCE_RULES + """
-في الإصلاح المشروط، أصلح البنود المشار إليها في issues مع الحفاظ على الحقول الستة وصحة JSON.
-إذا ورد دعم تسويقي أو لوجستي أو مالي أو زيادة طلبات أو تكريم أو مشاركة في تصميم برامج من غير دليل صريح في backend_prompt، احذف العرض الجانبي؛ يمكن استبداله بعرض مباشر متواضع مرتبط بتنسيق التعامل المذكور فعليًا، لكن لا تخترع ضمانًا أو خدمة.
-إذا كانت قوة الموردين غير محسومة لغياب البدائل، اترك high/low كتقدير مبني على الأدلة المتاحة وأضف ملاحظة واضحة بأن تصنيف قوة التأثير أولي وما يلزم للتحقق. لا تعتبر القيمة low دليلًا على قلة التأثير.
-احترم أي محتوى سابق محفوظ كما هو إذا لم يكن تحليلًا جديدًا.
 """
 
 MAX_NOTES_REPAIR_CHARS = 8000
@@ -260,75 +226,6 @@ def _normalize_comparison(text):
     return re.sub(r"[^\w\u0621-\u064a]+", "", clean, flags=re.UNICODE).casefold()
 
 
-# Narrow, explainable red-flag checks. These do NOT try to automatically
-# adjudicate the whole Arabic analysis; they request a second look from Qwen.
-# Activated on clearly new analyses only and only for the supplier category.
-_V9_SUPPLIER_OFFER_RISKS = (
-    ("marketing_support", re.compile(r"(?:دعم\s+[^.،؛]{0,38}?(?:تسويق|تسويقي|لوجست)|حملات?\s+(?:ترويج|إعلان)|دعاي[ية])"), ("تسويق", "لوجست", "ترويج", "دعاي")),
-    ("financial_support", re.compile(r"(?:دعم\s+مالي|موارد\s+مالي[ةه]\s+لدعم|تمويل\s+المورد|مخصصات\s+مالي)"), ("دعم مالي", "تمويل المورد", "موارد مالية لدعم")),
-    ("purchase_volume_perk", re.compile(r"(?:زياد[ةه]\s+(?:حجم\s+)?(?:الطلبات|المشتريات)|توسيع\s+(?:حجم\s+)?(?:الطلبات|المشتريات)|تكرار\s+الطلبات\s+كضمان)"), ("زيادة حجم الطلب", "زيادة المشتريات", "توسيع حجم الطلب", "توسيع المشتريات")),
-    ("awards_or_recognition", re.compile(r"(?:شهادات?\s+شكر|تكريم\s+المورد|حملات?\s+تقدير)"), ("شهادات شكر", "تكريم المورد")),
-    ("program_design", re.compile(r"(?:إشراك\s+الموردين\s+في\s+(?:تصميم|تطوير)\s+(?:البرامج|برامج)|مشاركة\s+الموردين\s+في\s+تصميم)"), ("إشراك الموردين في تصميم", "الموردين في تطوير البرامج")),
-)
-
-
-def _v9_is_suppliers(prompt):
-    category = re.search(r"(?:اسم\s*الفئة|category_name)\s*[:：]\s*([^\n\r]+)", prompt, re.I)
-    return bool(category and "مورد" in category.group(1))
-
-
-def _v9_offer_topic_in_evidence(prompt, keywords):
-    # Best-effort heuristic. No negative evidence, templates, or model-generated
-    # statements count as authenticated endorsement of a special perk.
-    in_instructions = False
-    for line in str(prompt).splitlines():
-        line = line.strip()
-        if re.match(r"^#\s*(?:تعليمات|القواعد|المطلوب|توجيهات)", line):
-            in_instructions = True
-        elif re.match(r"^#\s*(?:المدخلات|البيانات|الملفات|المكتبة)", line):
-            in_instructions = False
-        if in_instructions or not any(keyword in line for keyword in keywords):
-            continue
-        if re.search(r"(?:لا\s+توجد|غير\s+متوفر|ليس\s+لدينا|مفقود|غير\s+معروف|لا\s+يوجد|لا\s+تقدم|لا\s+تقترح|ممنوع|لا\s+تفترض|لا\s+تخترع)", line):
-            continue
-        if "مثال" in line:
-            continue
-        return True
-    return False
-
-
-def _v9_supplier_missing_power_evidence(prompt):
-    # Only when the provided prompt affirmatively states that the information
-    # needed for power assessment is missing; not on name alone.
-    for line in str(prompt).splitlines():
-        if re.search(r"(?:لا\s+توجد|لا\s+يوجد|لا\s+نعرف|غير\s+متوفر|غير\s+معروف|دون\s+معلومات)", line) and re.search(r"(?:بدائل|استبدال|عدد\s+الموردين|الاعتماد\s+على\s+مورد)", line):
-            return True
-    return False
-
-
-def _v9_has_power_uncertainty_note(notes):
-    return any(
-        re.search(r"(?:قوة|التأثير|power)", str(note), re.I)
-        and re.search(r"(?:تقدير|مبدئي|غير\s+محسوم|غير\s+مؤكد|للتحقق|لتحديد|لا\s+يمكن\s+الجزم)", str(note))
-        for note in notes
-    )
-
-
-def _v9_quality_issues(result, *, prompt):
-    """Return only non-sensitive issue codes; don't expose organization data."""
-    if not _v9_is_suppliers(prompt):
-        return []
-    issues = []
-    for key, pattern, evidence_keywords in _V9_SUPPLIER_OFFER_RISKS:
-        if not _v9_offer_topic_in_evidence(prompt, evidence_keywords):
-            if any(pattern.search(offer) for offer in result["offer_and_commitments"]):
-                issues.append("offer_and_commitments: ungrounded_special_perk:" + key)
-    if (_v9_supplier_missing_power_evidence(prompt)
-            and not _v9_has_power_uncertainty_note(result["data_notes"])):
-        issues.append("power: missing_provisional_assessment_note")
-    return issues
-
-
 def _fresh_quality_issues(result, *, prompt):
     """Detect objective excess and strong near-duplicates in fresh results only."""
     if not _is_clear_fresh_analysis(prompt):
@@ -348,7 +245,6 @@ def _fresh_quality_issues(result, *, prompt):
                     break
             if any(f"{key}: near-duplicate items {i+1} " in issue for issue in issues):
                 break
-    issues.extend(_v9_quality_issues(result, prompt=prompt))
     return issues
 
 
@@ -449,12 +345,10 @@ def _infer_with_existing_qwen(
     try:
         max_tokens = int(os.environ.get(max_tokens_var, "1900"))
         max_input = int(os.environ.get("ATHAR_STAKEHOLDER_MAX_INPUT_TOKENS", "24000"))
-        max_time = float(os.environ.get(max_time_var, "0"))  # 0 disables the per-generate time cap
+        max_time = float(os.environ.get(max_time_var, "180"))
     except (ValueError, TypeError):
         raise StrategyError("INVALID_CONFIGURATION", "Invalid strategy inference limits") from None
-    if (not 100 <= max_tokens <= 4000 or not 1000 <= max_input <= 28000
-            or not math.isfinite(max_time)
-            or (max_time != 0 and not 10 <= max_time <= 3600)):
+    if not 100 <= max_tokens <= 4000 or not 1000 <= max_input <= 28000 or not 10 <= max_time <= 600:
         raise StrategyError("INVALID_CONFIGURATION", "Invalid strategy inference limits")
 
     with model_lock:
@@ -481,20 +375,17 @@ def _infer_with_existing_qwen(
         device = next(model.parameters()).device
         encoded = {k: v.to(device) for k, v in encoded.items()}
         adapter_context = model.disable_adapter() if hasattr(model, "disable_adapter") else nullcontext()
-        generation_settings = {
-            "max_new_tokens": max_tokens,
-            "do_sample": False,
-            "repetition_penalty": 1.04,
-            "eos_token_id": tok.eos_token_id,
-            "pad_token_id": tok.pad_token_id,
-            "use_cache": True,
-        }
-        # Omitting max_time is deliberate: max_new_tokens and EOS end generation.
-        # A positive env value can optionally restore the soft generation time cap.
-        if max_time > 0:
-            generation_settings["max_time"] = max_time
         with adapter_context, torch.inference_mode():
-            result = model.generate(**encoded, **generation_settings)
+            result = model.generate(
+                **encoded,
+                max_new_tokens=max_tokens,
+                max_time=max_time,
+                do_sample=False,
+                repetition_penalty=1.04,
+                eos_token_id=tok.eos_token_id,
+                pad_token_id=tok.pad_token_id,
+                use_cache=True,
+            )
         return tok.decode(
             result[0, encoded["input_ids"].shape[1]:], skip_special_tokens=True,
         )
@@ -509,9 +400,7 @@ def dispatch(req, *, load_model, get_model, get_tokenizer, model_lock, inference
                     "quality_version": QUALITY_VERSION,
                     "quality_review_enabled": _quality_review_enabled(),
                     "fresh_analysis_repair_supported": True,
-                    "data_notes_schema_repair_supported": True,
-                    "evidence_grounding_v9": True,
-                    "conditional_evidence_repair_supported": True}
+                    "data_notes_schema_repair_supported": True}
         prompt = prepare_prompt(req)
         review_enabled = _quality_review_enabled()
 
