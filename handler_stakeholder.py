@@ -1,5 +1,5 @@
 """Stakeholder Strategy — legacy Backend-ready prompt and V5 worker retrieval.
-
+ 
 The prompt template is owned by the Backend. We inject knowledge only at the
 approved exact marker, then return the strict SIX-KEY business JSON object.
 """
