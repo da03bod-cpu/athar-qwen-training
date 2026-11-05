@@ -10,8 +10,12 @@ ENV JUPYTER_DISABLE=1 \
     ATHAR_STAKEHOLDER_MAX_INPUT_TOKENS=24000 \
     ATHAR_STAKEHOLDER_MAX_NEW_TOKENS=1900 \
     ATHAR_STAKEHOLDER_REVIEW_MAX_NEW_TOKENS=1900 \
-    ATHAR_STAKEHOLDER_GENERATION_MAX_SECONDS=180 \
-    ATHAR_STAKEHOLDER_REVIEW_MAX_SECONDS=180
+    ATHAR_STAKEHOLDER_GENERATION_MAX_SECONDS=0 \
+    ATHAR_STAKEHOLDER_REVIEW_MAX_SECONDS=0 \
+    UV_HTTP_TIMEOUT=120 \
+    UV_HTTP_RETRIES=5 \
+    HF_HUB_ETAG_TIMEOUT=30 \
+    HF_HUB_DOWNLOAD_TIMEOUT=180
 
 WORKDIR /workspace/data/athar
 
@@ -20,8 +24,8 @@ RUN uv pip install --python /workspace/axolotl-venv/bin/python \
     runpod 'numpy>=1.26,<3' 'faiss-cpu>=1.9,<2' \
     'pymupdf>=1.24,<2' 'python-docx>=1.1,<2'
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends git git-lfs ca-certificates \
+RUN apt-get -o Acquire::Retries=3 update \
+    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends git git-lfs ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 RUN git lfs install
 
@@ -49,5 +53,5 @@ RUN /workspace/axolotl-venv/bin/python -m py_compile \
     handler.py handler_advisory_council.py handler_roadmap.py \
     handler_knowledge.py handler_stakeholder.py knowledge/*.py
 
-LABEL athar.redeploy="2026-11-05-knowledge-v5-stakeholder-quality-v6"
+LABEL athar.redeploy="2026-11-05-stakeholder-v9-no-inference-time-cap"
 ENTRYPOINT ["/workspace/axolotl-venv/bin/python", "-u", "/workspace/data/athar/handler.py"]

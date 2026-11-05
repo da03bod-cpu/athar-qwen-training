@@ -1,11 +1,12 @@
 """Stakeholder Strategy — legacy Backend-ready prompt and V5 worker retrieval.
- 
+
 The prompt template is owned by the Backend. We inject knowledge only at the
 approved exact marker, then return the strict SIX-KEY business JSON object.
 """
 from __future__ import annotations
 from contextlib import nullcontext
 import json
+import math
 from difflib import SequenceMatcher
 import os
 import re
@@ -448,10 +449,12 @@ def _infer_with_existing_qwen(
     try:
         max_tokens = int(os.environ.get(max_tokens_var, "1900"))
         max_input = int(os.environ.get("ATHAR_STAKEHOLDER_MAX_INPUT_TOKENS", "24000"))
-        max_time = float(os.environ.get(max_time_var, "180"))
+        max_time = float(os.environ.get(max_time_var, "0"))  # 0 disables the per-generate time cap
     except (ValueError, TypeError):
         raise StrategyError("INVALID_CONFIGURATION", "Invalid strategy inference limits") from None
-    if not 100 <= max_tokens <= 4000 or not 1000 <= max_input <= 28000 or not 10 <= max_time <= 600:
+    if (not 100 <= max_tokens <= 4000 or not 1000 <= max_input <= 28000
+            or not math.isfinite(max_time)
+            or (max_time != 0 and not 10 <= max_time <= 3600)):
         raise StrategyError("INVALID_CONFIGURATION", "Invalid strategy inference limits")
 
     with model_lock:
@@ -478,17 +481,20 @@ def _infer_with_existing_qwen(
         device = next(model.parameters()).device
         encoded = {k: v.to(device) for k, v in encoded.items()}
         adapter_context = model.disable_adapter() if hasattr(model, "disable_adapter") else nullcontext()
+        generation_settings = {
+            "max_new_tokens": max_tokens,
+            "do_sample": False,
+            "repetition_penalty": 1.04,
+            "eos_token_id": tok.eos_token_id,
+            "pad_token_id": tok.pad_token_id,
+            "use_cache": True,
+        }
+        # Omitting max_time is deliberate: max_new_tokens and EOS end generation.
+        # A positive env value can optionally restore the soft generation time cap.
+        if max_time > 0:
+            generation_settings["max_time"] = max_time
         with adapter_context, torch.inference_mode():
-            result = model.generate(
-                **encoded,
-                max_new_tokens=max_tokens,
-                max_time=max_time,
-                do_sample=False,
-                repetition_penalty=1.04,
-                eos_token_id=tok.eos_token_id,
-                pad_token_id=tok.pad_token_id,
-                use_cache=True,
-            )
+            result = model.generate(**encoded, **generation_settings)
         return tok.decode(
             result[0, encoded["input_ids"].shape[1]:], skip_special_tokens=True,
         )
