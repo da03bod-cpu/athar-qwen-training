@@ -25,9 +25,9 @@ RUN uv pip install --python /workspace/axolotl-venv/bin/python \
     'pymupdf>=1.24,<2' 'python-docx>=1.1,<2'
 
 RUN apt-get -o Acquire::Retries=3 update \
-    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends git git-lfs ca-certificates \
+    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends git git-lfs ca-certificates poppler-utils \
     && rm -rf /var/lib/apt/lists/*
-RUN git lfs install
+RUN command -v pdftotext && git lfs install
 
 RUN test -x /workspace/axolotl-venv/bin/python \
     && /workspace/axolotl-venv/bin/python -c "import runpod, torch, transformers, peft, bitsandbytes, faiss, fitz, docx; print('ATHAR RUNTIME OK', torch.__version__, transformers.__version__, peft.__version__)"
@@ -53,5 +53,5 @@ RUN /workspace/axolotl-venv/bin/python -m py_compile \
     handler.py handler_advisory_council.py handler_roadmap.py \
     handler_knowledge.py handler_stakeholder.py knowledge/*.py
 
-LABEL athar.redeploy="2026-11-05-stakeholder-v9-no-inference-time-cap"
+LABEL athar.redeploy="2026-11-15-arabic-pdf-spread-extraction-v1"
 ENTRYPOINT ["/workspace/axolotl-venv/bin/python", "-u", "/workspace/data/athar/handler.py"]

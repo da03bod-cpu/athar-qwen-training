@@ -36,13 +36,17 @@ def _run_index(req, *, delete=False):
                             generation=expected, embedding=embedding)
     elif idx.get("previous_index_ref"):
         raise KnowledgeError("INVALID_REQUEST", "Unexpected previous index for generation zero")
+    operation = "delete" if delete else req.get("operation", "upsert")
+    if operation not in ("delete", "upsert", "update_metadata"):
+        raise KnowledgeError("INVALID_REQUEST", "Invalid indexing operation")
     pages = None
-    if not delete and resource.get("source_ref"):
+    if operation == "update_metadata" and resource.get("source_ref"):
+        raise KnowledgeError("INVALID_REQUEST", "Metadata refresh must not download source")
+    if operation == "upsert" and resource.get("source_ref"):
         raw = download(resource["source_ref"], max_bytes=MAX_SOURCE_BYTES)
         pages = extract_pages(raw, resource.get("mime_type"))
     new_pack = make_pack(previous=old, resource=resource, pages=pages,
-                         embedding=embedding, generation=expected+1,
-                         operation="delete" if delete else "upsert")
+                         embedding=embedding, generation=expected+1, operation=operation)
     if new_pack is None:
         return {"status": "INDEX_UNCHANGED", "type": req["type"], "run_id": req.get("run_id"),
                 "resource_id": resource["resource_id"], "resource_revision": resource["revision"],
@@ -75,7 +79,9 @@ def run_search(req):
                            project_id=project_id, generation=generation, embedding=encoding)
     rows = search_pack(pack, req.get("query", ""), max_chunks=knowledge.get("max_chunks", 8),
                        max_evidence_tokens=knowledge.get("max_evidence_tokens", 3500),
-                       advisor_id=knowledge.get("advisor_id"), is_meta=knowledge.get("is_meta", False), encoding=encoding)
+                       advisor_id=knowledge.get("advisor_id"), is_meta=knowledge.get("is_meta", False),
+                       resource_id=knowledge.get("resource_id"),
+                       resource_ids=knowledge.get("resource_ids"), encoding=encoding)
     return {"status": "COMPLETED", "type": "knowledge_search", "run_id": req.get("run_id"),
             "index_generation": generation, "index_cache_hit": hit, "hits": rows}
 
