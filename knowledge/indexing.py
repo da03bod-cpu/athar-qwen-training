@@ -187,10 +187,14 @@ def make_pack(*, previous: IndexPack | None, resource: dict, pages: list | None,
             raise KnowledgeError("INDEX_STALE", "Expected generation mismatch")
         resources = dict(previous.manifest["resources"])
         existing = resources.get(resource_id)
-        if existing and revision <= existing["revision"]:
-            if revision == existing["revision"]:
-                return None  # Idempotent repeated event; skip upload.
-            raise KnowledgeError("INDEX_STALE", "Older resource revision rejected")
+        if existing:
+            if revision < existing["revision"]:
+                raise KnowledgeError("INDEX_STALE", "Older resource revision rejected")
+            # A delete may carry the same revision as the indexed document:
+            # Backend deletion does not increment the document revision.
+            # Equal revision is idempotent ONLY for upsert, not delete.
+            if operation == "upsert" and revision == existing["revision"]:
+                return None  # Idempotent repeated upsert; skip upload.
         keep = [i for i, row in enumerate(previous.rows) if row["resource_id"] != resource_id]
         rows = [previous.rows[i].copy() for i in keep]
         old_vectors = previous.vectors[keep]
