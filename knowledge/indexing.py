@@ -146,8 +146,39 @@ def make_pack(*, previous: IndexPack | None, resource: dict, pages: list | None,
         raise KnowledgeError("INVALID_REQUEST", "Resource revision must be a positive integer")
     if type(generation) is not int or generation < 1:
         raise KnowledgeError("INVALID_REQUEST", "Invalid generation")
-    if operation not in ("upsert", "delete"):
+    if operation not in ("upsert", "delete", "update_metadata"):
         raise KnowledgeError("INVALID_REQUEST", "Unsupported indexing operation")
+    if operation == "update_metadata":
+        if previous is None:
+            raise KnowledgeError("INDEX_NOT_READY", "Cannot update metadata without an index")
+        same_scope(previous.manifest, scope, org, project)
+        if previous.manifest["generation"] != generation - 1:
+            raise KnowledgeError("INDEX_STALE", "Expected generation mismatch")
+        if previous.manifest["embedding_model_id"] != embedding.id or previous.manifest["vector_dim"] != embedding.dim:
+            raise KnowledgeError("INDEX_INTEGRITY_FAILED", "Embedding configuration mismatch")
+        old_meta = previous.manifest.get("resources", {}).get(resource_id)
+        if old_meta is None or revision != old_meta["revision"] or pages is not None:
+            raise KnowledgeError("INDEX_STALE", "Metadata refresh requires current resource revision")
+        title = resource.get("title", old_meta.get("title", ""))
+        if not isinstance(title, str) or not title.strip() or len(title) > 300:
+            raise KnowledgeError("INVALID_REQUEST", "Invalid resource title")
+        updated = dict(old_meta, title=title.strip())
+        if scope == "advisor_library":
+            acl_resource = {
+                "advisors": resource.get("advisors", old_meta.get("advisors", [])),
+                "include_meta_advisor": resource.get("include_meta_advisor", old_meta.get("include_meta_advisor", False)),
+            }
+            updated["advisors"], updated["include_meta_advisor"] = validate_advisor_acl(acl_resource)
+            layer = resource.get("layer", old_meta.get("layer", "central"))
+            if layer not in ("central", "specialized", "sectoral", "cases"):
+                raise KnowledgeError("INVALID_REQUEST", "Invalid advisor layer")
+            updated["layer"] = layer
+        resources = dict(previous.manifest["resources"], **{resource_id: updated})
+        rows = [dict(row, title=title.strip()) if row["resource_id"] == resource_id else row.copy()
+                for row in previous.rows]
+        manifest = dict(previous.manifest, generation=generation, resources=resources)
+        # Refresh the indexed source title, but never recompute embeddings.
+        return IndexPack(manifest, rows, previous.vectors.copy(), _sqlite_blob(rows), previous.faiss_blob)
     if previous:
         same_scope(previous.manifest, scope, org, project)
         if previous.manifest["embedding_model_id"] != embedding.id or previous.manifest["vector_dim"] != embedding.dim:

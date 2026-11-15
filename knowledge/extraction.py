@@ -104,8 +104,12 @@ def _pdf_extract_pages(raw: bytes):
     return result
 
 def extract_pages(raw: bytes, mime_type: str):
-    if mime_type not in ALLOWED_MIMES or not isinstance(raw, bytes):
-        raise KnowledgeError("SOURCE_UNSUPPORTED", "Unsupported file format")
+    if not isinstance(raw, bytes):
+        raise KnowledgeError("SOURCE_UNREADABLE", "Invalid source bytes")
+    if mime_type not in ALLOWED_MIMES:
+        # The Backend accepts uploads and marks unsupported formats as failed
+        # asynchronously. A spreadsheet is not silently treated as CSV.
+        raise KnowledgeError("SOURCE_UNREADABLE", "No supported text extraction for this file format")
     if len(raw) > MAX_SOURCE_BYTES:
         raise KnowledgeError("DOCUMENT_TOO_LARGE")
     try:
