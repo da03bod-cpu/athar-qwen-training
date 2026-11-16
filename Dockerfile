@@ -47,11 +47,12 @@ COPY handler_roadmap.py ./handler_roadmap.py
 COPY knowledge/ ./knowledge/
 COPY handler_knowledge.py ./handler_knowledge.py
 COPY handler_stakeholder.py ./handler_stakeholder.py
+COPY handler_stakeholder_screens.py ./handler_stakeholder_screens.py
 COPY handler.py ./handler.py
 
 RUN /workspace/axolotl-venv/bin/python -m py_compile \
     handler.py handler_advisory_council.py handler_roadmap.py \
-    handler_knowledge.py handler_stakeholder.py knowledge/*.py
+    handler_knowledge.py handler_stakeholder.py handler_stakeholder_screens.py knowledge/*.py
 
-LABEL athar.redeploy="2026-11-15-arabic-pdf-spread-extraction-v1"
+LABEL athar.redeploy="2026-11-16-stakeholder-v11-merged-latest-github"
 ENTRYPOINT ["/workspace/axolotl-venv/bin/python", "-u", "/workspace/data/athar/handler.py"]

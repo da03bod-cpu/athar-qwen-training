@@ -18240,6 +18240,22 @@ def _handler_impl(job):
         from handler_knowledge import dispatch as knowledge_dispatch
         return knowledge_dispatch(job_input)
 
+    # New Stakeholder Structure and Measurement routes (P1 / P3 / P4).
+    # Use the SAME Qwen model and endpoint; do not alter legacy routes.
+    if request_type in (
+        "stakeholder_category_extraction",
+        "stakeholder_survey_questions",
+        "stakeholder_council_analysis",
+    ):
+        from handler_stakeholder_screens import dispatch as screens_dispatch
+        return screens_dispatch(
+            job_input,
+            load_model=ensure_rich_router_model,
+            get_model=lambda: _RICH_MODEL,
+            get_tokenizer=lambda: _RICH_TOKENIZER,
+            model_lock=INFERENCE_MODEL_LOCK,
+        )
+
     if request_type == "stakeholder_strategy":
         from handler_stakeholder import dispatch as stakeholder_dispatch
         return stakeholder_dispatch(
