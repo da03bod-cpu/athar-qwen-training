@@ -64,15 +64,27 @@ def _extract_categories(out):
     categories = out["categories"]
     if not isinstance(categories, list) or not categories:
         reject("categories must be a nonempty array")
-    for cat in categories:
-        if not isinstance(cat, dict) or set(cat) != {"name", "type", "affected", "interest", "power", "actions", "promises", "source_reason"}:
-            reject("Malformed category fields")
-        if not (_valid_string(cat["name"], max_len=80) and cat["type"] in ("داخلي", "خارجي")
-                and _valid_string(cat["affected"]) and cat["interest"] in ("High", "Low")
-                and cat["power"] in ("High", "Low") and _text_list(cat["actions"], 2, 5, 600)
-                and _text_list(cat["promises"], 2, 5, 600)
-                and _valid_string(cat["source_reason"], max_len=200)):
-            reject("Invalid category data")
+    # Report only schema field/index (never the generated category content).
+    # The Backend P1 schema has NO per-point maxLength for actions/promises.
+    fields = {"name", "type", "affected", "interest", "power", "actions", "promises", "source_reason"}
+    for index, cat in enumerate(categories):
+        if not isinstance(cat, dict):
+            reject(f"Malformed category fields: categories[{index}]")
+        if set(cat) != fields:
+            reject(f"Malformed category fields: categories[{index}]")
+        rules = (
+            ("name", _valid_string(cat["name"], max_len=80)),
+            ("type", cat["type"] in ("داخلي", "خارجي")),
+            ("affected", _valid_string(cat["affected"])),
+            ("interest", cat["interest"] in ("High", "Low")),
+            ("power", cat["power"] in ("High", "Low")),
+            ("actions", _text_list(cat["actions"], 2, 5, None)),
+            ("promises", _text_list(cat["promises"], 2, 5, None)),
+            ("source_reason", _valid_string(cat["source_reason"], max_len=200)),
+        )
+        for field, valid in rules:
+            if not valid:
+                reject(f"Invalid category data: categories[{index}].{field}")
     extra = out.get("existing_completions", [])
     if not isinstance(extra, list):
         reject("existing_completions must be an array")
