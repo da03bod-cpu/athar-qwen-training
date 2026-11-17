@@ -18633,6 +18633,36 @@ def _handler_impl(job):
     }
 
 
+def _council_trace(job):
+    if not isinstance(job, dict):
+        return None
+    request = job.get("input")
+    if (
+        not isinstance(request, dict)
+        or request.get("type") != "advisory_consultation"
+        or request.get("topic") != "interventions"
+        or request.get("preflight")
+    ):
+        return None
+
+    job_id = job.get("id")
+    if not isinstance(job_id, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,96}", job_id):
+        job_id = None
+    kind = str(request.get("kind") or "generate").strip().lower()
+    trace = {
+        "runpod_job_id": job_id,
+        "kind": kind if kind in {"generate", "regenerate"} else "invalid",
+    }
+    # The caller may send its own UUID to join the worker events to its logs.
+    # Never log request bodies, document references, or arbitrary caller text.
+    trace_id = request.get("athar_trace_id")
+    if isinstance(trace_id, str) and re.fullmatch(
+        r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", trace_id
+    ):
+        trace["athar_trace_id"] = trace_id.lower()
+    return trace
+
+
 def handler(job):
     """
     Process-safe wrapper around the restored full production handler.
@@ -18640,8 +18670,18 @@ def handler(job):
     A single bad request must return a structured failure but must not kill the
     warm RunPod worker or remove support for the other production routes.
     """
+    trace_context = _council_trace(job)
+    if trace_context is not None:
+        started = time.perf_counter()
+        outcome = "exception"
+        print("[council-trace] " + json.dumps({**trace_context, "event": "worker_started"}), flush=True)
     try:
-        return _handler_impl(job)
+        result = _handler_impl(job)
+        if trace_context is not None:
+            outcome = "application_failed" if isinstance(result, dict) and (
+                result.get("status") == "FAILED" or "error" in result
+            ) else "returned"
+        return result
 
     except Exception as exc:
         trace = traceback.format_exc()
@@ -18660,6 +18700,14 @@ def handler(job):
             "status": "FAILED",
             "error": f"{type(exc).__name__}: {exc}",
         }
+    finally:
+        if trace_context is not None:
+            print("[council-trace] " + json.dumps({
+                **trace_context,
+                "event": "worker_finished",
+                "outcome": outcome,
+                "elapsed_seconds": round(time.perf_counter() - started, 3),
+            }), flush=True)
 
 
 def main():

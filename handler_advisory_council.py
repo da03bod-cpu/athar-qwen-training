@@ -44,6 +44,8 @@ ADVISOR_REGISTRY_PATH = Path(
 MAX_MODEL_INPUT_TOKENS = int(os.getenv("MAX_MODEL_INPUT_TOKENS", "30000"))
 ADVISOR_MAX_NEW_TOKENS = int(os.getenv("ADVISOR_MAX_NEW_TOKENS", "1400"))
 META_MAX_NEW_TOKENS = max(int(os.getenv("META_MAX_NEW_TOKENS", "2200")), 1600)
+SPECIALIST_BATCH_MAX_SIZE = 4
+SPECIALIST_BATCH_MAX_PADDED_TOKENS = 32_768
 GEN_TEMPERATURE = float(os.getenv("GEN_TEMPERATURE", "0.20"))
 GEN_TOP_P = float(os.getenv("GEN_TOP_P", "0.90"))
 COUNCIL_META_MODE = os.getenv("COUNCIL_META_MODE", "adapter").strip().lower()
@@ -61,6 +63,20 @@ INTERACTION_TYPES = {
     "SCOPE CONFLICT",
 }
 CONFIDENCE_LEVELS = {"High", "Medium", "Low"}
+
+
+class _SpecialistBatchTooWide(Exception):
+    pass
+
+
+def _specialist_batch_size() -> int:
+    try:
+        size = int(os.getenv("COUNCIL_SPECIALIST_BATCH_SIZE", "1"))
+    except ValueError:
+        size = 0
+    if not 1 <= size <= SPECIALIST_BATCH_MAX_SIZE:
+        raise ValueError("COUNCIL_SPECIALIST_BATCH_SIZE must be an integer from 1 to 4.")
+    return size
 
 
 
@@ -519,6 +535,51 @@ class AtharCouncilEngine:
                     self.tokenizer.decode(generated, skip_special_tokens=True)
                 )
 
+    def _generate_specialist_batch(self, prompts: List[tuple[str, str]]) -> List[str]:
+        """Decode independent specialist prompts in a single call to the shared model."""
+        rows = []
+        for system_prompt, user_prompt in prompts:
+            rendered = self._render_chat(system_prompt, user_prompt)
+            ids = self.tokenizer(rendered, return_attention_mask=False)["input_ids"]
+            if len(ids) > MAX_MODEL_INPUT_TOKENS:
+                raise ValueError(
+                    f"Input too large: {len(ids)} tokens > {MAX_MODEL_INPUT_TOKENS}. "
+                    "The authoritative prompt was NOT truncated."
+                )
+            rows.append(ids)
+
+        width = max(map(len, rows))
+        if width * len(rows) > SPECIALIST_BATCH_MAX_PADDED_TOKENS:
+            raise _SpecialistBatchTooWide
+
+        pad = self.tokenizer.pad_token_id
+        if pad is None:
+            pad = self.tokenizer.eos_token_id
+        # Decoder-only generation needs left padding. Build the mask from lengths,
+        # since an EOS token may also be the pad token and can occur in real input.
+        missing = [width - len(ids) for ids in rows]
+        input_rows = [[pad] * n + ids for n, ids in zip(missing, rows)]
+        mask_rows = [[0] * n + [1] * len(ids) for n, ids in zip(missing, rows)]
+        with self.model_lock, torch.inference_mode():
+            self.model.set_adapter("specialist")
+            device = next(self.model.parameters()).device
+            output = self.model.generate(
+                input_ids=torch.tensor(input_rows, device=device),
+                attention_mask=torch.tensor(mask_rows, device=device),
+                max_new_tokens=min(ADVISOR_MAX_NEW_TOKENS, 1000),
+                repetition_penalty=1.10,
+                no_repeat_ngram_size=8,
+                eos_token_id=self.tokenizer.eos_token_id,
+                pad_token_id=pad,
+                use_cache=True,
+                do_sample=False,
+            )
+            # Drop the entire padded input width, not the original length per row.
+            continuations = self.tokenizer.batch_decode(output[:, width:], skip_special_tokens=True)
+        if len(continuations) != len(rows):
+            raise RuntimeError("Specialist batch returned an unexpected number of opinions.")
+        return [self.clean_model_text(text) for text in continuations]
+
     @staticmethod
     def _payload(request: Dict[str, Any]) -> Dict[str, Any]:
         """Return Screen-3 payload for the current backend contract."""
@@ -735,12 +796,12 @@ class AtharCouncilEngine:
 
         return False
 
-    def _run_advisor(
+    def _prepare_advisor(
         self,
         advisor: Dict[str, Any],
         request: Dict[str, Any],
         selected_council: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
+    ) -> tuple[str, Dict[str, Any]]:
         prompt = self._load_prompt(ADVISOR_PROMPTS_DIR / advisor["prompt_file"])
         scope_contract = self._extract_scope_contract(prompt)
         other_selected = [
@@ -793,17 +854,33 @@ class AtharCouncilEngine:
             "case_context": self._shared_context(request),
         }
 
-        user_prompt = json.dumps(task, ensure_ascii=False, indent=2)
+        return prompt, task
+
+    def _run_advisor(
+        self,
+        advisor: Dict[str, Any],
+        request: Dict[str, Any],
+        selected_council: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        prompt, task = self._prepare_advisor(advisor, request, selected_council)
         opinion = self._generate(
             "specialist",
             prompt,
-            user_prompt,
+            json.dumps(task, ensure_ascii=False, indent=2),
             min(ADVISOR_MAX_NEW_TOKENS, 1000),
             deterministic=True,
             repetition_penalty=1.10,
             no_repeat_ngram_size=8,
         )
+        return self._finish_advisor(advisor, prompt, task, opinion)
 
+    def _finish_advisor(
+        self,
+        advisor: Dict[str, Any],
+        prompt: str,
+        task: Dict[str, Any],
+        opinion: str,
+    ) -> Dict[str, Any]:
         if self._advisor_output_is_bad(opinion):
             retry_task = dict(task)
             retry_task["instruction"] = (
@@ -840,6 +917,70 @@ class AtharCouncilEngine:
             "advisor_name_ar": advisor["advisor_name_ar"],
             "opinion": opinion,
         }
+
+    def _run_specialists(
+        self,
+        request: Dict[str, Any],
+        selected: List[Dict[str, Any]],
+        advisor_timings: Dict[str, float],
+        batch_timings: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        size = _specialist_batch_size()
+
+        def run_group(group: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            if len(group) == 1:
+                advisor = group[0]
+                advisor_id = advisor["advisor_id"]
+                print(f"[council] Starting Specialist {advisor_id}...", flush=True)
+                started = time.perf_counter()
+                output = self._run_advisor(advisor, request, selected)
+                elapsed = time.perf_counter() - started
+                advisor_timings[advisor_id] = round(elapsed, 3)
+                print(f"[council] Finished Specialist {advisor_id} in {elapsed:.2f}s", flush=True)
+                return [output]
+
+            prepared = [self._prepare_advisor(advisor, request, selected) for advisor in group]
+            prompts = [(prompt, json.dumps(task, ensure_ascii=False, indent=2)) for prompt, task in prepared]
+            started = time.perf_counter()
+            try:
+                opinions = self._generate_specialist_batch(prompts)
+            except _SpecialistBatchTooWide:
+                reason = "padded_token_limit"
+            except torch.cuda.OutOfMemoryError:
+                reason = "gpu_out_of_memory"
+            else:
+                # The batch is timed once; recording its duration for each advisor would
+                # overstate worker time and hide retries of individual opinions.
+                generation = time.perf_counter() - started
+                outputs = [
+                    self._finish_advisor(advisor, prompt, task, opinion)
+                    for advisor, (prompt, task), opinion in zip(group, prepared, opinions)
+                ]
+                elapsed = time.perf_counter() - started
+                batch_timings.append({
+                    "size": len(group),
+                    "generation": round(generation, 3),
+                    "total": round(elapsed, 3),
+                })
+                print(
+                    f"[council] Specialist batch complete: size={len(group)} "
+                    f"generation_seconds={generation:.3f} total_seconds={elapsed:.3f}",
+                    flush=True,
+                )
+                return outputs
+
+            # Leaving the exception block releases the failed CUDA call's traceback.
+            # Split only on known resource limits. Other errors must surface normally.
+            elapsed = time.perf_counter() - started
+            batch_timings.append({"size": len(group), "fallback": reason, "total": round(elapsed, 3)})
+            print(f"[council] Splitting specialist batch: size={len(group)} reason={reason}", flush=True)
+            middle = len(group) // 2
+            return run_group(group[:middle]) + run_group(group[middle:])
+
+        outputs = []
+        for i in range(0, len(selected), size):
+            outputs.extend(run_group(selected[i : i + size]))
+        return outputs
 
     def _run_advisor_screen3_intervention(
         self,
@@ -6811,17 +6952,10 @@ class AtharCouncilEngine:
             selected = self._resolve_selected_advisors(request)
             advisor_outputs: List[Dict[str, Any]] = []
             advisor_timings: Dict[str, float] = {}
+            batch_timings: List[Dict[str, Any]] = []
 
             if kind == "generate":
-                for item in selected:
-                    advisor_id = item["advisor_id"]
-                    print(f"[council] Starting Specialist {advisor_id}...", flush=True)
-                    started = time.perf_counter()
-                    output = self._run_advisor(item, request, selected)
-                    elapsed = time.perf_counter() - started
-                    advisor_timings[advisor_id] = round(elapsed, 3)
-                    advisor_outputs.append(output)
-                    print(f"[council] Finished Specialist {advisor_id} in {elapsed:.2f}s", flush=True)
+                advisor_outputs = self._run_specialists(request, selected, advisor_timings, batch_timings)
 
                 resolved_meta = self._resolve_meta_advisor(request)
                 print(
@@ -6894,6 +7028,7 @@ class AtharCouncilEngine:
                 "meta_debug": getattr(self, "_last_meta_debug", {}),
                 "timings_seconds": {
                     "advisors": advisor_timings,
+                    **({"specialist_batches": batch_timings} if batch_timings else {}),
                     "meta": round(meta_elapsed, 3),
                     "total": round(total_elapsed, 3),
                 },
